@@ -437,6 +437,89 @@ fn test_broker_context_event_roundtrip() -> Result<()> {
                 fragments: Vec::new(),
                 metadata: serde_json::json!({"name": "memory"}),
             },
+            BrokerContextItem {
+                id: "session:ses_prior_123:42".to_string(),
+                kind: "session_search_hit".to_string(),
+                scope: "project".to_string(),
+                content_format: "plain_text".to_string(),
+                title: Some("Prior session match".to_string()),
+                summary: Some("Search hit from a related broker session".to_string()),
+                content: Some("The graph adapter should keep provenance with retrieved context.".to_string()),
+                tags: vec!["search_hit".to_string(), "session".to_string()],
+                source: Some("session_search".to_string()),
+                score: Some(0.87),
+                origin: BrokerContextOrigin {
+                    tool: Some("session_search".to_string()),
+                    source: Some("session_search".to_string()),
+                    session_id: Some("ses_prior_123".to_string()),
+                    working_dir: Some("/tmp/project".to_string()),
+                    provider_key: Some("openai".to_string()),
+                    model: Some("gpt-5.4".to_string()),
+                    message_id: Some("msg_42".to_string()),
+                    message_index: Some(42),
+                    role: Some("assistant".to_string()),
+                    timestamp: Some("2026-05-10T12:00:00Z".to_string()),
+                    updated_at: Some("2026-05-10T12:05:00Z".to_string()),
+                    ..Default::default()
+                },
+                relevance: Some(BrokerContextRelevance {
+                    query: Some("project memory".to_string()),
+                    retrieval_mode: Some("session_search".to_string()),
+                    score: Some(0.87),
+                    rank: Some(2),
+                    matched_terms: vec!["project".to_string(), "memory".to_string()],
+                    exact_match: Some(false),
+                }),
+                fragments: vec![BrokerContextFragment {
+                    relation: "match".to_string(),
+                    content: "keep provenance with retrieved context".to_string(),
+                    content_format: "plain_text".to_string(),
+                    role: Some("assistant".to_string()),
+                    message_index: Some(42),
+                    message_id: Some("msg_42".to_string()),
+                    timestamp: Some("2026-05-10T12:00:00Z".to_string()),
+                }],
+                metadata: serde_json::json!({"channel": "session_history"}),
+            },
+            BrokerContextItem {
+                id: "conversation:ses_broker_456:3".to_string(),
+                kind: "conversation_search_hit".to_string(),
+                scope: "session".to_string(),
+                content_format: "plain_text".to_string(),
+                title: Some("Current conversation match".to_string()),
+                summary: Some("Search hit from the active broker conversation".to_string()),
+                content: Some("Hermes asked whether this context belongs in the prompt.".to_string()),
+                tags: vec!["search_hit".to_string(), "conversation".to_string()],
+                source: Some("conversation_search".to_string()),
+                score: Some(0.74),
+                origin: BrokerContextOrigin {
+                    tool: Some("conversation_search".to_string()),
+                    source: Some("conversation_search".to_string()),
+                    session_id: Some("ses_broker_456".to_string()),
+                    message_id: Some("msg_3".to_string()),
+                    message_index: Some(3),
+                    role: Some("user".to_string()),
+                    ..Default::default()
+                },
+                relevance: Some(BrokerContextRelevance {
+                    query: Some("project memory".to_string()),
+                    retrieval_mode: Some("conversation_search".to_string()),
+                    score: Some(0.74),
+                    rank: Some(3),
+                    matched_terms: vec!["context".to_string(), "prompt".to_string()],
+                    exact_match: Some(false),
+                }),
+                fragments: vec![BrokerContextFragment {
+                    relation: "match".to_string(),
+                    content: "belongs in the prompt".to_string(),
+                    content_format: "plain_text".to_string(),
+                    role: Some("user".to_string()),
+                    message_index: Some(3),
+                    message_id: Some("msg_3".to_string()),
+                    ..Default::default()
+                }],
+                metadata: serde_json::json!({"turn": 3}),
+            },
         ],
         memories: vec![BrokerMemoryContextItem {
             id: "mem_1".to_string(),
@@ -478,7 +561,7 @@ fn test_broker_context_event_roundtrip() -> Result<()> {
     assert_eq!(session_id, "ses_broker_456");
     assert_eq!(working_dir.as_deref(), Some("/tmp/project"));
     assert_eq!(tool_names, vec!["goal", "memory"]);
-    assert_eq!(items.len(), 3);
+    assert_eq!(items.len(), 5);
     assert_eq!(items[0].kind, "memory");
     assert_eq!(items[0].content_format, "plain_text");
     assert_eq!(items[0].origin.tool.as_deref(), Some("memory"));
@@ -498,6 +581,34 @@ fn test_broker_context_event_roundtrip() -> Result<()> {
     assert_eq!(items[2].kind, "tool");
     assert_eq!(items[2].origin.tool.as_deref(), Some("tool_registry"));
     assert_eq!(items[2].metadata["name"], "memory");
+    assert_eq!(items[3].kind, "session_search_hit");
+    assert_eq!(items[3].scope, "project");
+    assert_eq!(items[3].origin.tool.as_deref(), Some("session_search"));
+    assert_eq!(items[3].origin.message_index, Some(42));
+    assert_eq!(
+        items[3]
+            .relevance
+            .as_ref()
+            .and_then(|relevance| relevance.retrieval_mode.as_deref()),
+        Some("session_search")
+    );
+    assert_eq!(items[3].fragments[0].relation, "match");
+    assert_eq!(items[3].metadata["channel"], "session_history");
+    assert_eq!(items[4].kind, "conversation_search_hit");
+    assert_eq!(items[4].scope, "session");
+    assert_eq!(
+        items[4].origin.tool.as_deref(),
+        Some("conversation_search")
+    );
+    assert_eq!(items[4].origin.role.as_deref(), Some("user"));
+    assert_eq!(
+        items[4]
+            .relevance
+            .as_ref()
+            .and_then(|relevance| relevance.retrieval_mode.as_deref()),
+        Some("conversation_search")
+    );
+    assert_eq!(items[4].fragments[0].message_id.as_deref(), Some("msg_3"));
     assert_eq!(memories[0].scope, "project");
     assert_eq!(memories[0].content, "Project memory");
     assert_eq!(
