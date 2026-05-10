@@ -138,6 +138,7 @@ class BrokerSocketClient:
         self._file = None
         self._next_id = 1
         self._lock = threading.Lock()
+        self._broker_session_id: Optional[str] = None
 
     def connect(self) -> None:
         if self._sock is not None:
@@ -185,6 +186,28 @@ class BrokerSocketClient:
             )
             return self._read_response(request_id, "broker_context")
 
+    def broker_turn_sync(
+        self,
+        *,
+        session_id: str,
+        user_content: str,
+        assistant_content: str,
+        source: str = "hermes",
+    ) -> Dict[str, Any]:
+        with self._lock:
+            self.connect()
+            request_id = self._send(
+                {
+                    "type": "broker_turn_sync",
+                    "id": self._next_request_id(),
+                    "session_id": self._broker_session_id or session_id or None,
+                    "user_content": user_content,
+                    "assistant_content": assistant_content,
+                    "source": source,
+                }
+            )
+            return self._read_response(request_id, "broker_turn_synced")
+
     def _subscribe(self) -> None:
         request: Dict[str, Any] = {
             "type": "subscribe",
@@ -220,6 +243,9 @@ class BrokerSocketClient:
             event = json.loads(raw.decode("utf-8"))
             event_type = event.get("type")
             event_id = event.get("id")
+            if event_type == "session":
+                self._broker_session_id = event.get("session_id") or self._broker_session_id
+                continue
             if event_type == "ack":
                 continue
             if event_type == "error" and event_id == request_id:
@@ -299,8 +325,17 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         return self._format_prefetch(event)
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        del user_content, assistant_content, session_id
-        # The jcode broker has no direct turn-sync write endpoint yet.
+        if self._client is None:
+            return None
+        try:
+            self._client.broker_turn_sync(
+                session_id="",
+                user_content=user_content,
+                assistant_content=assistant_content,
+                source=str(self._config.get("source") or "hermes"),
+            )
+        except Exception as exc:
+            logger.debug("jcode broker_turn_sync failed: %s", exc)
         return None
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -354,6 +389,11 @@ class JcodeGraphMemoryProvider(MemoryProvider):
                 "key": "working_dir",
                 "description": "Project directory for broker-scoped memory",
                 "default": os.getcwd(),
+            },
+            {
+                "key": "source",
+                "description": "Source label for synced Hermes turns",
+                "default": "hermes",
             },
             {
                 "key": "context_limit",

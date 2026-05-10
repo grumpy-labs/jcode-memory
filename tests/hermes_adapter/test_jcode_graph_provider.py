@@ -98,6 +98,16 @@ class FakeBrokerServer:
                             ],
                         },
                     )
+                elif request["type"] == "broker_turn_sync":
+                    self._write(
+                        handle,
+                        {
+                            "type": "broker_turn_synced",
+                            "id": request_id,
+                            "session_id": request.get("session_id") or "ses_fake",
+                            "memory_ids": ["mem_turn_1"],
+                        },
+                    )
 
     @staticmethod
     def _write(handle, event: dict) -> None:
@@ -178,6 +188,34 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         provider = JcodeGraphMemoryProvider({"socket_path": os.devnull})
         schemas = provider.get_tool_schemas()
         self.assertEqual(schemas[0]["name"], "jcode_broker_context")
+
+    def test_provider_sync_turn_writes_to_broker(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                }
+            )
+            provider.initialize("hermes_session")
+            provider.sync_turn(
+                "Remember that Hermes can write through the broker.",
+                "Acknowledged and synced.",
+                session_id="hermes_session",
+            )
+            provider.shutdown()
+
+        sync_requests = [
+            request for request in server.requests if request["type"] == "broker_turn_sync"
+        ]
+        self.assertEqual(len(sync_requests), 1)
+        self.assertIsNone(sync_requests[0]["session_id"])
+        self.assertEqual(
+            sync_requests[0]["user_content"],
+            "Remember that Hermes can write through the broker.",
+        )
+        self.assertEqual(sync_requests[0]["assistant_content"], "Acknowledged and synced.")
+        self.assertEqual(sync_requests[0]["source"], "hermes")
 
     def test_provider_auto_starts_broker_when_socket_is_missing(self) -> None:
         class FakeProcess:

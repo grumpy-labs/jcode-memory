@@ -228,6 +228,50 @@ impl Client {
         })
     }
 
+    pub async fn sync_broker_turn(
+        &mut self,
+        session_id: Option<String>,
+        user_content: String,
+        assistant_content: String,
+        source: Option<String>,
+    ) -> Result<ServerEvent> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::BrokerTurnSync {
+            id,
+            session_id,
+            user_content,
+            assistant_content,
+            source,
+        };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+
+        for _ in 0..10 {
+            let mut line = String::new();
+            let n = self.reader.read_line(&mut line).await?;
+            if n == 0 {
+                anyhow::bail!("Server disconnected");
+            }
+            let event: ServerEvent = serde_json::from_str(&line)?;
+            match &event {
+                ServerEvent::Ack { .. } => continue,
+                ServerEvent::BrokerTurnSynced {
+                    id: response_id, ..
+                } if *response_id == id => return Ok(event),
+                ServerEvent::Error { id: error_id, .. } if *error_id == id => return Ok(event),
+                _ => continue,
+            }
+        }
+
+        Ok(ServerEvent::Error {
+            id,
+            message: "Broker turn sync response not received".to_string(),
+            retry_after_secs: None,
+        })
+    }
+
     pub async fn resume_session(&mut self, session_id: &str) -> Result<u64> {
         self.resume_session_with_options(session_id, false, false)
             .await

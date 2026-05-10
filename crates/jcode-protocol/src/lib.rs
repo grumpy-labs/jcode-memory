@@ -291,6 +291,18 @@ pub enum Request {
         limit: usize,
     },
 
+    /// Sync an external Hermes turn into broker-managed memory.
+    #[serde(rename = "broker_turn_sync")]
+    BrokerTurnSync {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        user_content: String,
+        assistant_content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+    },
+
     /// Get a bounded view of compacted historical messages for lazy transcript expansion.
     #[serde(rename = "get_compacted_history")]
     GetCompactedHistory {
@@ -1087,6 +1099,15 @@ pub enum ServerEvent {
         memories: Vec<BrokerMemoryContextItem>,
         #[serde(default, skip_serializing_if = "snapshot_is_empty")]
         side_panel: SidePanelSnapshot,
+    },
+
+    /// Response after an external turn has been synced into broker-managed memory.
+    #[serde(rename = "broker_turn_synced")]
+    BrokerTurnSynced {
+        id: u64,
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        memory_ids: Vec<String>,
     },
 
     /// Expanded compacted-history window (response to GetCompactedHistory).
@@ -2015,6 +2036,7 @@ impl Request {
             Request::Subscribe { id, .. } => *id,
             Request::GetHistory { id } => *id,
             Request::BrokerContext { id, .. } => *id,
+            Request::BrokerTurnSync { id, .. } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
             Request::Reload { id } => *id,
             Request::ResumeSession { id, .. } => *id,
@@ -2077,6 +2099,7 @@ impl Request {
             self,
             Request::Ping { .. }
                 | Request::BrokerContext { .. }
+                | Request::BrokerTurnSync { .. }
                 | Request::CommShare { .. }
                 | Request::CommRead { .. }
                 | Request::CommMessage { .. }

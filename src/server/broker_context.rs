@@ -11,6 +11,38 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
+pub(super) async fn handle_broker_turn_sync(
+    id: u64,
+    requested_session_id: Option<String>,
+    user_content: String,
+    assistant_content: String,
+    source: Option<String>,
+    fallback_session_id: Option<&str>,
+    sessions: &SessionAgents,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let event = match broker_turn_sync_event(
+        id,
+        requested_session_id,
+        &user_content,
+        &assistant_content,
+        source.as_deref(),
+        fallback_session_id,
+        sessions,
+    )
+    .await
+    {
+        Ok(event) => event,
+        Err(error) => ServerEvent::Error {
+            id,
+            message: error.to_string(),
+            retry_after_secs: None,
+        },
+    };
+
+    let _ = client_event_tx.send(event);
+}
+
 pub(super) async fn handle_broker_context(
     id: u64,
     requested_session_id: Option<String>,
@@ -39,6 +71,65 @@ pub(super) async fn handle_broker_context(
     };
 
     let _ = client_event_tx.send(event);
+}
+
+async fn broker_turn_sync_event(
+    id: u64,
+    requested_session_id: Option<String>,
+    user_content: &str,
+    assistant_content: &str,
+    source: Option<&str>,
+    fallback_session_id: Option<&str>,
+    sessions: &SessionAgents,
+) -> Result<ServerEvent> {
+    if user_content.trim().is_empty() && assistant_content.trim().is_empty() {
+        anyhow::bail!("broker turn sync requires user_content or assistant_content");
+    }
+
+    let session_id = requested_session_id
+        .or_else(|| fallback_session_id.map(str::to_string))
+        .context("broker turn sync requires a session_id")?;
+
+    let agent = {
+        let sessions_guard = sessions.read().await;
+        sessions_guard
+            .get(&session_id)
+            .cloned()
+            .with_context(|| format!("session not found: {session_id}"))?
+    };
+
+    let working_dir = {
+        let agent_guard = agent.lock().await;
+        agent_guard.working_dir().map(str::to_string)
+    };
+
+    let source = source
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("hermes");
+    let mut tags = vec!["broker-turn-sync".to_string(), format!("{source}-turn")];
+    tags.sort();
+    tags.dedup();
+
+    let content = format!(
+        "External turn synced from {source}.\n\nUser: {}\n\nAssistant: {}",
+        user_content.trim(),
+        assistant_content.trim()
+    );
+    let entry = MemoryEntry::new(crate::memory::MemoryCategory::Fact, content)
+        .with_source(format!("{source}:{session_id}"))
+        .with_tags(tags);
+    let manager = match working_dir {
+        Some(dir) => MemoryManager::new().with_project_dir(PathBuf::from(dir)),
+        None => MemoryManager::new(),
+    };
+    let memory_id = manager.remember_project(entry)?;
+
+    Ok(ServerEvent::BrokerTurnSynced {
+        id,
+        session_id,
+        memory_ids: vec![memory_id],
+    })
 }
 
 async fn broker_context_event(

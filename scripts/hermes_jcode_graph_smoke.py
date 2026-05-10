@@ -35,6 +35,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=8)
     parser.add_argument("--socket", help="jcode broker socket path")
     parser.add_argument("--working-dir", default=os.getcwd())
+    parser.add_argument("--sync-user", help="Optional user turn to sync before prefetch")
+    parser.add_argument("--sync-assistant", help="Optional assistant turn to sync before prefetch")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
@@ -61,6 +63,12 @@ def main() -> int:
         agent_context="primary",
     )
     try:
+        if args.sync_user or args.sync_assistant:
+            provider.sync_turn(
+                args.sync_user or "",
+                args.sync_assistant or "",
+                session_id="hermes_jcode_graph_smoke",
+            )
         text = provider.prefetch(args.query, session_id="hermes_jcode_graph_smoke")
         tool_payload = provider.handle_tool_call(
             "jcode_broker_context",
@@ -77,6 +85,11 @@ def main() -> int:
         "prefetch": text,
         "tool_event_type": tool.get("type"),
         "tool_item_kinds": [item.get("kind") for item in items if isinstance(item, dict)],
+        "tool_memory_contents": [
+            item.get("content")
+            for item in items
+            if isinstance(item, dict) and item.get("kind") == "memory"
+        ],
         "tool_item_count": len(items),
     }
 
@@ -87,6 +100,8 @@ def main() -> int:
         print(f"prefetch_has_context: {result['prefetch_has_context']}")
         print(f"tool_event_type: {result['tool_event_type']}")
         print(f"tool_item_kinds: {', '.join(result['tool_item_kinds'])}")
+        if result["tool_memory_contents"]:
+            print(f"tool_memory_contents: {result['tool_memory_contents']}")
         if text:
             print()
             print(text)

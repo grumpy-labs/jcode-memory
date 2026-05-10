@@ -30,12 +30,14 @@ Useful config keys:
 - `jcode_binary`: path to `jcode`/`jcode-memory`; also accepts `JCODE_BINARY`.
 - `startup_timeout_seconds`: wait time for the broker socket after auto-start.
 - `working_dir`: project directory for broker-scoped context.
+- `source`: source label for synced Hermes turns; defaults to `hermes`.
 
 Current capabilities:
 
 - Implements the Hermes `MemoryProvider` lifecycle.
 - Injects `broker_context.items` via `prefetch()`.
 - Exposes `jcode_broker_context` as an explicit memory-provider tool.
+- Syncs Hermes turns back into jcode project memory via `broker_turn_sync`.
 
 Smoke test after installing into a test Hermes profile:
 
@@ -48,6 +50,5 @@ python scripts/hermes_jcode_graph_smoke.py --working-dir "$PWD" --json
 
 Not implemented yet:
 
-- Direct turn-sync writes from Hermes into jcode.
 - Graph database persistence.
 - Promotion/consolidation policies for search hits.

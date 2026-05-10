@@ -319,3 +319,97 @@ async fn typed_broker_context_api_returns_memory_tools_and_artifacts() -> Result
     abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
     result
 }
+
+#[tokio::test]
+async fn broker_turn_sync_persists_hermes_turn_into_project_memory() -> Result<()> {
+    let _env = setup_test_env()?;
+    let _profile = EnvVarGuard::set("JCODE_TOOL_PROFILE", "broker");
+    let runtime_dir = short_runtime_dir(format!(
+        "jcode-broker-turn-sync-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let project_dir = runtime_dir.join("project");
+    std::fs::create_dir_all(&project_dir)?;
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+
+    let provider = MockProvider::new();
+    let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
+    let server_instance =
+        server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+
+    let result = async {
+        wait_for_server_ready(&socket_path, &debug_socket_path).await?;
+
+        let create_command = format!("create_session:{}", project_dir.display());
+        let session_id =
+            debug_create_headless_session_with_command(debug_socket_path.clone(), &create_command)
+                .await?;
+
+        let mut client = server::Client::connect_with_path(socket_path.clone()).await?;
+        let resume_id = client.resume_session(&session_id).await?;
+        let _ = collect_until_history_unix(&mut client, resume_id).await?;
+
+        let sync_event = client
+            .sync_broker_turn(
+                Some(session_id.clone()),
+                "Hermes user turn should become jcode memory".to_string(),
+                "Hermes assistant reply was observed by the broker".to_string(),
+                Some("hermes".to_string()),
+            )
+            .await?;
+
+        let ServerEvent::BrokerTurnSynced {
+            session_id: returned_session_id,
+            memory_ids,
+            ..
+        } = sync_event
+        else {
+            anyhow::bail!("expected broker turn synced event, got {sync_event:?}");
+        };
+
+        assert_eq!(returned_session_id, session_id);
+        assert_eq!(memory_ids.len(), 1);
+
+        let context_event = client
+            .get_broker_context(
+                Some(session_id.clone()),
+                Some("Hermes user turn should become jcode memory".to_string()),
+                8,
+            )
+            .await?;
+
+        let ServerEvent::BrokerContext {
+            memories, items, ..
+        } = context_event
+        else {
+            anyhow::bail!("expected broker context event, got {context_event:?}");
+        };
+
+        assert!(
+            memories.iter().any(|memory| memory
+                .content
+                .contains("Hermes user turn should become jcode memory")
+                && memory.tags.iter().any(|tag| tag == "hermes-turn")),
+            "broker context should include synced Hermes turn memory, got {memories:?}"
+        );
+        assert!(
+            items.iter().any(|item| item.kind == "memory"
+                && item
+                    .content
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("Hermes user turn")),
+            "broker context items should expose synced turn memory, got {items:?}"
+        );
+
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
+    result
+}

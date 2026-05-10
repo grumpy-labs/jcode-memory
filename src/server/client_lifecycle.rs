@@ -1,4 +1,4 @@
-use super::broker_context::handle_broker_context;
+use super::broker_context::{handle_broker_context, handle_broker_turn_sync};
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
     handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
@@ -161,6 +161,25 @@ async fn handle_lightweight_control_request(
                 session_id,
                 query,
                 limit,
+                None,
+                sessions,
+                &client_event_tx,
+            )
+            .await;
+        }
+        Request::BrokerTurnSync {
+            id,
+            session_id,
+            user_content,
+            assistant_content,
+            source,
+        } => {
+            handle_broker_turn_sync(
+                id,
+                session_id,
+                user_content,
+                assistant_content,
+                source,
                 None,
                 sessions,
                 &client_event_tx,
@@ -1682,6 +1701,26 @@ pub(super) async fn handle_client(
                     session_id,
                     query,
                     limit,
+                    Some(&client_session_id),
+                    &sessions,
+                    &client_event_tx,
+                )
+                .await;
+            }
+
+            Request::BrokerTurnSync {
+                id,
+                session_id,
+                user_content,
+                assistant_content,
+                source,
+            } => {
+                handle_broker_turn_sync(
+                    id,
+                    session_id,
+                    user_content,
+                    assistant_content,
+                    source,
                     Some(&client_session_id),
                     &sessions,
                     &client_event_tx,
