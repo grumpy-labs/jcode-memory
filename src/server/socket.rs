@@ -84,8 +84,19 @@ pub async fn has_live_listener(path: &std::path::Path) -> bool {
 }
 
 #[cfg(unix)]
+pub(super) fn daemon_lock_path_for_socket(path: &std::path::Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("jcode.sock");
+    let stem = filename.strip_suffix(".sock").unwrap_or(filename);
+    parent.join(format!("{stem}-daemon.lock"))
+}
+
+#[cfg(all(unix, test))]
 pub(super) fn daemon_lock_path() -> PathBuf {
-    crate::storage::runtime_dir().join("jcode-daemon.lock")
+    daemon_lock_path_for_socket(&socket_path())
 }
 
 #[cfg(unix)]
@@ -128,12 +139,12 @@ pub(super) fn try_acquire_daemon_lock(path: &std::path::Path) -> Result<Option<D
 }
 
 #[cfg(unix)]
-pub(super) fn acquire_daemon_lock() -> Result<DaemonLockGuard> {
-    let path = daemon_lock_path();
+pub(super) fn acquire_daemon_lock(socket_path: &std::path::Path) -> Result<DaemonLockGuard> {
+    let path = daemon_lock_path_for_socket(socket_path);
     try_acquire_daemon_lock(&path)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Another jcode server process is already running for runtime dir {}",
-            crate::storage::runtime_dir().display()
+            "Another jcode server process is already running for socket {}",
+            socket_path.display()
         )
     })
 }

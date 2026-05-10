@@ -3,7 +3,8 @@
 use super::socket::sibling_socket_path;
 #[cfg(unix)]
 use super::socket::{
-    daemon_lock_path, server_start_matches_existing_server, try_acquire_daemon_lock,
+    daemon_lock_path, daemon_lock_path_for_socket, server_start_matches_existing_server,
+    try_acquire_daemon_lock,
 };
 use super::{
     ReloadPhase, ReloadState, ReloadWaitStatus, await_reload_handoff, cleanup_socket_pair,
@@ -46,6 +47,20 @@ fn cleanup_socket_pair_removes_main_and_debug_files() {
 }
 
 #[cfg(unix)]
+#[test]
+fn daemon_lock_path_follows_socket_name() {
+    let dir = std::path::PathBuf::from("/tmp/jcode-socket-tests");
+    assert_eq!(
+        daemon_lock_path_for_socket(&dir.join("jcode.sock")),
+        dir.join("jcode-daemon.lock")
+    );
+    assert_eq!(
+        daemon_lock_path_for_socket(&dir.join("jcode-broker.sock")),
+        dir.join("jcode-broker-daemon.lock")
+    );
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn connect_socket_preserves_refused_socket_path() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -79,7 +94,9 @@ fn daemon_lock_serializes_server_processes() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    let prev_socket = std::env::var_os("JCODE_SOCKET");
     crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    crate::env::remove_var("JCODE_SOCKET");
 
     let lock_path = daemon_lock_path();
     let first = try_acquire_daemon_lock(&lock_path)
@@ -98,6 +115,11 @@ fn daemon_lock_serializes_server_processes() {
         crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
     } else {
         crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+    if let Some(prev_socket) = prev_socket {
+        crate::env::set_var("JCODE_SOCKET", prev_socket);
+    } else {
+        crate::env::remove_var("JCODE_SOCKET");
     }
 }
 

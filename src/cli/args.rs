@@ -97,6 +97,10 @@ pub(crate) enum Command {
         temp_idle_timeout_secs: Option<u64>,
     },
 
+    /// Headless context broker runtime
+    #[command(subcommand)]
+    Broker(BrokerCommand),
+
     /// Connect to a running server
     Connect,
 
@@ -371,6 +375,24 @@ pub(crate) enum Command {
     Restart {
         #[command(subcommand)]
         action: RestartCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum BrokerCommand {
+    /// Start the headless broker server
+    Serve {
+        /// Internal: mark this server as temporary so it can self-clean when its owner exits.
+        #[arg(long, hide = true)]
+        temporary_server: bool,
+
+        /// Internal: owning process pid for a temporary server.
+        #[arg(long, hide = true)]
+        owner_pid: Option<u32>,
+
+        /// Internal: idle shutdown timeout in seconds for a temporary server.
+        #[arg(long, hide = true)]
+        temp_idle_timeout_secs: Option<u64>,
     },
 }
 

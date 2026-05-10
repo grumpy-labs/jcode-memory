@@ -1680,7 +1680,7 @@ impl Server {
         }
 
         #[cfg(unix)]
-        let _daemon_lock = acquire_daemon_lock()?;
+        let _daemon_lock = acquire_daemon_lock(&self.socket_path)?;
 
         if socket_has_live_listener(&self.socket_path).await {
             anyhow::bail!(

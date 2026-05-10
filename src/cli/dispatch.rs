@@ -5,8 +5,8 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Instant;
 
 use super::args::{
-    AmbientCommand, Args, AuthCommand, Command, MemoryCommand, ModelCommand, ProviderCommand,
-    RestartCommand, SessionCommand, TranscriptModeArg,
+    AmbientCommand, Args, AuthCommand, BrokerCommand, Command, MemoryCommand, ModelCommand,
+    ProviderCommand, RestartCommand, SessionCommand, TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -15,6 +15,68 @@ use crate::{
 
 use super::{commands, debug, login, output, provider_init, selfdev, terminal, tui_launch};
 use provider_init::ProviderChoice;
+
+const BROKER_TOOL_PROFILE: &str = "broker";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServerCommandMode {
+    Standard,
+    Broker,
+}
+
+impl ServerCommandMode {
+    fn timing_label(self) -> &'static str {
+        match self {
+            Self::Standard => "serve",
+            Self::Broker => "broker serve",
+        }
+    }
+}
+
+fn prepare_server_command_env(args: &Args, mode: ServerCommandMode) {
+    crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+
+    if let Some(socket) = args.socket.as_deref() {
+        server::set_socket_path(socket);
+    } else if mode == ServerCommandMode::Broker && std::env::var_os("JCODE_SOCKET").is_none() {
+        let broker_socket = crate::storage::runtime_dir().join("jcode-broker.sock");
+        let broker_socket = broker_socket.to_string_lossy().to_string();
+        server::set_socket_path(&broker_socket);
+    }
+
+    if mode == ServerCommandMode::Broker {
+        crate::env::set_var("JCODE_TOOL_PROFILE", BROKER_TOOL_PROFILE);
+    }
+}
+
+async fn run_server_command(
+    args: &Args,
+    mode: ServerCommandMode,
+    temporary_server: bool,
+    owner_pid: Option<u32>,
+    temp_idle_timeout_secs: Option<u64>,
+) -> Result<()> {
+    let serve_start = Instant::now();
+    prepare_server_command_env(args, mode);
+    if temporary_server {
+        server::configure_temporary_server(owner_pid, temp_idle_timeout_secs);
+    }
+    let provider_start = Instant::now();
+    let provider = provider_init::init_provider(&args.provider, args.model.as_deref()).await?;
+    let provider_ms = provider_start.elapsed().as_millis();
+    let server_new_start = Instant::now();
+    let server = server::Server::new(provider);
+    let server_new_ms = server_new_start.elapsed().as_millis();
+    crate::logging::info(&format!(
+        "[TIMING] {} bootstrap: provider_init={}ms, server_new={}ms, before_run={}ms",
+        mode.timing_label(),
+        provider_ms,
+        server_new_ms,
+        serve_start.elapsed().as_millis()
+    ));
+    server.run().await?;
+    Ok(())
+}
 
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     resolve_resume_arg(&mut args)?;
@@ -37,25 +99,28 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             owner_pid,
             temp_idle_timeout_secs,
         }) => {
-            let serve_start = Instant::now();
-            crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
-            if temporary_server {
-                server::configure_temporary_server(owner_pid, temp_idle_timeout_secs);
-            }
-            let provider_start = Instant::now();
-            let provider =
-                provider_init::init_provider(&args.provider, args.model.as_deref()).await?;
-            let provider_ms = provider_start.elapsed().as_millis();
-            let server_new_start = Instant::now();
-            let server = server::Server::new(provider);
-            let server_new_ms = server_new_start.elapsed().as_millis();
-            crate::logging::info(&format!(
-                "[TIMING] serve bootstrap: provider_init={}ms, server_new={}ms, before_run={}ms",
-                provider_ms,
-                server_new_ms,
-                serve_start.elapsed().as_millis()
-            ));
-            server.run().await?;
+            run_server_command(
+                &args,
+                ServerCommandMode::Standard,
+                temporary_server,
+                owner_pid,
+                temp_idle_timeout_secs,
+            )
+            .await?;
+        }
+        Some(Command::Broker(BrokerCommand::Serve {
+            temporary_server,
+            owner_pid,
+            temp_idle_timeout_secs,
+        })) => {
+            run_server_command(
+                &args,
+                ServerCommandMode::Broker,
+                temporary_server,
+                owner_pid,
+                temp_idle_timeout_secs,
+            )
+            .await?;
         }
         Some(Command::Connect) => {
             tui_launch::run_client().await?;

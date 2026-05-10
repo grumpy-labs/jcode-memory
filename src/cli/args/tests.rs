@@ -43,6 +43,23 @@ fn model_list_subcommand_parses() {
 }
 
 #[test]
+fn broker_serve_subcommand_parses() {
+    let args = Args::try_parse_from(["jcode", "broker", "serve"]).unwrap();
+    match args.command {
+        Some(Command::Broker(BrokerCommand::Serve {
+            temporary_server,
+            owner_pid,
+            temp_idle_timeout_secs,
+        })) => {
+            assert!(!temporary_server);
+            assert!(owner_pid.is_none());
+            assert!(temp_idle_timeout_secs.is_none());
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
 fn session_rename_subcommand_parses() {
     let args = Args::try_parse_from([
         "jcode",

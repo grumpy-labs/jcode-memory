@@ -1,5 +1,7 @@
 use super::*;
 use crate::transport::Listener;
+use clap::Parser;
+use std::ffi::{OsStr, OsString};
 
 struct ReloadTestEnv {
     prev_socket: Option<std::ffi::OsString>,
@@ -40,6 +42,100 @@ impl Drop for ReloadTestEnv {
             crate::env::remove_var("JCODE_RUNTIME_DIR");
         }
     }
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn remove(key: &'static str) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::remove_var(key);
+        Self { key, prev }
+    }
+
+    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::set_var(key, value.as_ref());
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = &self.prev {
+            crate::env::set_var(self.key, prev);
+        } else {
+            crate::env::remove_var(self.key);
+        }
+    }
+}
+
+#[test]
+fn broker_server_mode_forces_broker_profile_and_default_socket() {
+    let _guard = crate::storage::lock_test_env();
+    let _non_interactive = EnvVarGuard::remove("JCODE_NON_INTERACTIVE");
+    let _tool_profile = EnvVarGuard::set("JCODE_TOOL_PROFILE", "full");
+    let _socket = EnvVarGuard::remove("JCODE_SOCKET");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_DIR", temp.path());
+    let args = Args::try_parse_from(["jcode", "broker", "serve"]).expect("parse broker serve");
+
+    prepare_server_command_env(&args, ServerCommandMode::Broker);
+
+    assert_eq!(std::env::var("JCODE_NON_INTERACTIVE").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("JCODE_TOOL_PROFILE").as_deref(), Ok("broker"));
+    assert_eq!(
+        crate::server::socket_path(),
+        temp.path().join("jcode-broker.sock")
+    );
+}
+
+#[test]
+fn broker_server_mode_respects_explicit_socket() {
+    let _guard = crate::storage::lock_test_env();
+    let _non_interactive = EnvVarGuard::remove("JCODE_NON_INTERACTIVE");
+    let _tool_profile = EnvVarGuard::remove("JCODE_TOOL_PROFILE");
+    let _socket = EnvVarGuard::remove("JCODE_SOCKET");
+    let custom_socket = tempfile::tempdir()
+        .expect("tempdir")
+        .path()
+        .join("custom-broker.sock");
+    let custom_socket_str = custom_socket.to_string_lossy().to_string();
+    let args = Args::try_parse_from([
+        "jcode",
+        "--socket",
+        custom_socket_str.as_str(),
+        "broker",
+        "serve",
+    ])
+    .expect("parse broker serve with socket");
+
+    prepare_server_command_env(&args, ServerCommandMode::Broker);
+
+    assert_eq!(std::env::var("JCODE_TOOL_PROFILE").as_deref(), Ok("broker"));
+    assert_eq!(crate::server::socket_path(), custom_socket);
+}
+
+#[test]
+fn standard_server_mode_preserves_existing_profile_and_socket() {
+    let _guard = crate::storage::lock_test_env();
+    let _non_interactive = EnvVarGuard::remove("JCODE_NON_INTERACTIVE");
+    let _tool_profile = EnvVarGuard::set("JCODE_TOOL_PROFILE", "full");
+    let custom_socket = tempfile::tempdir()
+        .expect("tempdir")
+        .path()
+        .join("custom-server.sock");
+    let _socket = EnvVarGuard::set("JCODE_SOCKET", custom_socket.as_os_str());
+    let args = Args::try_parse_from(["jcode", "serve"]).expect("parse serve");
+
+    prepare_server_command_env(&args, ServerCommandMode::Standard);
+
+    assert_eq!(std::env::var("JCODE_NON_INTERACTIVE").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("JCODE_TOOL_PROFILE").as_deref(), Ok("full"));
+    assert_eq!(crate::server::socket_path(), custom_socket);
 }
 
 #[cfg(unix)]

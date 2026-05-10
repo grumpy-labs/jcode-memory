@@ -20,10 +20,9 @@ mod tests {
     #[test]
     fn auxiliary_bins_require_opt_in_features() {
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        let manifest: CargoManifest = toml::from_str(
-            &std::fs::read_to_string(manifest_path).expect("read root Cargo.toml"),
-        )
-        .expect("parse root Cargo.toml");
+        let manifest: CargoManifest =
+            toml::from_str(&std::fs::read_to_string(manifest_path).expect("read root Cargo.toml"))
+                .expect("parse root Cargo.toml");
 
         for bin in manifest.bin {
             if matches!(bin.name.as_str(), "jcode" | "jcode-harness") {
@@ -31,7 +30,9 @@ mod tests {
             }
 
             assert!(
-                bin.required_features.iter().any(|feature| feature == "dev-bins"),
+                bin.required_features
+                    .iter()
+                    .any(|feature| feature == "dev-bins"),
                 "auxiliary bin `{}` should require the dev-bins feature",
                 bin.name
             );
