@@ -141,6 +141,59 @@ fn test_broker_turn_sync_roundtrip_has_extraction_status() -> Result<()> {
 }
 
 #[test]
+fn test_broker_transcript_sync_roundtrip_has_extraction_status() -> Result<()> {
+    let req = Request::BrokerTranscriptSync {
+        id: 15,
+        session_id: Some("ses_broker_123".to_string()),
+        transcript: "user: remember that the broker extracts durable facts".to_string(),
+        source: Some("hermes:pre_compress".to_string()),
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"type\":\"broker_transcript_sync\""));
+    let decoded = parse_request_json(&json)?;
+    let Request::BrokerTranscriptSync {
+        session_id,
+        transcript,
+        source,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(session_id.as_deref(), Some("ses_broker_123"));
+    assert!(transcript.contains("durable facts"));
+    assert_eq!(source.as_deref(), Some("hermes:pre_compress"));
+
+    let event = ServerEvent::BrokerTranscriptSynced {
+        id: 15,
+        session_id: "ses_broker_123".to_string(),
+        memory_ids: vec!["mem_prov_1".to_string(), "mem_derived_1".to_string()],
+        provenance_memory_ids: vec!["mem_prov_1".to_string()],
+        derived_memory_ids: vec!["mem_derived_1".to_string()],
+        extraction_status: BrokerMemoryExtractionStatus::Extracted,
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"broker_transcript_synced\""));
+    assert!(json.contains("\"extraction_status\":\"extracted\""));
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::BrokerTranscriptSynced {
+        memory_ids,
+        provenance_memory_ids,
+        derived_memory_ids,
+        extraction_status,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(memory_ids, vec!["mem_prov_1", "mem_derived_1"]);
+    assert_eq!(provenance_memory_ids, vec!["mem_prov_1"]);
+    assert_eq!(derived_memory_ids, vec!["mem_derived_1"]);
+    assert_eq!(extraction_status, BrokerMemoryExtractionStatus::Extracted);
+    Ok(())
+}
+
+#[test]
 fn test_rewind_request_roundtrip() -> Result<()> {
     let req = Request::Rewind {
         id: 8,

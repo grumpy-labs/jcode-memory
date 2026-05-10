@@ -1,4 +1,6 @@
-use super::broker_context::{handle_broker_context, handle_broker_turn_sync};
+use super::broker_context::{
+    handle_broker_context, handle_broker_transcript_sync, handle_broker_turn_sync,
+};
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
     handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
@@ -181,6 +183,23 @@ async fn handle_lightweight_control_request(
                 session_id,
                 user_content,
                 assistant_content,
+                source,
+                None,
+                sessions,
+                &client_event_tx,
+            )
+            .await;
+        }
+        Request::BrokerTranscriptSync {
+            id,
+            session_id,
+            transcript,
+            source,
+        } => {
+            handle_broker_transcript_sync(
+                id,
+                session_id,
+                transcript,
                 source,
                 None,
                 sessions,
@@ -1724,6 +1743,24 @@ pub(super) async fn handle_client(
                     session_id,
                     user_content,
                     assistant_content,
+                    source,
+                    Some(&client_session_id),
+                    &sessions,
+                    &client_event_tx,
+                )
+                .await;
+            }
+
+            Request::BrokerTranscriptSync {
+                id,
+                session_id,
+                transcript,
+                source,
+            } => {
+                handle_broker_transcript_sync(
+                    id,
+                    session_id,
+                    transcript,
                     source,
                     Some(&client_session_id),
                     &sessions,

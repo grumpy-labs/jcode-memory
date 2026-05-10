@@ -208,6 +208,26 @@ class BrokerSocketClient:
             )
             return self._read_response(request_id, "broker_turn_synced")
 
+    def broker_transcript_sync(
+        self,
+        *,
+        session_id: str,
+        transcript: str,
+        source: str = "hermes:session_end",
+    ) -> Dict[str, Any]:
+        with self._lock:
+            self.connect()
+            request_id = self._send(
+                {
+                    "type": "broker_transcript_sync",
+                    "id": self._next_request_id(),
+                    "session_id": self._broker_session_id or session_id or None,
+                    "transcript": transcript,
+                    "source": source,
+                }
+            )
+            return self._read_response(request_id, "broker_transcript_synced")
+
     def _subscribe(self) -> None:
         request: Dict[str, Any] = {
             "type": "subscribe",
@@ -338,6 +358,13 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             logger.debug("jcode broker_turn_sync failed: %s", exc)
         return None
 
+    def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
+        self._sync_transcript(messages, source="hermes:pre_compress")
+        return ""
+
+    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+        self._sync_transcript(messages, source="hermes:session_end")
+
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [JCODE_BROKER_CONTEXT_SCHEMA]
 
@@ -437,6 +464,22 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             logger.debug("jcode broker_context failed: %s", exc)
             return None
 
+    def _sync_transcript(self, messages: List[Dict[str, Any]], *, source: str) -> None:
+        if self._client is None:
+            return None
+        transcript = _messages_to_transcript(messages)
+        if not transcript:
+            return None
+        try:
+            self._client.broker_transcript_sync(
+                session_id="",
+                transcript=transcript,
+                source=source,
+            )
+        except Exception as exc:
+            logger.debug("jcode broker_transcript_sync failed: %s", exc)
+        return None
+
     def _connect_client(self) -> bool:
         if self._client is None:
             return False
@@ -515,3 +558,41 @@ class JcodeGraphMemoryProvider(MemoryProvider):
 
 def register(ctx: Any) -> None:
     ctx.register_memory_provider(JcodeGraphMemoryProvider())
+
+
+def _messages_to_transcript(messages: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = _message_content_to_text(message.get("content"))
+        if not content:
+            continue
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+def _message_content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            text = _message_content_to_text(item)
+            if text:
+                parts.append(text)
+        return "\n".join(parts).strip()
+    if isinstance(content, dict):
+        for key in ("text", "content"):
+            value = content.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        if content.get("type") == "text" and isinstance(content.get("value"), str):
+            return content["value"].strip()
+        return ""
+    return str(content).strip()

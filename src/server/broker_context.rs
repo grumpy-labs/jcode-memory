@@ -1,5 +1,7 @@
 use super::SessionAgents;
+use crate::memory::TrustLevel;
 use crate::memory::{MemoryCategory, MemoryEntry, MemoryManager, MemoryScope};
+use crate::memory_graph::EdgeKind;
 use crate::protocol::{
     BrokerContextItem, BrokerContextOrigin, BrokerContextRelevance, BrokerMemoryContextItem,
     BrokerMemoryExtractionStatus, ServerEvent,
@@ -26,6 +28,36 @@ pub(super) async fn handle_broker_turn_sync(
         requested_session_id,
         &user_content,
         &assistant_content,
+        source.as_deref(),
+        fallback_session_id,
+        sessions,
+    )
+    .await
+    {
+        Ok(event) => event,
+        Err(error) => ServerEvent::Error {
+            id,
+            message: error.to_string(),
+            retry_after_secs: None,
+        },
+    };
+
+    let _ = client_event_tx.send(event);
+}
+
+pub(super) async fn handle_broker_transcript_sync(
+    id: u64,
+    requested_session_id: Option<String>,
+    transcript: String,
+    source: Option<String>,
+    fallback_session_id: Option<&str>,
+    sessions: &SessionAgents,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let event = match broker_transcript_sync_event(
+        id,
+        requested_session_id,
+        &transcript,
         source.as_deref(),
         fallback_session_id,
         sessions,
@@ -105,31 +137,20 @@ async fn broker_turn_sync_event(
         agent_guard.working_dir().map(str::to_string)
     };
 
-    let source = source
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("hermes");
-    let mut tags = vec![
-        "broker-provenance".to_string(),
-        "broker-turn-sync".to_string(),
-        format!("{source}-turn"),
-    ];
-    tags.sort();
-    tags.dedup();
-
+    let source = normalized_source(source, "hermes");
     let content = format!(
         "External turn synced from {source}.\n\nUser: {}\n\nAssistant: {}",
         user_content.trim(),
         assistant_content.trim()
     );
-    let entry = MemoryEntry::new(MemoryCategory::Custom("provenance".to_string()), content)
-        .with_source(format!("{source}:{session_id}"))
-        .with_tags(tags);
-    let manager = match working_dir {
-        Some(dir) => MemoryManager::new().with_project_dir(PathBuf::from(dir)),
-        None => MemoryManager::new(),
-    };
-    let memory_id = manager.remember_project(entry)?;
+    let manager = manager_for_working_dir(working_dir.as_deref());
+    let memory_id = store_provenance_memory(
+        &manager,
+        &session_id,
+        source,
+        content,
+        vec!["broker-turn-sync".to_string(), format!("{source}-turn")],
+    )?;
 
     Ok(ServerEvent::BrokerTurnSynced {
         id,
@@ -138,6 +159,67 @@ async fn broker_turn_sync_event(
         provenance_memory_ids: vec![memory_id],
         derived_memory_ids: Vec::new(),
         extraction_status: BrokerMemoryExtractionStatus::StoredProvenance,
+    })
+}
+
+async fn broker_transcript_sync_event(
+    id: u64,
+    requested_session_id: Option<String>,
+    transcript: &str,
+    source: Option<&str>,
+    fallback_session_id: Option<&str>,
+    sessions: &SessionAgents,
+) -> Result<ServerEvent> {
+    if transcript.trim().is_empty() {
+        anyhow::bail!("broker transcript sync requires transcript content");
+    }
+
+    let session_id = requested_session_id
+        .or_else(|| fallback_session_id.map(str::to_string))
+        .context("broker transcript sync requires a session_id")?;
+
+    let agent = {
+        let sessions_guard = sessions.read().await;
+        sessions_guard
+            .get(&session_id)
+            .cloned()
+            .with_context(|| format!("session not found: {session_id}"))?
+    };
+
+    let working_dir = {
+        let agent_guard = agent.lock().await;
+        agent_guard.working_dir().map(str::to_string)
+    };
+
+    let source = normalized_source(source, "hermes:transcript");
+    let manager = manager_for_working_dir(working_dir.as_deref());
+    let content = format!(
+        "External transcript synced from {source}.\n\n{}",
+        transcript.trim()
+    );
+    let provenance_id = store_provenance_memory(
+        &manager,
+        &session_id,
+        source,
+        content,
+        vec![
+            "broker-transcript-sync".to_string(),
+            "hermes-transcript".to_string(),
+        ],
+    )?;
+
+    let (derived_memory_ids, extraction_status) =
+        extract_derived_memories(&manager, transcript, &session_id, source, &provenance_id).await?;
+    let mut memory_ids = vec![provenance_id.clone()];
+    memory_ids.extend(derived_memory_ids.iter().cloned());
+
+    Ok(ServerEvent::BrokerTranscriptSynced {
+        id,
+        session_id,
+        memory_ids,
+        provenance_memory_ids: vec![provenance_id],
+        derived_memory_ids,
+        extraction_status,
     })
 }
 
@@ -194,6 +276,138 @@ async fn broker_context_event(
         memories,
         side_panel,
     })
+}
+
+fn manager_for_working_dir(working_dir: Option<&str>) -> MemoryManager {
+    match working_dir {
+        Some(dir) if !dir.trim().is_empty() => {
+            MemoryManager::new().with_project_dir(PathBuf::from(dir))
+        }
+        _ => MemoryManager::new(),
+    }
+}
+
+fn normalized_source<'a>(source: Option<&'a str>, default: &'a str) -> &'a str {
+    source
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default)
+}
+
+fn store_provenance_memory(
+    manager: &MemoryManager,
+    session_id: &str,
+    source: &str,
+    content: String,
+    mut tags: Vec<String>,
+) -> Result<String> {
+    tags.push("broker-provenance".to_string());
+    tags.sort();
+    tags.dedup();
+
+    let entry = MemoryEntry::new(MemoryCategory::Custom("provenance".to_string()), content)
+        .with_source(format!("{source}:{session_id}"))
+        .with_tags(tags);
+    manager.remember_project(entry)
+}
+
+async fn extract_derived_memories(
+    manager: &MemoryManager,
+    transcript: &str,
+    session_id: &str,
+    source: &str,
+    provenance_id: &str,
+) -> Result<(Vec<String>, BrokerMemoryExtractionStatus)> {
+    if !crate::memory::memory_sidecar_enabled() {
+        return Ok((
+            Vec::new(),
+            BrokerMemoryExtractionStatus::SkippedSidecarDisabled,
+        ));
+    }
+
+    let existing: Vec<String> = manager
+        .list_all()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| entry.active && !is_provenance_memory(entry))
+        .map(|entry| entry.content)
+        .collect();
+
+    let sidecar = crate::sidecar::Sidecar::new();
+    let extracted = match sidecar
+        .extract_memories_with_existing(transcript, &existing)
+        .await
+    {
+        Ok(extracted) => extracted,
+        Err(error) => {
+            crate::logging::info(&format!("Broker transcript extraction failed: {error}"));
+            return Ok((Vec::new(), BrokerMemoryExtractionStatus::Failed));
+        }
+    };
+
+    let derived_ids =
+        store_derived_memories(manager, extracted, session_id, source, provenance_id)?;
+    let status = if derived_ids.is_empty() {
+        BrokerMemoryExtractionStatus::StoredProvenance
+    } else {
+        BrokerMemoryExtractionStatus::Extracted
+    };
+    Ok((derived_ids, status))
+}
+
+fn store_derived_memories(
+    manager: &MemoryManager,
+    extracted: Vec<crate::sidecar::ExtractedMemory>,
+    session_id: &str,
+    source: &str,
+    provenance_id: &str,
+) -> Result<Vec<String>> {
+    let mut ids = Vec::new();
+    for memory in extracted {
+        let category = MemoryCategory::from_extracted(&memory.category);
+        let trust = match memory.trust.as_str() {
+            "high" => TrustLevel::High,
+            "low" => TrustLevel::Low,
+            _ => TrustLevel::Medium,
+        };
+        let entry = MemoryEntry::new(category, memory.content)
+            .with_source(format!("derived:{source}:{session_id}"))
+            .with_tags(vec![
+                "broker-derived".to_string(),
+                format!("derived-from:{provenance_id}"),
+            ])
+            .with_trust(trust);
+        ids.push(manager.remember_project(entry)?);
+    }
+
+    link_derived_memories(manager, provenance_id, &ids)?;
+    Ok(ids)
+}
+
+fn link_derived_memories(
+    manager: &MemoryManager,
+    provenance_id: &str,
+    derived_ids: &[String],
+) -> Result<()> {
+    if derived_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut graph = manager.load_project_graph()?;
+    if !graph.memories.contains_key(provenance_id) {
+        return Ok(());
+    }
+    let mut changed = false;
+    for derived_id in derived_ids {
+        if graph.memories.contains_key(derived_id) {
+            graph.add_edge(derived_id, provenance_id, EdgeKind::DerivedFrom);
+            changed = true;
+        }
+    }
+    if changed {
+        manager.save_project_graph(&graph)?;
+    }
+    Ok(())
 }
 
 fn collect_broker_memories(
@@ -487,4 +701,96 @@ fn summarize_content(content: &str) -> String {
         .chars()
         .take(160)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sidecar::ExtractedMemory;
+    use std::path::Path;
+
+    fn with_temp_home<F, T>(f: F) -> T
+    where
+        F: FnOnce(&Path) -> T,
+    {
+        let _guard = crate::storage::lock_test_env();
+        let old_home = std::env::var_os("JCODE_HOME");
+        let temp_home = tempfile::Builder::new()
+            .prefix("jcode-broker-context-test-")
+            .tempdir()
+            .expect("create temp home");
+        crate::env::set_var("JCODE_HOME", temp_home.path());
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(temp_home.path())));
+
+        match old_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    #[test]
+    fn derived_extraction_storage_links_provenance_and_remains_recallable() {
+        with_temp_home(|home| {
+            let project_dir = home.join("project");
+            std::fs::create_dir_all(&project_dir).expect("create project dir");
+            let manager = MemoryManager::new().with_project_dir(&project_dir);
+            let provenance_id = store_provenance_memory(
+                &manager,
+                "ses_test",
+                "hermes:session_end",
+                "External transcript synced from hermes:session_end.\n\nUser: Remember Rob prefers focused broker tests.".to_string(),
+                vec!["broker-transcript-sync".to_string()],
+            )
+            .expect("store provenance");
+
+            let derived_ids = store_derived_memories(
+                &manager,
+                vec![ExtractedMemory {
+                    category: "preference".to_string(),
+                    content: "Rob prefers focused broker tests for memory-provider changes."
+                        .to_string(),
+                    trust: "high".to_string(),
+                }],
+                "ses_test",
+                "hermes:session_end",
+                &provenance_id,
+            )
+            .expect("store derived memories");
+
+            assert_eq!(derived_ids.len(), 1);
+            let derived_id = derived_ids[0].clone();
+
+            let context = collect_broker_memories(
+                Some(project_dir.to_string_lossy().as_ref()),
+                Some("focused broker tests"),
+                8,
+                false,
+            )
+            .expect("collect broker memories");
+            assert!(
+                context.iter().any(|memory| memory.id == derived_id
+                    && memory.content.contains("focused broker tests")
+                    && memory.tags.iter().any(|tag| tag == "broker-derived")),
+                "derived memory should be recallable by default, got {context:?}"
+            );
+            assert!(
+                context.iter().all(|memory| memory.id != provenance_id),
+                "provenance memory should remain hidden by default, got {context:?}"
+            );
+
+            let graph = manager.load_project_graph().expect("load graph");
+            let edges = graph.edges.get(&derived_id).expect("derived edges");
+            assert!(
+                edges.iter().any(|edge| edge.target == provenance_id
+                    && matches!(edge.kind, EdgeKind::DerivedFrom)),
+                "derived memory should link back to provenance"
+            );
+        });
+    }
 }

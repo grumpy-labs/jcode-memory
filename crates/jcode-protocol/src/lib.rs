@@ -316,6 +316,17 @@ pub enum Request {
         source: Option<String>,
     },
 
+    /// Sync an external transcript window into broker-managed memory.
+    #[serde(rename = "broker_transcript_sync")]
+    BrokerTranscriptSync {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        transcript: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+    },
+
     /// Get a bounded view of compacted historical messages for lazy transcript expansion.
     #[serde(rename = "get_compacted_history")]
     GetCompactedHistory {
@@ -1117,6 +1128,21 @@ pub enum ServerEvent {
     /// Response after an external turn has been synced into broker-managed memory.
     #[serde(rename = "broker_turn_synced")]
     BrokerTurnSynced {
+        id: u64,
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        memory_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provenance_memory_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        derived_memory_ids: Vec<String>,
+        #[serde(default)]
+        extraction_status: BrokerMemoryExtractionStatus,
+    },
+
+    /// Response after an external transcript has been synced into broker-managed memory.
+    #[serde(rename = "broker_transcript_synced")]
+    BrokerTranscriptSynced {
         id: u64,
         session_id: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2056,6 +2082,7 @@ impl Request {
             Request::GetHistory { id } => *id,
             Request::BrokerContext { id, .. } => *id,
             Request::BrokerTurnSync { id, .. } => *id,
+            Request::BrokerTranscriptSync { id, .. } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
             Request::Reload { id } => *id,
             Request::ResumeSession { id, .. } => *id,
@@ -2119,6 +2146,7 @@ impl Request {
             Request::Ping { .. }
                 | Request::BrokerContext { .. }
                 | Request::BrokerTurnSync { .. }
+                | Request::BrokerTranscriptSync { .. }
                 | Request::CommShare { .. }
                 | Request::CommRead { .. }
                 | Request::CommMessage { .. }

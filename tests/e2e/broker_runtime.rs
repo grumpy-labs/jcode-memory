@@ -456,3 +456,122 @@ async fn broker_turn_sync_persists_hermes_turn_as_hidden_provenance() -> Result<
     abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
     result
 }
+
+#[tokio::test]
+async fn broker_transcript_sync_stores_provenance_and_skips_without_sidecar() -> Result<()> {
+    let _env = setup_test_env()?;
+    let _profile = EnvVarGuard::set("JCODE_TOOL_PROFILE", "broker");
+    let runtime_dir = short_runtime_dir(format!(
+        "jcode-broker-transcript-sync-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let project_dir = runtime_dir.join("project");
+    std::fs::create_dir_all(&project_dir)?;
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+
+    let provider = MockProvider::new();
+    let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
+    let server_instance =
+        server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+
+    let result = async {
+        wait_for_server_ready(&socket_path, &debug_socket_path).await?;
+
+        let create_command = format!("create_session:{}", project_dir.display());
+        let session_id =
+            debug_create_headless_session_with_command(debug_socket_path.clone(), &create_command)
+                .await?;
+
+        let mut client = server::Client::connect_with_path(socket_path.clone()).await?;
+        let resume_id = client.resume_session(&session_id).await?;
+        let _ = collect_until_history_unix(&mut client, resume_id).await?;
+
+        let sync_event = client
+            .sync_broker_transcript(
+                Some(session_id.clone()),
+                "User: Remember Rob prefers focused broker tests.\nAssistant: Stored for extraction."
+                    .to_string(),
+                Some("hermes:session_end".to_string()),
+            )
+            .await?;
+
+        let ServerEvent::BrokerTranscriptSynced {
+            session_id: returned_session_id,
+            memory_ids,
+            provenance_memory_ids,
+            derived_memory_ids,
+            extraction_status,
+            ..
+        } = sync_event
+        else {
+            anyhow::bail!("expected broker transcript synced event, got {sync_event:?}");
+        };
+
+        assert_eq!(returned_session_id, session_id);
+        assert_eq!(memory_ids.len(), 1);
+        assert_eq!(provenance_memory_ids, memory_ids);
+        assert!(derived_memory_ids.is_empty());
+        assert_eq!(
+            extraction_status,
+            BrokerMemoryExtractionStatus::SkippedSidecarDisabled
+        );
+
+        let default_context = client
+            .get_broker_context(
+                Some(session_id.clone()),
+                Some("focused broker tests".to_string()),
+                8,
+            )
+            .await?;
+        let ServerEvent::BrokerContext {
+            memories, items, ..
+        } = default_context
+        else {
+            anyhow::bail!("expected broker context event, got {default_context:?}");
+        };
+        assert!(
+            memories
+                .iter()
+                .all(|memory| !memory.content.contains("focused broker tests")),
+            "default broker context should hide transcript provenance, got {memories:?}"
+        );
+        assert!(
+            items.iter().all(|item| item
+                .content
+                .as_deref()
+                .map(|content| !content.contains("focused broker tests"))
+                .unwrap_or(true)),
+            "default broker context items should hide transcript provenance, got {items:?}"
+        );
+
+        let provenance_context = client
+            .get_broker_context_with_options(
+                Some(session_id.clone()),
+                Some("focused broker tests".to_string()),
+                8,
+                true,
+            )
+            .await?;
+        let ServerEvent::BrokerContext { memories, .. } = provenance_context else {
+            anyhow::bail!("expected broker context event, got {provenance_context:?}");
+        };
+        assert!(
+            memories.iter().any(|memory| memory
+                .content
+                .contains("focused broker tests")
+                && memory.tags.iter().any(|tag| tag == "broker-provenance")
+                && memory.tags.iter().any(|tag| tag == "broker-transcript-sync")),
+            "explicit provenance context should include synced transcript, got {memories:?}"
+        );
+
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
+    result
+}

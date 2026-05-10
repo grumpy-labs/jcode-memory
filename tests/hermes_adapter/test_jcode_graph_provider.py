@@ -108,6 +108,19 @@ class FakeBrokerServer:
                             "memory_ids": ["mem_turn_1"],
                         },
                     )
+                elif request["type"] == "broker_transcript_sync":
+                    self._write(
+                        handle,
+                        {
+                            "type": "broker_transcript_synced",
+                            "id": request_id,
+                            "session_id": request.get("session_id") or "ses_fake",
+                            "memory_ids": ["mem_transcript_1"],
+                            "provenance_memory_ids": ["mem_transcript_1"],
+                            "derived_memory_ids": [],
+                            "extraction_status": "skipped_sidecar_disabled",
+                        },
+                    )
 
     @staticmethod
     def _write(handle, event: dict) -> None:
@@ -128,6 +141,28 @@ class BrokerSocketClientTests(unittest.TestCase):
         self.assertEqual(server.requests[1]["type"], "broker_context")
         self.assertEqual(server.requests[1]["query"], "project memory")
         self.assertEqual(server.requests[1]["limit"], 3)
+
+    def test_client_syncs_transcript_to_broker(self) -> None:
+        with FakeBrokerServer() as server:
+            client = BrokerSocketClient(server.socket_path, working_dir="/tmp/project")
+            event = client.broker_transcript_sync(
+                session_id="hermes_session",
+                transcript="user: remember transcript extraction",
+                source="hermes:session_end",
+            )
+            client.close()
+
+        self.assertEqual(event["type"], "broker_transcript_synced")
+        transcript_requests = [
+            request for request in server.requests if request["type"] == "broker_transcript_sync"
+        ]
+        self.assertEqual(len(transcript_requests), 1)
+        self.assertEqual(transcript_requests[0]["session_id"], "hermes_session")
+        self.assertEqual(
+            transcript_requests[0]["transcript"],
+            "user: remember transcript extraction",
+        )
+        self.assertEqual(transcript_requests[0]["source"], "hermes:session_end")
 
 
 class RuntimePathTests(unittest.TestCase):
@@ -216,6 +251,61 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         )
         self.assertEqual(sync_requests[0]["assistant_content"], "Acknowledged and synced.")
         self.assertEqual(sync_requests[0]["source"], "hermes")
+
+    def test_provider_pre_compress_syncs_transcript(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                }
+            )
+            provider.initialize("hermes_session")
+            result = provider.on_pre_compress(
+                [
+                    {"role": "system", "content": "ignore system"},
+                    {"role": "user", "content": "Remember transcript hooks."},
+                    {"role": "assistant", "content": "The broker should extract later."},
+                ]
+            )
+            provider.shutdown()
+
+        self.assertEqual(result, "")
+        transcript_requests = [
+            request for request in server.requests if request["type"] == "broker_transcript_sync"
+        ]
+        self.assertEqual(len(transcript_requests), 1)
+        self.assertIn("user: Remember transcript hooks.", transcript_requests[0]["transcript"])
+        self.assertIn(
+            "assistant: The broker should extract later.",
+            transcript_requests[0]["transcript"],
+        )
+        self.assertEqual(transcript_requests[0]["source"], "hermes:pre_compress")
+
+    def test_provider_session_end_syncs_transcript(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                }
+            )
+            provider.initialize("hermes_session")
+            provider.on_session_end(
+                [
+                    {"role": "user", "content": [{"text": "Session ending memory."}]},
+                    {"role": "assistant", "content": "Flush the transcript."},
+                ]
+            )
+            provider.shutdown()
+
+        transcript_requests = [
+            request for request in server.requests if request["type"] == "broker_transcript_sync"
+        ]
+        self.assertEqual(len(transcript_requests), 1)
+        self.assertIn("user: Session ending memory.", transcript_requests[0]["transcript"])
+        self.assertIn("assistant: Flush the transcript.", transcript_requests[0]["transcript"])
+        self.assertEqual(transcript_requests[0]["source"], "hermes:session_end")
 
     def test_provider_auto_starts_broker_when_socket_is_missing(self) -> None:
         class FakeProcess:

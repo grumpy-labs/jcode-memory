@@ -284,6 +284,48 @@ impl Client {
         })
     }
 
+    pub async fn sync_broker_transcript(
+        &mut self,
+        session_id: Option<String>,
+        transcript: String,
+        source: Option<String>,
+    ) -> Result<ServerEvent> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::BrokerTranscriptSync {
+            id,
+            session_id,
+            transcript,
+            source,
+        };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+
+        for _ in 0..10 {
+            let mut line = String::new();
+            let n = self.reader.read_line(&mut line).await?;
+            if n == 0 {
+                anyhow::bail!("Server disconnected");
+            }
+            let event: ServerEvent = serde_json::from_str(&line)?;
+            match &event {
+                ServerEvent::Ack { .. } => continue,
+                ServerEvent::BrokerTranscriptSynced {
+                    id: response_id, ..
+                } if *response_id == id => return Ok(event),
+                ServerEvent::Error { id: error_id, .. } if *error_id == id => return Ok(event),
+                _ => continue,
+            }
+        }
+
+        Ok(ServerEvent::Error {
+            id,
+            message: "Broker transcript sync response not received".to_string(),
+            retry_after_secs: None,
+        })
+    }
+
     pub async fn resume_session(&mut self, session_id: &str) -> Result<u64> {
         self.resume_session_with_options(session_id, false, false)
             .await
