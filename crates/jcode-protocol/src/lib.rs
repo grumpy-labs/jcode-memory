@@ -74,6 +74,29 @@ pub struct BrokerMemoryContextItem {
     pub source: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrokerContextItem {
+    pub id: String,
+    pub kind: String,
+    pub scope: String,
+    #[serde(default = "default_broker_context_content_format")]
+    pub content_format: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    #[serde(default, skip_serializing_if = "broker_context_metadata_is_empty")]
+    pub metadata: serde_json::Value,
+}
+
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 /// Client request to server
@@ -974,6 +997,8 @@ pub enum ServerEvent {
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_names: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        items: Vec<BrokerContextItem>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         memories: Vec<BrokerMemoryContextItem>,
         #[serde(default, skip_serializing_if = "snapshot_is_empty")]
@@ -2002,6 +2027,18 @@ fn default_model_direction() -> i8 {
 
 fn default_broker_context_limit() -> usize {
     8
+}
+
+fn default_broker_context_content_format() -> String {
+    "plain_text".to_string()
+}
+
+fn broker_context_metadata_is_empty(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(map) => map.is_empty(),
+        _ => false,
+    }
 }
 
 /// Encode an event as a newline-terminated JSON string

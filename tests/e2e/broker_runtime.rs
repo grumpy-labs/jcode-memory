@@ -176,6 +176,13 @@ async fn typed_broker_context_api_returns_memory_tools_and_artifacts() -> Result
         )
         .await?;
 
+        debug_run_command_json(
+            debug_socket_path.clone(),
+            r#"tool:todo {"todos":[{"id":"todo-broker-contract","content":"Normalize broker context item contract","status":"in_progress","priority":"high"}]}"#,
+            Some(&session_id),
+        )
+        .await?;
+
         let mut client = server::Client::connect_with_path(socket_path.clone()).await?;
         let resume_id = client.resume_session(&session_id).await?;
         let _ = collect_until_history_unix(&mut client, resume_id).await?;
@@ -190,6 +197,7 @@ async fn typed_broker_context_api_returns_memory_tools_and_artifacts() -> Result
             tool_names,
             memories,
             side_panel,
+            items,
             ..
         } = context_event
         else {
@@ -211,6 +219,57 @@ async fn typed_broker_context_api_returns_memory_tools_and_artifacts() -> Result
                 .any(|memory| memory.content == "Typed broker context memory proof"),
             "broker context should include project memory, got {memories:?}"
         );
+
+        let item_keys: HashSet<(String, String)> = items
+            .iter()
+            .map(|item| (item.kind.clone(), item.id.clone()))
+            .collect();
+        let memory_id = memories
+            .iter()
+            .find(|memory| memory.content == "Typed broker context memory proof")
+            .map(|memory| memory.id.clone())
+            .context("missing explicit memory in legacy memories field")?;
+        assert!(
+            item_keys.contains(&("memory".to_string(), memory_id)),
+            "broker context items should include the memory item, got {items:?}"
+        );
+        assert!(
+            item_keys.contains(&(
+                "goal".to_string(),
+                "goal.typed-broker-context-api".to_string()
+            )),
+            "broker context items should include the goal artifact, got {items:?}"
+        );
+        assert!(
+            item_keys.contains(&("todo".to_string(), "todo-broker-contract".to_string())),
+            "broker context items should include the session todo, got {items:?}"
+        );
+        assert!(
+            item_keys.contains(&("tool".to_string(), "memory".to_string())),
+            "broker context items should include broker tool entries, got {items:?}"
+        );
+        let todo_item = items
+            .iter()
+            .find(|item| item.kind == "todo" && item.id == "todo-broker-contract")
+            .context("missing todo broker item")?;
+        assert_eq!(todo_item.scope, "session");
+        assert_eq!(todo_item.content_format, "plain_text");
+        assert_eq!(
+            todo_item.title.as_deref(),
+            Some("Normalize broker context item contract")
+        );
+        assert_eq!(todo_item.metadata["status"], "in_progress");
+        assert_eq!(todo_item.metadata["priority"], "high");
+        let goal_item = items
+            .iter()
+            .find(|item| item.kind == "goal" && item.id == "goal.typed-broker-context-api")
+            .context("missing goal broker item")?;
+        assert_eq!(goal_item.content_format, "markdown");
+        let tool_item = items
+            .iter()
+            .find(|item| item.kind == "tool" && item.id == "memory")
+            .context("missing memory tool broker item")?;
+        assert_eq!(tool_item.metadata["name"], "memory");
 
         assert_eq!(
             side_panel.focused_page_id.as_deref(),

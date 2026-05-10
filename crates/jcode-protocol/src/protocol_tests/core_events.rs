@@ -362,6 +362,47 @@ fn test_broker_context_event_roundtrip() -> Result<()> {
         session_id: "ses_broker_456".to_string(),
         working_dir: Some("/tmp/project".to_string()),
         tool_names: vec!["goal".to_string(), "memory".to_string()],
+        items: vec![
+            BrokerContextItem {
+                id: "mem_1".to_string(),
+                kind: "memory".to_string(),
+                scope: "project".to_string(),
+                content_format: "plain_text".to_string(),
+                title: Some("fact".to_string()),
+                summary: Some("Project memory".to_string()),
+                content: Some("Project memory".to_string()),
+                tags: vec!["broker".to_string()],
+                source: Some("ses_broker_456".to_string()),
+                score: None,
+                metadata: serde_json::json!({"category": "fact"}),
+            },
+            BrokerContextItem {
+                id: "todo_1".to_string(),
+                kind: "todo".to_string(),
+                scope: "session".to_string(),
+                content_format: "plain_text".to_string(),
+                title: Some("Check broker context".to_string()),
+                summary: Some("pending/high".to_string()),
+                content: Some("Check broker context".to_string()),
+                tags: vec!["pending".to_string(), "high".to_string()],
+                source: Some("ses_broker_456".to_string()),
+                score: None,
+                metadata: serde_json::json!({"status": "pending", "priority": "high"}),
+            },
+            BrokerContextItem {
+                id: "memory".to_string(),
+                kind: "tool".to_string(),
+                scope: "session".to_string(),
+                content_format: "plain_text".to_string(),
+                title: Some("memory".to_string()),
+                summary: Some("broker tool".to_string()),
+                content: None,
+                tags: Vec::new(),
+                source: Some("broker_tool_registry".to_string()),
+                score: None,
+                metadata: serde_json::json!({"name": "memory"}),
+            },
+        ],
         memories: vec![BrokerMemoryContextItem {
             id: "mem_1".to_string(),
             category: "fact".to_string(),
@@ -391,6 +432,7 @@ fn test_broker_context_event_roundtrip() -> Result<()> {
         session_id,
         working_dir,
         tool_names,
+        items,
         memories,
         side_panel,
     } = decoded
@@ -401,6 +443,15 @@ fn test_broker_context_event_roundtrip() -> Result<()> {
     assert_eq!(session_id, "ses_broker_456");
     assert_eq!(working_dir.as_deref(), Some("/tmp/project"));
     assert_eq!(tool_names, vec!["goal", "memory"]);
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0].kind, "memory");
+    assert_eq!(items[0].content_format, "plain_text");
+    assert_eq!(items[0].metadata["category"], "fact");
+    assert_eq!(items[1].kind, "todo");
+    assert_eq!(items[1].content_format, "plain_text");
+    assert_eq!(items[1].metadata["status"], "pending");
+    assert_eq!(items[2].kind, "tool");
+    assert_eq!(items[2].metadata["name"], "memory");
     assert_eq!(memories[0].scope, "project");
     assert_eq!(memories[0].content, "Project memory");
     assert_eq!(
