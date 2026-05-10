@@ -12,6 +12,7 @@ pub mod ambient_runner;
 pub mod ambient_scheduler;
 pub mod auth;
 pub mod background;
+#[cfg(feature = "product-tools")]
 pub mod browser;
 pub mod build;
 pub mod bus;

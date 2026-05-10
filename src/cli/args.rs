@@ -275,6 +275,7 @@ pub(crate) enum Command {
     SetupLauncher,
 
     /// Browser automation setup and status
+    #[cfg(feature = "product-tools")]
     Browser {
         /// Action (setup, status)
         #[arg(default_value = "setup")]

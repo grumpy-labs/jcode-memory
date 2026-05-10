@@ -124,6 +124,22 @@ fn login_no_browser_flag_parses() {
     }
 }
 
+#[cfg(not(feature = "product-tools"))]
+#[test]
+fn browser_command_requires_product_tools_feature() {
+    assert!(Args::try_parse_from(["jcode", "browser", "status"]).is_err());
+}
+
+#[cfg(feature = "product-tools")]
+#[test]
+fn browser_command_parses_with_product_tools_feature() {
+    let args = Args::try_parse_from(["jcode", "browser", "status"]).unwrap();
+    match args.command {
+        Some(Command::Browser { action }) => assert_eq!(action, "status"),
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
+
 #[test]
 fn login_openai_compatible_scriptable_flags_parse() {
     let args = Args::try_parse_from([

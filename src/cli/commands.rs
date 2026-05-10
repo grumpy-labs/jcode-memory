@@ -6,7 +6,9 @@ use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
 
-use crate::{browser, gateway, memory, session, storage, tui};
+#[cfg(feature = "product-tools")]
+use crate::browser;
+use crate::{gateway, memory, session, storage, tui};
 
 use super::terminal::{cleanup_tui_runtime, init_tui_runtime};
 
@@ -592,6 +594,7 @@ pub fn detect_tailscale_dns_name() -> Option<String> {
     parse_tailscale_dns_name(&output.stdout)
 }
 
+#[cfg(feature = "product-tools")]
 pub async fn run_browser(action: &str) -> Result<()> {
     match action {
         "setup" => browser::run_setup_command().await?,
