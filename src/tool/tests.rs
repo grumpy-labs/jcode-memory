@@ -152,6 +152,43 @@ async fn harness_profile_excludes_product_integrations_by_default() {
     }
 }
 
+#[cfg(not(feature = "product-tools"))]
+#[tokio::test]
+async fn full_profile_excludes_product_tools_without_feature() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new_with_profile(provider, RegistryProfile::Full).await;
+    let names: HashSet<String> = registry.tool_names().await.into_iter().collect();
+
+    for excluded in ["browser", "gmail", "webfetch", "websearch"] {
+        assert!(
+            !names.contains(excluded),
+            "default build should require product-tools feature for {excluded}"
+        );
+    }
+
+    for tool_name in ["goal", "memory", "schedule", "side_panel"] {
+        assert!(
+            names.contains(tool_name),
+            "default build should keep non-product tool {tool_name}"
+        );
+    }
+}
+
+#[cfg(feature = "product-tools")]
+#[tokio::test]
+async fn full_profile_includes_product_tools_with_feature() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new_with_profile(provider, RegistryProfile::Full).await;
+    let names: HashSet<String> = registry.tool_names().await.into_iter().collect();
+
+    for included in ["browser", "gmail", "webfetch", "websearch"] {
+        assert!(
+            names.contains(included),
+            "product-tools feature should include product tool {included}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn registry_new_from_env_defaults_to_harness_profile() {
     let _guard = crate::storage::lock_test_env();
@@ -176,6 +213,7 @@ async fn registry_new_from_env_uses_broker_profile() {
     assert!(!registry.tool_names().await.contains(&"bash".to_string()));
 }
 
+#[cfg(feature = "product-tools")]
 #[tokio::test(flavor = "current_thread")]
 async fn registry_new_from_env_allows_full_product_profile() {
     let _guard = crate::storage::lock_test_env();

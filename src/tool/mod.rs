@@ -4,6 +4,7 @@ mod apply_patch;
 mod bash;
 mod batch;
 mod bg;
+#[cfg(feature = "product-tools")]
 mod browser;
 mod codesearch;
 mod communicate;
@@ -11,6 +12,7 @@ mod conversation_search;
 mod debug_socket;
 mod edit;
 mod glob;
+#[cfg(feature = "product-tools")]
 mod gmail;
 mod goal;
 mod grep;
@@ -29,7 +31,9 @@ mod side_panel;
 mod skill;
 mod task;
 mod todo;
+#[cfg(feature = "product-tools")]
 mod webfetch;
+#[cfg(feature = "product-tools")]
 mod websearch;
 mod write;
 
@@ -176,14 +180,17 @@ impl Registry {
         Self::insert_tool_timed(&mut m, &mut timings, "grep", grep::GrepTool::new);
         Self::insert_tool_timed(&mut m, &mut timings, "ls", ls::LsTool::new);
         Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
-        Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
         Self::insert_tool_timed(&mut m, &mut timings, "open", open::OpenTool::new);
+        #[cfg(feature = "product-tools")]
+        Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
+        #[cfg(feature = "product-tools")]
         Self::insert_tool_timed(
             &mut m,
             &mut timings,
             "webfetch",
             webfetch::WebFetchTool::new,
         );
+        #[cfg(feature = "product-tools")]
         Self::insert_tool_timed(
             &mut m,
             &mut timings,
@@ -214,6 +221,7 @@ impl Registry {
         );
         Self::insert_tool_timed(&mut m, &mut timings, "memory", memory::MemoryTool::new);
         Self::insert_tool_timed(&mut m, &mut timings, "goal", goal::GoalTool::new);
+        #[cfg(feature = "product-tools")]
         Self::insert_tool_timed(&mut m, &mut timings, "gmail", gmail::GmailTool::new);
         Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
         Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);

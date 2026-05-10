@@ -218,6 +218,7 @@ aws-sdk-sts = "1.103.0"
 # ordinary check/build loops should not compile the tract/tokenizers subtree.
 default = ["pdf"]
 dev-bins = []
+product-tools = []
 jemalloc = [
     "dep:tikv-jemallocator",
     "dep:tikv-jemalloc-ctl",

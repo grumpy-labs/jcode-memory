@@ -3,7 +3,7 @@ use clap::Parser;
 use jcode::id::new_id;
 use jcode::message::{Message, ToolDefinition};
 use jcode::provider::{EventStream, Provider};
-use jcode::tool::{Registry, ToolContext, ToolExecutionMode};
+use jcode::tool::{Registry, RegistryProfile, ToolContext, ToolExecutionMode};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -73,7 +73,11 @@ async fn main() -> Result<()> {
     eprintln!("Harness workspace: {}", workspace.display());
 
     let provider: Arc<dyn Provider> = Arc::new(NoopProvider);
-    let registry = Registry::new_from_env(provider).await;
+    let registry = if args.include_network && cfg!(feature = "product-tools") {
+        Registry::new_with_profile(provider, RegistryProfile::Full).await
+    } else {
+        Registry::new_from_env(provider).await
+    };
 
     let session_id = new_id("harness");
     let base_ctx = ToolContext {
@@ -170,16 +174,19 @@ async fn main() -> Result<()> {
     });
 
     if args.include_network {
-        cases.push(ToolCase {
-            name: "webfetch",
-            label: "webfetch example.com",
-            input: json!({"url": "https://example.com", "format": "text"}),
-        });
-        cases.push(ToolCase {
-            name: "websearch",
-            label: "websearch rust async",
-            input: json!({"query": "rust async await"}),
-        });
+        #[cfg(feature = "product-tools")]
+        {
+            cases.push(ToolCase {
+                name: "webfetch",
+                label: "webfetch example.com",
+                input: json!({"url": "https://example.com", "format": "text"}),
+            });
+            cases.push(ToolCase {
+                name: "websearch",
+                label: "websearch rust async",
+                input: json!({"query": "rust async await"}),
+            });
+        }
         cases.push(ToolCase {
             name: "codesearch",
             label: "codesearch tokio spawn",
