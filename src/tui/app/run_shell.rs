@@ -85,7 +85,6 @@ impl App {
         Ok(RunResult {
             reload_session: self.reload_requested.take(),
             rebuild_session: self.rebuild_requested.take(),
-            update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: Some(self.session.id.clone()),
@@ -228,7 +227,6 @@ impl App {
         Ok(RunResult {
             reload_session: self.reload_requested.take(),
             rebuild_session: self.rebuild_requested.take(),
-            update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: if self.is_remote {

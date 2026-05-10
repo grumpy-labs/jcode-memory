@@ -372,9 +372,6 @@ pub(super) async fn handle_bus_event(
                 remote.notify_auth_changed_detached();
             }
         }
-        Ok(BusEvent::UpdateStatus(status)) => {
-            app.handle_update_status(status);
-        }
         Ok(BusEvent::SessionUpdateStatus(status)) => {
             app.handle_session_update_status(status);
         }

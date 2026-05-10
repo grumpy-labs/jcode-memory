@@ -153,7 +153,6 @@ Using improved path-based classification for Rust files:
 | 1125 | `src/tui/app/remote/server_events.rs` |
 | 1124 | `src/tui/app/debug_bench.rs` |
 | 1116 | `src/tui/mermaid.rs` |
-| 1109 | `src/update.rs` |
 | 1094 | `src/server/client_session.rs` |
 | 1093 | `src/provider/openai_stream_runtime.rs` |
 | 1087 | `src/tool/mod.rs` |

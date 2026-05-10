@@ -210,7 +210,7 @@ def measure_cold_client_startup(binary: str, runs: int) -> list[StartupProfile]:
         log_path = Path(env["JCODE_HOME"]) / "logs" / f"jcode-{time.strftime('%Y-%m-%d')}.log"
         try:
             command = (
-                f"{binary} --no-update --debug-socket "
+                f"{binary} --debug-socket "
                 f"--socket {env['JCODE_SOCKET']}"
             )
             subprocess.run(

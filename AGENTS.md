@@ -18,10 +18,8 @@
 
 ## Install Notes
 - `~/.local/bin/jcode` is the launcher symlink used from `PATH`.
-- `~/.jcode/builds/current/jcode` is the active local/source-build channel; self-dev builds and `scripts/install_release.sh` point the launcher here.
-- `~/.jcode/builds/stable/jcode` is the stable release channel; `scripts/install.sh` installs this and points the launcher here.
-- `~/.jcode/builds/versions/<version>/jcode` stores immutable binaries.
-- `~/.jcode/builds/canary/jcode` still exists for canary/testing flows, but it is not the primary self-dev install path.
-- On Windows, the equivalents are `%LOCALAPPDATA%\\jcode\\bin\\jcode.exe` for the launcher, `%LOCALAPPDATA%\\jcode\\builds\\stable\\jcode.exe` for stable, and `%LOCALAPPDATA%\\jcode\\builds\\versions\\<version>\\jcode.exe` for immutable installs; `scripts/install.ps1` currently installs the stable channel.
+- `~/.jcode/builds/current/jcode` is the active local/source-build channel used by self-dev publishing.
+- `~/.jcode/builds/shared-server/jcode` and `~/.jcode/builds/canary/jcode` are used by self-dev/testing flows.
+- `~/.jcode/builds/versions/<version>/jcode` stores immutable local build artifacts.
+- Release installer scripts and automatic self-update are intentionally out of scope for this stripped harness.
 - Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH`.
-

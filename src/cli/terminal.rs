@@ -161,10 +161,8 @@ pub fn cleanup_tui_runtime_for_run_result(
     run_result: &crate::tui::RunResult,
     extra_exec: bool,
 ) {
-    let will_exec = extra_exec
-        || run_result.reload_session.is_some()
-        || run_result.rebuild_session.is_some()
-        || run_result.update_session.is_some();
+    let will_exec =
+        extra_exec || run_result.reload_session.is_some() || run_result.rebuild_session.is_some();
     cleanup_tui_runtime(state, !will_exec);
 }
 

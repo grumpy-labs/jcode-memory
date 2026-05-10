@@ -429,14 +429,14 @@ fn test_reload_requests_exit_when_newer_binary() {
 }
 
 #[test]
-fn test_background_update_ready_reloads_immediately_when_idle() {
+fn test_background_rebuild_ready_reloads_immediately_when_idle() {
     let mut app = create_test_app();
     let session_id = app.session.id.clone();
 
     app.handle_session_update_status(SessionUpdateStatus::ReadyToReload {
         session_id: session_id.clone(),
-        action: ClientMaintenanceAction::Update,
-        version: "v1.2.3".to_string(),
+        action: ClientMaintenanceAction::Rebuild,
+        version: "local-build".to_string(),
     });
 
     assert_eq!(app.reload_requested.as_deref(), Some(session_id.as_str()));
@@ -444,15 +444,15 @@ fn test_background_update_ready_reloads_immediately_when_idle() {
 }
 
 #[test]
-fn test_background_update_ready_waits_for_turn_to_finish() {
+fn test_background_rebuild_ready_waits_for_turn_to_finish() {
     let mut app = create_test_app();
     let session_id = app.session.id.clone();
     app.is_processing = true;
 
     app.handle_session_update_status(SessionUpdateStatus::ReadyToReload {
         session_id: session_id.clone(),
-        action: ClientMaintenanceAction::Update,
-        version: "v1.2.3".to_string(),
+        action: ClientMaintenanceAction::Rebuild,
+        version: "local-build".to_string(),
     });
 
     assert!(app.reload_requested.is_none());
@@ -460,7 +460,7 @@ fn test_background_update_ready_waits_for_turn_to_finish() {
         app.pending_background_client_reload
             .as_ref()
             .map(|(id, action)| (id.as_str(), *action)),
-        Some((session_id.as_str(), ClientMaintenanceAction::Update))
+        Some((session_id.as_str(), ClientMaintenanceAction::Rebuild))
     );
     assert!(!app.should_quit);
 

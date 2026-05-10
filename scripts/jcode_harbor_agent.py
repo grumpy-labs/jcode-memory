@@ -216,7 +216,7 @@ class JcodeHarborAgent(BaseAgent):
         await environment.upload_file(OPENAI_AUTH, f"{IN_CONTAINER_HOME}/openai-auth.json")
         await environment.upload_file(CA_BUNDLE, IN_CONTAINER_CA_BUNDLE)
         version_result = await environment.exec(
-            f"{IN_CONTAINER_BINARY} --quiet --no-update --no-selfdev version --json",
+            f"{IN_CONTAINER_BINARY} --quiet --no-selfdev version --json",
             env={
                 "HOME": IN_CONTAINER_HOME,
                 "JCODE_HOME": IN_CONTAINER_HOME,
@@ -259,7 +259,7 @@ class JcodeHarborAgent(BaseAgent):
                 '  if [ -d /app ]; then workdir=/app; else workdir="$(pwd)"; fi; '
                 'fi; '
                 f'instruction="$(cat {IN_CONTAINER_INPUT}/instruction.txt)"; '
-                f'{IN_CONTAINER_BINARY} --quiet --no-update --no-selfdev '
+                f'{IN_CONTAINER_BINARY} --quiet --no-selfdev '
                 '--provider "$JCODE_PROVIDER" --model "$JCODE_MODEL" '
                 '-C "$workdir" run --ndjson "$instruction" '
                 f'> {IN_CONTAINER_OUTPUT}/events.ndjson 2> {IN_CONTAINER_OUTPUT}/stderr.txt'

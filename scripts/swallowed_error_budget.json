@@ -1426,11 +1426,6 @@
       "let_underscore": 5,
       "unwrap_or_default": 1
     },
-    "src/update.rs": {
-      "dot_ok": 3,
-      "let_underscore": 5,
-      "unwrap_or_default": 8
-    },
     "src/usage.rs": {
       "dot_ok": 2,
       "let_underscore": 0,

@@ -144,9 +144,6 @@ memory = true
 swarm = true
 # Inject timestamps into user messages and tool results sent to the model
 message_timestamps = true
-# Update channel: "stable" (releases only) or "main" (latest commits on push)
-# Set to "main" for bleeding edge updates every time code is pushed
-update_channel = "stable"
 
 [provider]
 # Default model (optional, uses provider default if not set)

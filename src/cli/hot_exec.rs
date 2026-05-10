@@ -2,12 +2,11 @@ use anyhow::Result;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
 
-use crate::{build, tui::RunResult, update};
+use crate::{build, tui::RunResult};
 
 pub fn has_requested_action(run_result: &RunResult) -> bool {
     run_result.reload_session.is_some()
         || run_result.rebuild_session.is_some()
-        || run_result.update_session.is_some()
         || run_result.restart_session.is_some()
 }
 
@@ -18,10 +17,6 @@ pub fn execute_requested_action(run_result: &RunResult) -> Result<()> {
 
     if let Some(ref rebuild_session_id) = run_result.rebuild_session {
         hot_rebuild(rebuild_session_id)?;
-    }
-
-    if let Some(ref update_session_id) = run_result.update_session {
-        hot_update(update_session_id)?;
     }
 
     if let Some(ref restart_session_id) = run_result.restart_session {
@@ -63,7 +58,6 @@ pub fn hot_reload(session_id: &str) -> Result<()> {
                 ProcessCommand::new(&binary_path)
                     .arg("--resume")
                     .arg(session_id)
-                    .arg("--no-update")
                     .current_dir(cwd),
             );
             return Err(anyhow::anyhow!("Failed to exec {:?}: {}", binary_path, err));
@@ -135,11 +129,6 @@ pub fn hot_rebuild(session_id: &str) -> Result<()> {
 
     eprintln!("Rebuilding jcode with session {}...", session_id);
 
-    eprintln!("Pulling latest changes...");
-    if let Err(e) = update::run_git_pull_ff_only(&repo_dir, true) {
-        eprintln!("Warning: {}. Continuing with current version.", e);
-    }
-
     eprintln!("Building...");
     let build_status = ProcessCommand::new("cargo")
         .args(["build", "--release"])
@@ -164,19 +153,13 @@ pub fn hot_rebuild(session_id: &str) -> Result<()> {
 
     eprintln!("✓ All tests passed");
 
-    if let Err(e) = build::install_local_release(&repo_dir) {
-        eprintln!("Warning: install failed: {}", e);
-    }
-
     let is_selfdev = crate::cli::selfdev::client_selfdev_requested();
-    let exe = build::client_update_candidate(is_selfdev)
-        .map(|(path, _)| path)
-        .unwrap_or_else(|| build::release_binary_path(&repo_dir));
+    let exe = build::release_binary_path(&repo_dir);
     if !exe.exists() {
         anyhow::bail!("Binary not found at {:?}", exe);
     }
 
-    update::print_centered(&format!("Restarting with session {}...", session_id));
+    eprintln!("Restarting with session {}...", session_id);
 
     crate::env::set_var("JCODE_RESUMING", "1");
 
@@ -217,22 +200,6 @@ pub fn spawn_background_session_rebuild(session_id: String) {
             });
             return;
         };
-
-        publish(SessionUpdateStatus::Status {
-            session_id: session_id.clone(),
-            action,
-            message: "Pulling latest changes in the background...".to_string(),
-        });
-        if let Err(error) = update::run_git_pull_ff_only(&repo_dir, true) {
-            publish(SessionUpdateStatus::Status {
-                session_id: session_id.clone(),
-                action,
-                message: format!(
-                    "Git pull skipped: {}. Continuing with the current checkout.",
-                    error
-                ),
-            });
-        }
 
         publish(SessionUpdateStatus::Status {
             session_id: session_id.clone(),
@@ -294,21 +261,7 @@ pub fn spawn_background_session_rebuild(session_id: String) {
             return;
         }
 
-        if let Err(error) = build::install_local_release(&repo_dir) {
-            publish(SessionUpdateStatus::Status {
-                session_id: session_id.clone(),
-                action,
-                message: format!(
-                    "Install warning: {}. Will reload from the repo build if needed.",
-                    error
-                ),
-            });
-        }
-
-        let is_selfdev = crate::cli::selfdev::client_selfdev_requested();
-        let exe = build::preferred_reload_candidate(is_selfdev)
-            .map(|(path, _)| path)
-            .unwrap_or_else(|| build::release_binary_path(&repo_dir));
+        let exe = build::release_binary_path(&repo_dir);
         if !exe.exists() {
             publish(SessionUpdateStatus::Error {
                 session_id,
@@ -327,219 +280,4 @@ pub fn spawn_background_session_rebuild(session_id: String) {
             version: rebuild_version_label(&repo_dir),
         });
     });
-}
-
-pub fn hot_update(session_id: &str) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-
-    update::print_centered("Checking for updates...");
-
-    match update::check_for_update_blocking() {
-        Ok(Some(release)) => {
-            let current = env!("JCODE_VERSION");
-            update::print_centered(&format!(
-                "Update available: {} -> {}",
-                current, release.tag_name
-            ));
-            update::print_centered(&format!("Downloading {}...", release.tag_name));
-
-            match update::download_and_install_blocking_with_progress(&release, |progress| {
-                update::print_centered(&format!(
-                    "{} {}",
-                    release.tag_name,
-                    update::format_download_progress_bar(progress)
-                ));
-            }) {
-                Ok(path) => {
-                    update::print_centered(&format!("✓ Installed {}", release.tag_name));
-
-                    let is_selfdev = crate::cli::selfdev::client_selfdev_requested();
-                    let exe = build::client_update_candidate(is_selfdev)
-                        .map(|(p, _)| p)
-                        .unwrap_or(path);
-
-                    update::print_centered(&format!("Restarting with session {}...", session_id));
-
-                    crate::env::set_var("JCODE_RESUMING", "1");
-
-                    let mut cmd = ProcessCommand::new(&exe);
-                    if is_selfdev {
-                        cmd.arg("self-dev");
-                    }
-                    cmd.arg("--resume")
-                        .arg(session_id)
-                        .arg("--no-update")
-                        .current_dir(&cwd);
-                    let err = crate::platform::replace_process(&mut cmd);
-                    return Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err));
-                }
-                Err(e) => {
-                    update::print_centered(&format!("✗ Download failed: {}", e));
-                    update::print_centered("Resuming session with current version...");
-                }
-            }
-        }
-        Ok(None) => {
-            update::print_centered(&format!("Already up to date ({})", env!("JCODE_VERSION")));
-        }
-        Err(e) => {
-            update::print_centered(&format!("✗ Update check failed: {}", e));
-            update::print_centered("Resuming session with current version...");
-        }
-    }
-
-    crate::env::set_var("JCODE_RESUMING", "1");
-    let exe = std::env::current_exe()?;
-    let is_selfdev = crate::cli::selfdev::client_selfdev_requested();
-    let mut cmd = ProcessCommand::new(&exe);
-    if is_selfdev {
-        cmd.arg("self-dev");
-    }
-    cmd.arg("--resume")
-        .arg(session_id)
-        .arg("--no-update")
-        .current_dir(&cwd);
-    let err = crate::platform::replace_process(&mut cmd);
-    Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
-}
-
-pub fn get_repo_dir() -> Option<std::path::PathBuf> {
-    build::get_repo_dir()
-}
-
-pub fn check_for_updates() -> Option<bool> {
-    let repo_dir = get_repo_dir()?;
-
-    let fetch = ProcessCommand::new("git")
-        .args(["fetch", "-q"])
-        .current_dir(&repo_dir)
-        .output()
-        .ok()?;
-
-    if !fetch.status.success() {
-        return None;
-    }
-
-    let behind = ProcessCommand::new("git")
-        .args(["rev-list", "--count", "HEAD..@{u}"])
-        .current_dir(&repo_dir)
-        .output()
-        .ok()?;
-
-    if behind.status.success() {
-        let count: u32 = String::from_utf8_lossy(&behind.stdout)
-            .trim()
-            .parse()
-            .unwrap_or(0);
-        Some(count > 0)
-    } else {
-        None
-    }
-}
-
-pub fn run_auto_update() -> Result<()> {
-    let repo_dir =
-        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
-
-    update::run_git_pull_ff_only(&repo_dir, true)?;
-
-    update::print_centered("Building new version...");
-    let build_status = ProcessCommand::new("cargo")
-        .args(["build", "--release"])
-        .current_dir(&repo_dir)
-        .status()?;
-
-    if !build_status.success() {
-        anyhow::bail!("cargo build failed");
-    }
-
-    if let Err(e) = build::install_local_release(&repo_dir) {
-        update::print_centered(&format!("Warning: install failed: {}", e));
-    }
-
-    let hash = ProcessCommand::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(&repo_dir)
-        .output()?;
-    let hash = String::from_utf8_lossy(&hash.stdout);
-    update::print_centered(&format!("Updated to {}. Restarting...", hash.trim()));
-
-    let exe = build::client_update_candidate(false)
-        .map(|(p, _)| p)
-        .or_else(|| std::env::current_exe().ok())
-        .ok_or_else(|| anyhow::anyhow!("No executable path found after update"))?;
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    let err =
-        crate::platform::replace_process(ProcessCommand::new(&exe).args(&args).arg("--no-update"));
-
-    Err(anyhow::anyhow!(
-        "Failed to exec new binary {:?}: {}",
-        exe,
-        err
-    ))
-}
-
-pub fn run_update() -> Result<()> {
-    if update::is_release_build() {
-        update::print_centered("Checking GitHub for latest release...");
-        match update::check_for_update_blocking() {
-            Ok(Some(release)) => {
-                update::print_centered(&format!(
-                    "Downloading {} \u{2192} {}...",
-                    env!("JCODE_VERSION"),
-                    release.tag_name
-                ));
-                let _path =
-                    update::download_and_install_blocking_with_progress(&release, |progress| {
-                        update::print_centered(&format!(
-                            "{} {}",
-                            release.tag_name,
-                            update::format_download_progress_bar(progress)
-                        ));
-                    })?;
-                update::print_centered(&format!("✅ Updated to {}", release.tag_name));
-                update::print_centered("Restart jcode to use the new version.");
-            }
-            Ok(None) => {
-                update::print_centered(&format!("Already up to date ({})", env!("JCODE_VERSION")));
-            }
-            Err(e) => {
-                anyhow::bail!("Update check failed: {}", e);
-            }
-        }
-        return Ok(());
-    }
-
-    let repo_dir =
-        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
-
-    update::print_centered(&format!("Updating jcode from {}...", repo_dir.display()));
-
-    update::print_centered("Pulling latest changes (fast-forward only)...");
-    update::run_git_pull_ff_only(&repo_dir, true)?;
-
-    update::print_centered("Building...");
-    let build_status = ProcessCommand::new("cargo")
-        .args(["build", "--release"])
-        .current_dir(&repo_dir)
-        .status()?;
-
-    if !build_status.success() {
-        anyhow::bail!("cargo build failed");
-    }
-
-    if let Err(e) = build::install_local_release(&repo_dir) {
-        update::print_centered(&format!("Warning: install failed: {}", e));
-    }
-
-    let hash = ProcessCommand::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(&repo_dir)
-        .output()?;
-
-    let hash = String::from_utf8_lossy(&hash.stdout);
-    update::print_centered(&format!("Successfully updated to {}", hash.trim()));
-
-    Ok(())
 }

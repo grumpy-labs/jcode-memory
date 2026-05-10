@@ -134,7 +134,7 @@ def profile_single_spawn(binary: str, cwd: str, timeout_s: float) -> dict:
     )
 
     server_proc = subprocess.Popen(
-        [binary, "--no-update", "--no-selfdev", "serve", "--socket", str(socket_path)],
+        [binary, "--no-selfdev", "serve", "--socket", str(socket_path)],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -150,7 +150,6 @@ def profile_single_spawn(binary: str, cwd: str, timeout_s: float) -> dict:
         client_proc = subprocess.Popen(
             [
                 binary,
-                "--no-update",
                 "--no-selfdev",
                 "--socket",
                 str(socket_path),

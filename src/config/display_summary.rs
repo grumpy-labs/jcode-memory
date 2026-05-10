@@ -58,7 +58,6 @@ impl Config {
 - Memory: {}
 - Swarm: {}
 - Message timestamps: {}
-- Update channel: {}
 
 **Provider:**
 - Default model: {}
@@ -163,7 +162,6 @@ impl Config {
             self.features.memory,
             self.features.swarm,
             self.features.message_timestamps,
-            self.features.update_channel,
             self.provider
                 .default_model
                 .as_deref()

@@ -174,7 +174,6 @@ def run_jcode(prompt: str, workdir: str, jcode_binary: str, model: str = "claude
                 [
                     jcode_binary,
                     "run",
-                    "--no-update",
                     "--model", model,
                     prompt,
                 ],

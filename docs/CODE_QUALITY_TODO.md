@@ -150,7 +150,6 @@ Generated from `docs/CODE_QUALITY_AUDIT_2026-04-18.md`. This section enumerates 
 - [ ] Reduce `src/tui/app/remote/server_events.rs` below 800 LOC (1125 LOC today)
 - [ ] Reduce `src/tui/app/debug_bench.rs` below 800 LOC (1124 LOC today)
 - [ ] Reduce `src/tui/mermaid.rs` below 800 LOC (1116 LOC today)
-- [ ] Reduce `src/update.rs` below 800 LOC (1109 LOC today)
 - [ ] Reduce `src/server/client_session.rs` below 800 LOC (1094 LOC today)
 - [ ] Reduce `src/provider/openai_stream_runtime.rs` below 800 LOC (1093 LOC today)
 - [ ] Reduce `src/tool/mod.rs` below 800 LOC (1087 LOC today)

@@ -44,7 +44,6 @@ impl SpawnedWindowsServer {
         let stderr_file = std::fs::File::create(&stderr_path)?;
         let mut command = Command::new(Self::jcode_binary());
         command
-            .arg("--no-update")
             .arg("--socket")
             .arg(&socket_path)
             .arg("--provider")
@@ -118,7 +117,6 @@ impl SpawnedWindowsServer {
         let stderr_file = std::fs::File::create(&stderr_path)?;
         let mut command = Command::new(Self::jcode_binary());
         self.apply_env(&mut command)
-            .arg("--no-update")
             .arg("--socket")
             .arg(&self.socket_path)
             .arg("--provider")
@@ -261,7 +259,6 @@ async fn windows_binary_server_accepts_clients_and_debug_cli() -> Result<()> {
 
         let output = server
             .jcode_command()
-            .arg("--no-update")
             .arg("--socket")
             .arg(&server.socket_path)
             .arg("debug")

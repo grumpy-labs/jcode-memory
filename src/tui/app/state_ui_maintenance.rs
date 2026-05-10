@@ -21,7 +21,7 @@ impl App {
     }
 
     fn client_maintenance_card_message(
-        action: crate::bus::ClientMaintenanceAction,
+        _action: crate::bus::ClientMaintenanceAction,
         status: impl Into<String>,
         note: impl Into<String>,
     ) -> String {
@@ -31,11 +31,9 @@ impl App {
             content.push_str("\n\n");
             content.push_str(&note);
         }
-        if action == crate::bus::ClientMaintenanceAction::Rebuild {
-            content.push_str(
-                "\n\n**Pipeline:** `git pull --ff-only` → `cargo build --release` → `cargo test --release -- --test-threads=1`",
-            );
-        }
+        content.push_str(
+            "\n\n**Pipeline:** `cargo build --release` -> `cargo test --release -- --test-threads=1`",
+        );
         content
     }
 
@@ -71,13 +69,6 @@ impl App {
         );
     }
 
-    pub(super) fn start_background_client_update(&mut self, session_id: String) {
-        self.start_background_client_maintenance(
-            crate::bus::ClientMaintenanceAction::Update,
-            session_id,
-        );
-    }
-
     fn start_background_client_maintenance(
         &mut self,
         action: crate::bus::ClientMaintenanceAction,
@@ -97,18 +88,6 @@ impl App {
         self.pending_background_client_reload = None;
 
         match action {
-            crate::bus::ClientMaintenanceAction::Update => {
-                self.set_status_notice("Checking for updates...");
-                self.set_client_maintenance_message(
-                    action,
-                    Self::client_maintenance_card_message(
-                        action,
-                        "checking for updates",
-                        "Running in the background. jcode will reload automatically when the update is ready.",
-                    ),
-                );
-                crate::update::spawn_background_session_update(session_id);
-            }
             crate::bus::ClientMaintenanceAction::Rebuild => {
                 self.set_status_notice("Starting background rebuild...");
                 self.set_client_maintenance_message(
@@ -148,7 +127,7 @@ impl App {
     }
 
     pub(super) fn handle_session_update_status(&mut self, status: crate::bus::SessionUpdateStatus) {
-        use crate::bus::{ClientMaintenanceAction, SessionUpdateStatus};
+        use crate::bus::SessionUpdateStatus;
 
         let Some(active_session_id) = self.active_client_session_id().map(str::to_string) else {
             return;
@@ -174,26 +153,6 @@ impl App {
                     ),
                 );
             }
-            SessionUpdateStatus::NoUpdate {
-                session_id,
-                current,
-            } => {
-                if session_id != active_session_id {
-                    return;
-                }
-                self.background_client_action = None;
-                self.pending_background_client_reload = None;
-                let message = format!("Already up to date ({})", current);
-                self.set_status_notice(&message);
-                self.set_client_maintenance_message(
-                    ClientMaintenanceAction::Update,
-                    Self::client_maintenance_card_message(
-                        ClientMaintenanceAction::Update,
-                        "already up to date",
-                        format!("Current version: `{}`", current),
-                    ),
-                );
-            }
             SessionUpdateStatus::ReadyToReload {
                 session_id,
                 action,
@@ -203,16 +162,11 @@ impl App {
                     return;
                 }
                 self.background_client_action = None;
-                let ready_message = match action {
-                    ClientMaintenanceAction::Update => format!("✅ Updated to {}.", version),
-                    ClientMaintenanceAction::Rebuild => {
-                        format!("✅ Rebuild finished ({}).", version)
-                    }
-                };
+                let ready_message = format!("Rebuild finished ({}).", version);
                 if self.is_processing {
                     self.pending_background_client_reload = Some((session_id, action));
                     self.set_status_notice(format!(
-                        "{} ready — will reload after the current turn",
+                        "{} ready - will reload after the current turn",
                         action.title()
                     ));
                     self.set_client_maintenance_message(

@@ -184,7 +184,7 @@ for i in $(seq 1 $NUM_INSTANCES); do
 
     # Each instance gets its own pseudo-terminal via script(1)
     # We connect to the existing server, which creates sessions
-    script -q -c "$JCODE_BIN --no-update --no-selfdev" /dev/null \
+    script -q -c "$JCODE_BIN --no-selfdev" /dev/null \
         > "$LOG_DIR/instance_${i}_stdout.log" \
         2> "$LOG_DIR/instance_${i}_stderr.log" &
     pid=$!

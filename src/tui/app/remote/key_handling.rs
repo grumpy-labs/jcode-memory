@@ -786,15 +786,6 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
-                if trimmed == "/update" {
-                    let session_id = app
-                        .remote_session_id
-                        .clone()
-                        .unwrap_or_else(|| crate::id::new_id("ses"));
-                    app.start_background_client_update(session_id);
-                    return Ok(());
-                }
-
                 if trimmed == "/quit" {
                     crate::telemetry::end_session_with_reason(
                         app.provider.name(),

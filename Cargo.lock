@@ -2887,7 +2887,6 @@ dependencies = [
  "jcode-tui-tool-display",
  "jcode-tui-usage-overlay",
  "jcode-tui-workspace",
- "jcode-update-core",
  "jcode-usage-types",
  "libc",
  "open",
@@ -2903,7 +2902,6 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "similar",
- "tar",
  "tempfile",
  "thiserror 1.0.69",
  "tikv-jemalloc-ctl",
@@ -3347,15 +3345,6 @@ name = "jcode-tui-workspace"
 version = "0.1.0"
 dependencies = [
  "ratatui",
-]
-
-[[package]]
-name = "jcode-update-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "sha2 0.10.9",
 ]
 
 [[package]]

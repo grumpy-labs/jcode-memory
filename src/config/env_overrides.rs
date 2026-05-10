@@ -211,18 +211,6 @@ impl Config {
                 self.features.message_timestamps = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_UPDATE_CHANNEL") {
-            match v.trim().to_lowercase().as_str() {
-                "main" | "nightly" | "edge" => {
-                    self.features.update_channel = UpdateChannel::Main;
-                }
-                "stable" | "release" => {
-                    self.features.update_channel = UpdateChannel::Stable;
-                }
-                _ => {}
-            }
-        }
-
         if let Ok(v) = std::env::var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES") {
             let mut source_ids = Vec::new();
             let mut source_paths = Vec::new();

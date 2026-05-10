@@ -13,9 +13,7 @@ use crate::{
     tui,
 };
 
-use super::{
-    commands, debug, hot_exec, login, output, provider_init, selfdev, terminal, tui_launch,
-};
+use super::{commands, debug, login, output, provider_init, selfdev, terminal, tui_launch};
 use provider_init::ProviderChoice;
 
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
@@ -122,9 +120,6 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                     .await?;
             let mut agent = agent::Agent::new(provider, registry);
             agent.repl().await?;
-        }
-        Some(Command::Update) => {
-            hot_exec::run_update()?;
         }
         Some(Command::Version { json }) => {
             commands::run_version_command(json)?;

@@ -39,14 +39,6 @@ pub(crate) struct Args {
     #[arg(short = 'C', long, global = true)]
     pub(crate) cwd: Option<String>,
 
-    /// Skip the automatic update check
-    #[arg(long, global = true)]
-    pub(crate) no_update: bool,
-
-    /// Auto-update when new version is available (default: true for release builds)
-    #[arg(long, global = true, default_value = "true")]
-    pub(crate) auto_update: bool,
-
     /// Log tool inputs/outputs and token usage to stderr
     #[arg(long, global = true)]
     pub(crate) trace: bool,
@@ -171,9 +163,6 @@ pub(crate) enum Command {
 
     /// Run in simple REPL mode (no TUI)
     Repl,
-
-    /// Update jcode to the latest version
-    Update,
 
     /// Show build/version information in human or JSON form
     Version {

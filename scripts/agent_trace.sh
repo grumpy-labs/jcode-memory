@@ -14,4 +14,4 @@ workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
 
 JCODE_HOME="$workdir" PATH="$repo_root/target/release:$PATH" \
-  jcode run --no-update --trace --provider "$provider" "$prompt"
+  jcode run --trace --provider "$provider" "$prompt"

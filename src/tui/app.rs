@@ -408,10 +408,8 @@ impl CopyBadgeUiState {
 pub struct RunResult {
     /// Session ID to reload (hot-reload, no rebuild)
     pub reload_session: Option<String>,
-    /// Session ID to rebuild (full git pull + cargo build + tests)
+    /// Session ID to rebuild (local cargo build + tests)
     pub rebuild_session: Option<String>,
-    /// Session ID to update (download from GitHub releases and reload)
-    pub update_session: Option<String>,
     /// Session ID to restart (exec into current binary, no build)
     pub restart_session: Option<String>,
     /// Exit code to use (for canary wrapper communication)
@@ -648,10 +646,8 @@ pub struct App {
     thinking_prefix_emitted: bool,
     // Hot-reload: if set, exec into new binary with this session ID (no rebuild)
     reload_requested: Option<String>,
-    // Hot-rebuild: if set, do full git pull + cargo build + tests then exec
+    // Hot-rebuild: if set, do local cargo build + tests then exec
     rebuild_requested: Option<String>,
-    // Update: if set, check for and download update from GitHub releases then exec
-    update_requested: Option<String>,
     // Interactive background client maintenance action currently running
     background_client_action: Option<crate::bus::ClientMaintenanceAction>,
     // Reload the updated/rebuilt client once the current turn is idle

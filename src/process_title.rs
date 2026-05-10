@@ -123,7 +123,6 @@ pub(crate) fn initial_title(args: &Args) -> String {
         Some(Command::Run { .. }) => "jcode run".to_string(),
         Some(Command::Login { .. }) => "jcode login".to_string(),
         Some(Command::Repl) => "jcode repl".to_string(),
-        Some(Command::Update) => "jcode update".to_string(),
         Some(Command::Version { .. }) => "jcode version".to_string(),
         Some(Command::Usage { .. }) => "jcode usage".to_string(),
         Some(Command::SelfDev { .. }) => "jcode:selfdev".to_string(),

@@ -113,7 +113,7 @@ impl App {
                 "`/restart`\nRestart jcode with the current binary. Session is preserved.\nUseful after config changes, MCP server updates, or env var changes."
             }
             "rebuild" => {
-                "`/rebuild`\nRun `git pull --ff-only`, `cargo build --release`, and release tests in the background. jcode stays usable and reloads automatically when the build is ready."
+                "`/rebuild`\nRun `cargo build --release` and release tests in the background. jcode stays usable and reloads automatically when the build is ready."
             }
             "selfdev" => {
                 "`/selfdev`\nSpawn a new self-dev jcode session in a separate terminal.\n\n`/selfdev <prompt>`\nSpawn a new self-dev session and auto-deliver the prompt to it.\n\n`/selfdev status`\nShow current self-dev/build status."

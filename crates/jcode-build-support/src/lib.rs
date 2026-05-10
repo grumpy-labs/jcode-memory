@@ -712,37 +712,11 @@ pub fn publish_local_current_build_for_source(
     })
 }
 
-/// Install the local release binary into immutable versions and make it the active `current`
-/// build + launcher, while keeping `stable` untouched.
-pub fn publish_local_current_build(repo_dir: &std::path::Path) -> Result<PathBuf> {
-    let source = current_source_state(repo_dir)?;
-    Ok(publish_local_current_build_for_source(repo_dir, &source)?.versioned_path)
-}
-
 /// Promote an already installed immutable version onto the shared server channel.
 pub fn promote_version_to_shared_server(version: &str) -> Result<Option<String>> {
     let previous = read_shared_server_version()?;
     update_shared_server_symlink(version)?;
     Ok(previous)
-}
-
-/// Install release binary into immutable versions, promote it to stable, and also make it the
-/// active current/launcher build.
-pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
-    let source = release_binary_path(repo_dir);
-    if !source.exists() {
-        anyhow::bail!("Binary not found at {:?}", source);
-    }
-
-    let version = repo_build_version(repo_dir)?;
-
-    let versioned = install_binary_at_version(&source, &version)?;
-    update_stable_symlink(&version)?;
-    update_current_symlink(&version)?;
-    update_shared_server_symlink(&version)?;
-    update_launcher_symlink_to_current()?;
-
-    Ok(versioned)
 }
 
 /// Copy binary to versioned location

@@ -487,11 +487,6 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    if trimmed == "/update" {
-        app.start_background_client_update(app.session.id.clone());
-        return true;
-    }
-
     if trimmed == "/z" || trimmed == "/zz" || trimmed == "/zzz" || trimmed == "/zstatus" {
         use crate::provider::copilot::PremiumMode;
         let current = app.provider.premium_mode();

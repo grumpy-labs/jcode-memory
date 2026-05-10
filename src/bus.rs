@@ -182,34 +182,21 @@ pub struct SidePanelUpdated {
     pub snapshot: SidePanelSnapshot,
 }
 
-#[derive(Clone, Debug)]
-pub enum UpdateStatus {
-    Checking,
-    Available { current: String, latest: String },
-    Downloading { version: String },
-    Installed { version: String },
-    UpToDate,
-    Error(String),
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientMaintenanceAction {
-    Update,
     Rebuild,
 }
 
 impl ClientMaintenanceAction {
     pub fn noun(&self) -> &'static str {
         match self {
-            Self::Update => "update",
             Self::Rebuild => "rebuild",
         }
     }
 
     pub fn title(&self) -> &'static str {
         match self {
-            Self::Update => "Update",
             Self::Rebuild => "Rebuild",
         }
     }
@@ -221,10 +208,6 @@ pub enum SessionUpdateStatus {
         session_id: String,
         action: ClientMaintenanceAction,
         message: String,
-    },
-    NoUpdate {
-        session_id: String,
-        current: String,
     },
     ReadyToReload {
         session_id: String,
@@ -265,8 +248,6 @@ pub enum BusEvent {
     ModelRefreshCompleted(ModelRefreshCompleted),
     /// Local git status command completed off the UI thread
     GitStatusCompleted(GitStatusCompleted),
-    /// Update check status from background thread
-    UpdateStatus(UpdateStatus),
     /// Interactive client update status for a specific session
     SessionUpdateStatus(SessionUpdateStatus),
     /// External dictation command completed with transcript text

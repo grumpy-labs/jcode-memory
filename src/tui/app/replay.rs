@@ -84,7 +84,6 @@ pub(super) async fn run_replay(
     Ok(RunResult {
         reload_session: None,
         rebuild_session: None,
-        update_session: None,
         restart_session: None,
         exit_code: None,
         session_id: if app.is_remote {
