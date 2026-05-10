@@ -3,6 +3,29 @@ use crate::message::{Message, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::HashSet;
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => crate::env::set_var(self.key, value),
+            None => crate::env::remove_var(self.key),
+        }
+    }
+}
 
 struct MockProvider;
 
@@ -53,6 +76,70 @@ async fn test_tool_definitions_are_sorted() {
         names, sorted_names,
         "Tool definitions should be sorted alphabetically"
     );
+}
+
+#[tokio::test]
+async fn broker_profile_keeps_exact_context_broker_tool_set() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new_with_profile(provider, RegistryProfile::Broker).await;
+    let names: HashSet<String> = registry.tool_names().await.into_iter().collect();
+    let expected: HashSet<String> = [
+        "conversation_search",
+        "glob",
+        "goal",
+        "grep",
+        "ls",
+        "memory",
+        "read",
+        "session_search",
+        "skill_manage",
+        "swarm",
+        "todo",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    assert_eq!(names, expected);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn registry_new_from_env_uses_broker_profile() {
+    let _guard = crate::storage::lock_test_env();
+    let _env = EnvVarGuard::set("JCODE_TOOL_PROFILE", "broker");
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new_from_env(provider).await;
+
+    assert_eq!(registry.profile(), RegistryProfile::Broker);
+    assert!(registry.tool_names().await.contains(&"memory".to_string()));
+    assert!(!registry.tool_names().await.contains(&"bash".to_string()));
+}
+
+#[tokio::test]
+async fn broker_profile_skips_dynamic_product_tools() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new_with_profile(provider, RegistryProfile::Broker).await;
+
+    registry.register_selfdev_tools().await;
+    registry.register_ambient_tools().await;
+    registry.register_mcp_tools(None, None, None).await;
+
+    let names: HashSet<String> = registry.tool_names().await.into_iter().collect();
+
+    for excluded in [
+        "debug_socket",
+        "end_ambient_cycle",
+        "mcp",
+        "request_permission",
+        "schedule_ambient",
+        "send_message",
+        "selfdev",
+    ] {
+        assert!(
+            !names.contains(excluded),
+            "broker profile should skip dynamic tool {excluded}"
+        );
+    }
 }
 
 struct BareSchemaTool;
@@ -326,6 +413,7 @@ async fn test_context_guard_small_output_passes_through() {
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
+        profile: RegistryProfile::Full,
     };
 
     let output = ToolOutput::new("small output");
@@ -340,6 +428,7 @@ async fn test_context_guard_truncates_huge_single_output() {
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
+        profile: RegistryProfile::Full,
     };
 
     // 30% of 1000 = 300 tokens = 1200 chars max for a single output
@@ -368,6 +457,7 @@ async fn test_context_guard_truncates_when_context_nearly_full() {
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
+        profile: RegistryProfile::Full,
     };
 
     // Even a modest output should get truncated when context is 95% full
@@ -386,6 +476,7 @@ async fn test_context_guard_zero_budget_passes_through() {
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
+        profile: RegistryProfile::Full,
     };
 
     let output = ToolOutput::new("x".repeat(100_000));

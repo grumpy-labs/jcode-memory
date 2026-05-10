@@ -48,7 +48,7 @@ pub(super) async fn create_headless_session(
     };
 
     let provider = provider_template.fork();
-    let registry = Registry::new(provider.clone()).await;
+    let registry = Registry::new_from_env(provider.clone()).await;
 
     registry.enable_memory_test_mode().await;
 

@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     eprintln!("Harness workspace: {}", workspace.display());
 
     let provider: Arc<dyn Provider> = Arc::new(NoopProvider);
-    let registry = Registry::new(provider).await;
+    let registry = Registry::new_from_env(provider).await;
 
     let session_id = new_id("harness");
     let base_ctx = ToolContext {

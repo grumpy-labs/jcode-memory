@@ -736,7 +736,7 @@ pub async fn run_single_message_command(
     } else {
         super::provider_init::init_provider_for_validation(choice, model).await?
     };
-    let registry = crate::tool::Registry::new(provider.clone()).await;
+    let registry = crate::tool::Registry::new_from_env(provider.clone()).await;
     let mut agent = crate::agent::Agent::new(provider.clone(), registry);
     restore_agent_session_if_requested(&mut agent, resume_session)?;
 

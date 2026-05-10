@@ -55,6 +55,36 @@ pub struct Registry {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     skills: Arc<RwLock<SkillRegistry>>,
     compaction: Arc<RwLock<CompactionManager>>,
+    profile: RegistryProfile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegistryProfile {
+    Full,
+    Broker,
+}
+
+impl RegistryProfile {
+    pub fn from_env_value(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "broker" => Self::Broker,
+            _ => Self::Full,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        match std::env::var("JCODE_TOOL_PROFILE") {
+            Ok(value) => Self::from_env_value(&value),
+            _ => Self::Full,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Broker => "broker",
+        }
+    }
 }
 
 impl Clone for Registry {
@@ -65,6 +95,7 @@ impl Clone for Registry {
             // Each clone gets a fresh CompactionManager to prevent parallel
             // subagents from corrupting each other's message history
             compaction: Arc::new(RwLock::new(CompactionManager::new())),
+            profile: self.profile,
         }
     }
 }
@@ -101,103 +132,149 @@ impl Registry {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: Arc::new(RwLock::new(SkillRegistry::default())),
             compaction: Arc::new(RwLock::new(CompactionManager::new())),
+            profile: RegistryProfile::Full,
         }
     }
 
+    fn build_full_base_tools() -> HashMap<String, Arc<dyn Tool>> {
+        let init_start = std::time::Instant::now();
+        let mut timings = Vec::new();
+        let mut m = HashMap::new();
+        Self::insert_tool_timed(&mut m, &mut timings, "read", read::ReadTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "write", write::WriteTool::new);
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "agentgrep",
+            agentgrep::AgentGrepTool::new,
+        );
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "side_panel",
+            side_panel::SidePanelTool::new,
+        );
+        Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "multiedit",
+            multiedit::MultiEditTool::new,
+        );
+        Self::insert_tool_timed(&mut m, &mut timings, "patch", patch::PatchTool::new);
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "apply_patch",
+            apply_patch::ApplyPatchTool::new,
+        );
+        Self::insert_tool_timed(&mut m, &mut timings, "glob", glob::GlobTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "grep", grep::GrepTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "ls", ls::LsTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "open", open::OpenTool::new);
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "webfetch",
+            webfetch::WebFetchTool::new,
+        );
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "websearch",
+            websearch::WebSearchTool::new,
+        );
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "codesearch",
+            codesearch::CodeSearchTool::new,
+        );
+        Self::insert_tool_timed(&mut m, &mut timings, "invalid", invalid::InvalidTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "lsp", lsp::LspTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "todo", todo::TodoTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "bg", bg::BgTool::new);
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "swarm",
+            communicate::CommunicateTool::new,
+        );
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "session_search",
+            session_search::SessionSearchTool::new,
+        );
+        Self::insert_tool_timed(&mut m, &mut timings, "memory", memory::MemoryTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "goal", goal::GoalTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "gmail", gmail::GmailTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);
+        Self::log_base_tools_init(RegistryProfile::Full, init_start, &timings);
+        m
+    }
+
+    fn build_broker_base_tools() -> HashMap<String, Arc<dyn Tool>> {
+        let init_start = std::time::Instant::now();
+        let mut timings = Vec::new();
+        let mut m = HashMap::new();
+        Self::insert_tool_timed(&mut m, &mut timings, "read", read::ReadTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "glob", glob::GlobTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "grep", grep::GrepTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "ls", ls::LsTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "todo", todo::TodoTool::new);
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "session_search",
+            session_search::SessionSearchTool::new,
+        );
+        Self::insert_tool_timed(&mut m, &mut timings, "memory", memory::MemoryTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "goal", goal::GoalTool::new);
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "swarm",
+            communicate::CommunicateTool::new,
+        );
+        Self::log_base_tools_init(RegistryProfile::Broker, init_start, &timings);
+        m
+    }
+
+    fn log_base_tools_init(
+        profile: RegistryProfile,
+        init_start: std::time::Instant,
+        timings: &[(String, u128)],
+    ) {
+        let nonzero: Vec<String> = timings
+            .iter()
+            .filter(|(_, ms)| *ms > 0)
+            .map(|(name, ms)| format!("{name}={ms}ms"))
+            .collect();
+        crate::logging::info(&format!(
+            "[TIMING] registry_base_tools_init: profile={}, total={}ms, nonzero=[{}]",
+            profile.label(),
+            init_start.elapsed().as_millis(),
+            nonzero.join(", ")
+        ));
+    }
+
     /// Base tools that are stateless and can be shared across sessions.
-    /// Created once and cached in a OnceLock, then cloned (cheap Arc bumps) per session.
-    fn base_tools(skills: &Arc<RwLock<SkillRegistry>>) -> HashMap<String, Arc<dyn Tool>> {
+    /// Created once and cached in OnceLocks, then cloned (cheap Arc bumps) per session.
+    fn base_tools(
+        skills: &Arc<RwLock<SkillRegistry>>,
+        profile: RegistryProfile,
+    ) -> HashMap<String, Arc<dyn Tool>> {
         use std::sync::OnceLock;
-        static BASE: OnceLock<HashMap<String, Arc<dyn Tool>>> = OnceLock::new();
-        let base = BASE.get_or_init(|| {
-            let init_start = std::time::Instant::now();
-            let mut timings = Vec::new();
-            let mut m = HashMap::new();
-            Self::insert_tool_timed(&mut m, &mut timings, "read", read::ReadTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "write", write::WriteTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "agentgrep",
-                agentgrep::AgentGrepTool::new,
-            );
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "side_panel",
-                side_panel::SidePanelTool::new,
-            );
-            Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "multiedit",
-                multiedit::MultiEditTool::new,
-            );
-            Self::insert_tool_timed(&mut m, &mut timings, "patch", patch::PatchTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "apply_patch",
-                apply_patch::ApplyPatchTool::new,
-            );
-            Self::insert_tool_timed(&mut m, &mut timings, "glob", glob::GlobTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "grep", grep::GrepTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "ls", ls::LsTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "open", open::OpenTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "webfetch",
-                webfetch::WebFetchTool::new,
-            );
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "websearch",
-                websearch::WebSearchTool::new,
-            );
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "codesearch",
-                codesearch::CodeSearchTool::new,
-            );
-            Self::insert_tool_timed(&mut m, &mut timings, "invalid", invalid::InvalidTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "lsp", lsp::LspTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "todo", todo::TodoTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "bg", bg::BgTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "swarm",
-                communicate::CommunicateTool::new,
-            );
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "session_search",
-                session_search::SessionSearchTool::new,
-            );
-            Self::insert_tool_timed(&mut m, &mut timings, "memory", memory::MemoryTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "goal", goal::GoalTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "gmail", gmail::GmailTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);
-            let nonzero: Vec<String> = timings
-                .iter()
-                .filter(|(_, ms)| *ms > 0)
-                .map(|(name, ms)| format!("{name}={ms}ms"))
-                .collect();
-            crate::logging::info(&format!(
-                "[TIMING] registry_base_tools_init: total={}ms, nonzero=[{}]",
-                init_start.elapsed().as_millis(),
-                nonzero.join(", ")
-            ));
-            m
-        });
+        static FULL_BASE: OnceLock<HashMap<String, Arc<dyn Tool>>> = OnceLock::new();
+        static BROKER_BASE: OnceLock<HashMap<String, Arc<dyn Tool>>> = OnceLock::new();
+        let base = match profile {
+            RegistryProfile::Full => FULL_BASE.get_or_init(Self::build_full_base_tools),
+            RegistryProfile::Broker => BROKER_BASE.get_or_init(Self::build_broker_base_tools),
+        };
         // Clone the Arc entries (cheap refcount bumps, not deep copies)
         let mut tools = base.clone();
         // SkillTool needs the skills registry reference (shared across sessions)
@@ -210,6 +287,14 @@ impl Registry {
     }
 
     pub async fn new(provider: Arc<dyn Provider>) -> Self {
+        Self::new_with_profile(provider, RegistryProfile::Full).await
+    }
+
+    pub async fn new_from_env(provider: Arc<dyn Provider>) -> Self {
+        Self::new_with_profile(provider, RegistryProfile::from_env()).await
+    }
+
+    pub async fn new_with_profile(provider: Arc<dyn Provider>, profile: RegistryProfile) -> Self {
         let start = std::time::Instant::now();
         let skills_start = std::time::Instant::now();
         let skills = Self::shared_skills_registry();
@@ -222,25 +307,28 @@ impl Registry {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: skills.clone(),
             compaction: compaction.clone(),
+            profile,
         };
         let registry_struct_ms = registry_struct_start.elapsed().as_millis();
 
         let base_start = std::time::Instant::now();
-        let mut tools_map = Self::base_tools(&skills);
+        let mut tools_map = Self::base_tools(&skills, profile);
         let base_ms = base_start.elapsed().as_millis();
 
         // Per-session tools that need provider/registry references
         let session_tools_start = std::time::Instant::now();
-        Self::insert_tool(
-            &mut tools_map,
-            "subagent",
-            task::SubagentTool::new(provider, registry.clone()),
-        );
-        Self::insert_tool(
-            &mut tools_map,
-            "batch",
-            batch::BatchTool::new(registry.clone()),
-        );
+        if profile == RegistryProfile::Full {
+            Self::insert_tool(
+                &mut tools_map,
+                "subagent",
+                task::SubagentTool::new(provider, registry.clone()),
+            );
+            Self::insert_tool(
+                &mut tools_map,
+                "batch",
+                batch::BatchTool::new(registry.clone()),
+            );
+        }
         Self::insert_tool(
             &mut tools_map,
             "conversation_search",
@@ -252,7 +340,8 @@ impl Registry {
         *registry.tools.write().await = tools_map;
         let write_ms = write_start.elapsed().as_millis();
         crate::logging::info(&format!(
-            "[TIMING] registry_new: skills={}ms, compaction={}ms, registry_struct={}ms, base_tools={}ms, session_tools={}ms, write={}ms, total={}ms",
+            "[TIMING] registry_new: profile={}, skills={}ms, compaction={}ms, registry_struct={}ms, base_tools={}ms, session_tools={}ms, write={}ms, total={}ms",
+            profile.label(),
             skills_ms,
             compaction_ms,
             registry_struct_ms,
@@ -262,6 +351,10 @@ impl Registry {
             start.elapsed().as_millis()
         ));
         registry
+    }
+
+    pub fn profile(&self) -> RegistryProfile {
+        self.profile
     }
 
     /// Get all tool definitions for the API
@@ -476,6 +569,11 @@ impl Registry {
         shared_pool: Option<std::sync::Arc<crate::mcp::SharedMcpPool>>,
         session_id: Option<String>,
     ) {
+        if self.profile == RegistryProfile::Broker {
+            crate::logging::info("Skipping MCP tools for broker tool profile");
+            return;
+        }
+
         use crate::mcp::McpManager;
         use std::sync::Arc;
         use tokio::sync::RwLock;
@@ -563,6 +661,11 @@ impl Registry {
 
     /// Register self-dev tools (only for canary/self-dev sessions)
     pub async fn register_selfdev_tools(&self) {
+        if self.profile == RegistryProfile::Broker {
+            crate::logging::info("Skipping self-dev tools for broker tool profile");
+            return;
+        }
+
         // Self-dev management tool
         let selfdev_tool = selfdev::SelfDevTool::new();
         self.register(
@@ -582,6 +685,11 @@ impl Registry {
 
     /// Register ambient-mode tools (only for ambient sessions)
     pub async fn register_ambient_tools(&self) {
+        if self.profile == RegistryProfile::Broker {
+            crate::logging::info("Skipping ambient tools for broker tool profile");
+            return;
+        }
+
         self.register(
             "end_ambient_cycle".to_string(),
             Arc::new(ambient::EndAmbientCycleTool::new()) as Arc<dyn Tool>,
