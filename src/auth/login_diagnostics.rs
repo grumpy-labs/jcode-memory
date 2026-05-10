@@ -109,7 +109,7 @@ pub fn auth_failure_recovery_hint(provider_id: &str, reason: AuthFailureReason) 
             "Retry the same flow and paste the full callback URL, authorization code, or required API key when prompted.".to_string()
         }
         AuthFailureReason::SaveFailed => {
-            "Check whether jcode can write its config directory, or retry inside an isolated sandbox with `bash scripts/onboarding_sandbox.sh fresh`.".to_string()
+            "Check whether jcode can write its config directory, or retry with isolated `JCODE_HOME` and `JCODE_RUNTIME_DIR` paths.".to_string()
         }
         AuthFailureReason::PostLoginValidationFailed => format!(
             "Credentials were saved, but runtime verification failed. Run `jcode auth-test --provider {}` and `jcode auth doctor {}` for guided diagnosis.",

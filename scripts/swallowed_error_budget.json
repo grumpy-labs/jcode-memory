@@ -1,9 +1,9 @@
 {
-  "total": 1998,
+  "total": 1983,
   "totals_by_pattern": {
-    "dot_ok": 657,
-    "let_underscore": 877,
-    "unwrap_or_default": 464
+    "dot_ok": 650,
+    "let_underscore": 875,
+    "unwrap_or_default": 458
   },
   "tracked_files": {
     "crates/jcode-desktop/build.rs": {
@@ -50,26 +50,6 @@
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 2
-    },
-    "crates/jcode-mobile-core/src/visual.rs": {
-      "dot_ok": 0,
-      "let_underscore": 0,
-      "unwrap_or_default": 1
-    },
-    "crates/jcode-mobile-sim/src/gpu_preview.rs": {
-      "dot_ok": 7,
-      "let_underscore": 0,
-      "unwrap_or_default": 0
-    },
-    "crates/jcode-mobile-sim/src/lib.rs": {
-      "dot_ok": 0,
-      "let_underscore": 2,
-      "unwrap_or_default": 4
-    },
-    "crates/jcode-mobile-sim/src/main.rs": {
-      "dot_ok": 0,
-      "let_underscore": 0,
-      "unwrap_or_default": 1
     },
     "crates/jcode-notify-email/src/lib.rs": {
       "dot_ok": 0,
