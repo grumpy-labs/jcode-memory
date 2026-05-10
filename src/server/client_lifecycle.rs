@@ -155,12 +155,14 @@ async fn handle_lightweight_control_request(
             session_id,
             query,
             limit,
+            include_provenance,
         } => {
             handle_broker_context(
                 id,
                 session_id,
                 query,
                 limit,
+                include_provenance,
                 None,
                 sessions,
                 &client_event_tx,
@@ -1695,12 +1697,14 @@ pub(super) async fn handle_client(
                 session_id,
                 query,
                 limit,
+                include_provenance,
             } => {
                 handle_broker_context(
                     id,
                     session_id,
                     query,
                     limit,
+                    include_provenance,
                     Some(&client_session_id),
                     &sessions,
                     &client_event_tx,

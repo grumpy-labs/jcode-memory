@@ -1,4 +1,5 @@
 use crate::test_support::*;
+use jcode::protocol::BrokerMemoryExtractionStatus;
 use std::collections::HashSet;
 
 #[tokio::test]
@@ -321,7 +322,7 @@ async fn typed_broker_context_api_returns_memory_tools_and_artifacts() -> Result
 }
 
 #[tokio::test]
-async fn broker_turn_sync_persists_hermes_turn_into_project_memory() -> Result<()> {
+async fn broker_turn_sync_persists_hermes_turn_as_hidden_provenance() -> Result<()> {
     let _env = setup_test_env()?;
     let _profile = EnvVarGuard::set("JCODE_TOOL_PROFILE", "broker");
     let runtime_dir = short_runtime_dir(format!(
@@ -365,6 +366,9 @@ async fn broker_turn_sync_persists_hermes_turn_into_project_memory() -> Result<(
         let ServerEvent::BrokerTurnSynced {
             session_id: returned_session_id,
             memory_ids,
+            provenance_memory_ids,
+            derived_memory_ids,
+            extraction_status,
             ..
         } = sync_event
         else {
@@ -373,6 +377,12 @@ async fn broker_turn_sync_persists_hermes_turn_into_project_memory() -> Result<(
 
         assert_eq!(returned_session_id, session_id);
         assert_eq!(memory_ids.len(), 1);
+        assert_eq!(provenance_memory_ids, memory_ids);
+        assert!(derived_memory_ids.is_empty());
+        assert_eq!(
+            extraction_status,
+            BrokerMemoryExtractionStatus::StoredProvenance
+        );
 
         let context_event = client
             .get_broker_context(
@@ -390,20 +400,53 @@ async fn broker_turn_sync_persists_hermes_turn_into_project_memory() -> Result<(
         };
 
         assert!(
+            memories.iter().all(|memory| !memory
+                .content
+                .contains("Hermes user turn should become jcode memory")),
+            "default broker context should hide synced Hermes provenance, got {memories:?}"
+        );
+        assert!(
+            items.iter().all(|item| item
+                .content
+                .as_deref()
+                .map(|content| !content.contains("Hermes user turn"))
+                .unwrap_or(true)),
+            "default broker context items should hide synced turn provenance, got {items:?}"
+        );
+
+        let provenance_context_event = client
+            .get_broker_context_with_options(
+                Some(session_id.clone()),
+                Some("Hermes user turn should become jcode memory".to_string()),
+                8,
+                true,
+            )
+            .await?;
+
+        let ServerEvent::BrokerContext {
+            memories, items, ..
+        } = provenance_context_event
+        else {
+            anyhow::bail!("expected broker context event, got {provenance_context_event:?}");
+        };
+
+        assert!(
             memories.iter().any(|memory| memory
                 .content
                 .contains("Hermes user turn should become jcode memory")
+                && memory.tags.iter().any(|tag| tag == "broker-provenance")
                 && memory.tags.iter().any(|tag| tag == "hermes-turn")),
-            "broker context should include synced Hermes turn memory, got {memories:?}"
+            "provenance broker context should include synced Hermes turn memory, got {memories:?}"
         );
         assert!(
             items.iter().any(|item| item.kind == "memory"
+                && item.tags.iter().any(|tag| tag == "broker-provenance")
                 && item
                     .content
                     .as_deref()
                     .unwrap_or_default()
                     .contains("Hermes user turn")),
-            "broker context items should expose synced turn memory, got {items:?}"
+            "explicit provenance context items should expose synced turn memory, got {items:?}"
         );
 
         Ok::<_, anyhow::Error>(())

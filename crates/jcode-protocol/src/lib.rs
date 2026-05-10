@@ -74,6 +74,17 @@ pub struct BrokerMemoryContextItem {
     pub source: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerMemoryExtractionStatus {
+    #[default]
+    StoredProvenance,
+    Extracted,
+    SkippedSidecarDisabled,
+    Failed,
+    FallbackNoEmbeddings,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BrokerContextItem {
     pub id: String,
@@ -289,6 +300,8 @@ pub enum Request {
         query: Option<String>,
         #[serde(default = "default_broker_context_limit")]
         limit: usize,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_provenance: bool,
     },
 
     /// Sync an external Hermes turn into broker-managed memory.
@@ -1108,6 +1121,12 @@ pub enum ServerEvent {
         session_id: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         memory_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provenance_memory_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        derived_memory_ids: Vec<String>,
+        #[serde(default)]
+        extraction_status: BrokerMemoryExtractionStatus,
     },
 
     /// Expanded compacted-history window (response to GetCompactedHistory).

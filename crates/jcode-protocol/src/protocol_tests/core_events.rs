@@ -39,15 +39,18 @@ fn test_broker_context_request_roundtrip() -> Result<()> {
         session_id: Some("ses_broker_123".to_string()),
         query: Some("project memory".to_string()),
         limit: 5,
+        include_provenance: true,
     };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"broker_context\""));
+    assert!(json.contains("\"include_provenance\":true"));
     let decoded = parse_request_json(&json)?;
     assert_eq!(decoded.id(), 12);
     let Request::BrokerContext {
         session_id,
         query,
         limit,
+        include_provenance,
         ..
     } = decoded
     else {
@@ -56,6 +59,84 @@ fn test_broker_context_request_roundtrip() -> Result<()> {
     assert_eq!(session_id.as_deref(), Some("ses_broker_123"));
     assert_eq!(query.as_deref(), Some("project memory"));
     assert_eq!(limit, 5);
+    assert!(include_provenance);
+    Ok(())
+}
+
+#[test]
+fn test_broker_context_request_defaults_provenance_off() -> Result<()> {
+    let decoded = parse_request_json(
+        r#"{"type":"broker_context","id":13,"session_id":"ses_broker_123","query":"project memory"}"#,
+    )?;
+    let Request::BrokerContext {
+        include_provenance,
+        limit,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert!(!include_provenance);
+    assert_eq!(limit, 8);
+    Ok(())
+}
+
+#[test]
+fn test_broker_turn_sync_roundtrip_has_extraction_status() -> Result<()> {
+    let req = Request::BrokerTurnSync {
+        id: 14,
+        session_id: Some("ses_broker_123".to_string()),
+        user_content: "remember hidden provenance".to_string(),
+        assistant_content: "stored for audit".to_string(),
+        source: Some("hermes".to_string()),
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"type\":\"broker_turn_sync\""));
+    let decoded = parse_request_json(&json)?;
+    let Request::BrokerTurnSync {
+        session_id,
+        user_content,
+        assistant_content,
+        source,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(session_id.as_deref(), Some("ses_broker_123"));
+    assert_eq!(user_content, "remember hidden provenance");
+    assert_eq!(assistant_content, "stored for audit");
+    assert_eq!(source.as_deref(), Some("hermes"));
+
+    let event = ServerEvent::BrokerTurnSynced {
+        id: 14,
+        session_id: "ses_broker_123".to_string(),
+        memory_ids: vec!["mem_prov_1".to_string()],
+        provenance_memory_ids: vec!["mem_prov_1".to_string()],
+        derived_memory_ids: Vec::new(),
+        extraction_status: BrokerMemoryExtractionStatus::StoredProvenance,
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"broker_turn_synced\""));
+    assert!(json.contains("\"extraction_status\":\"stored_provenance\""));
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::BrokerTurnSynced {
+        memory_ids,
+        provenance_memory_ids,
+        derived_memory_ids,
+        extraction_status,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(memory_ids, vec!["mem_prov_1"]);
+    assert_eq!(provenance_memory_ids, vec!["mem_prov_1"]);
+    assert!(derived_memory_ids.is_empty());
+    assert_eq!(
+        extraction_status,
+        BrokerMemoryExtractionStatus::StoredProvenance
+    );
     Ok(())
 }
 

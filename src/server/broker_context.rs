@@ -1,8 +1,8 @@
 use super::SessionAgents;
-use crate::memory::{MemoryEntry, MemoryManager, MemoryScope};
+use crate::memory::{MemoryCategory, MemoryEntry, MemoryManager, MemoryScope};
 use crate::protocol::{
     BrokerContextItem, BrokerContextOrigin, BrokerContextRelevance, BrokerMemoryContextItem,
-    ServerEvent,
+    BrokerMemoryExtractionStatus, ServerEvent,
 };
 use crate::todo::TodoItem;
 use anyhow::{Context, Result};
@@ -48,6 +48,7 @@ pub(super) async fn handle_broker_context(
     requested_session_id: Option<String>,
     query: Option<String>,
     limit: usize,
+    include_provenance: bool,
     fallback_session_id: Option<&str>,
     sessions: &SessionAgents,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
@@ -57,6 +58,7 @@ pub(super) async fn handle_broker_context(
         requested_session_id,
         query.as_deref(),
         limit,
+        include_provenance,
         fallback_session_id,
         sessions,
     )
@@ -107,7 +109,11 @@ async fn broker_turn_sync_event(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("hermes");
-    let mut tags = vec!["broker-turn-sync".to_string(), format!("{source}-turn")];
+    let mut tags = vec![
+        "broker-provenance".to_string(),
+        "broker-turn-sync".to_string(),
+        format!("{source}-turn"),
+    ];
     tags.sort();
     tags.dedup();
 
@@ -116,7 +122,7 @@ async fn broker_turn_sync_event(
         user_content.trim(),
         assistant_content.trim()
     );
-    let entry = MemoryEntry::new(crate::memory::MemoryCategory::Fact, content)
+    let entry = MemoryEntry::new(MemoryCategory::Custom("provenance".to_string()), content)
         .with_source(format!("{source}:{session_id}"))
         .with_tags(tags);
     let manager = match working_dir {
@@ -128,7 +134,10 @@ async fn broker_turn_sync_event(
     Ok(ServerEvent::BrokerTurnSynced {
         id,
         session_id,
-        memory_ids: vec![memory_id],
+        memory_ids: vec![memory_id.clone()],
+        provenance_memory_ids: vec![memory_id],
+        derived_memory_ids: Vec::new(),
+        extraction_status: BrokerMemoryExtractionStatus::StoredProvenance,
     })
 }
 
@@ -137,6 +146,7 @@ async fn broker_context_event(
     requested_session_id: Option<String>,
     query: Option<&str>,
     limit: usize,
+    include_provenance: bool,
     fallback_session_id: Option<&str>,
     sessions: &SessionAgents,
 ) -> Result<ServerEvent> {
@@ -161,7 +171,8 @@ async fn broker_context_event(
     };
     tool_names.sort();
 
-    let memories = collect_broker_memories(working_dir.as_deref(), query, limit)?;
+    let memories =
+        collect_broker_memories(working_dir.as_deref(), query, limit, include_provenance)?;
     let side_panel = crate::side_panel::snapshot_for_session(&session_id).unwrap_or_default();
     let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
     let items = collect_context_items(
@@ -189,6 +200,7 @@ fn collect_broker_memories(
     working_dir: Option<&str>,
     query: Option<&str>,
     limit: usize,
+    include_provenance: bool,
 ) -> Result<Vec<BrokerMemoryContextItem>> {
     if limit == 0 {
         return Ok(Vec::new());
@@ -209,6 +221,7 @@ fn collect_broker_memories(
             "project",
             query,
             limit,
+            include_provenance,
             &mut seen,
             &mut memories,
         )?;
@@ -220,6 +233,7 @@ fn collect_broker_memories(
         "global",
         query,
         limit,
+        include_provenance,
         &mut seen,
         &mut memories,
     )?;
@@ -234,6 +248,7 @@ fn append_scoped_memories(
     scope_label: &str,
     query: Option<&str>,
     limit: usize,
+    include_provenance: bool,
     seen: &mut HashSet<String>,
     memories: &mut Vec<BrokerMemoryContextItem>,
 ) -> Result<()> {
@@ -254,10 +269,18 @@ fn append_scoped_memories(
         if !seen.insert(entry.id.clone()) {
             continue;
         }
+        if !include_provenance && is_provenance_memory(&entry) {
+            continue;
+        }
         memories.push(memory_context_item(entry, scope_label));
     }
 
     Ok(())
+}
+
+fn is_provenance_memory(entry: &MemoryEntry) -> bool {
+    entry.tags.iter().any(|tag| tag == "broker-provenance")
+        || matches!(&entry.category, MemoryCategory::Custom(category) if category == "provenance")
 }
 
 fn memory_context_item(entry: MemoryEntry, scope: &str) -> BrokerMemoryContextItem {

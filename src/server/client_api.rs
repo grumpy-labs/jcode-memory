@@ -192,6 +192,17 @@ impl Client {
         query: Option<String>,
         limit: usize,
     ) -> Result<ServerEvent> {
+        self.get_broker_context_with_options(session_id, query, limit, false)
+            .await
+    }
+
+    pub async fn get_broker_context_with_options(
+        &mut self,
+        session_id: Option<String>,
+        query: Option<String>,
+        limit: usize,
+        include_provenance: bool,
+    ) -> Result<ServerEvent> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -200,6 +211,7 @@ impl Client {
             session_id,
             query,
             limit,
+            include_provenance,
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;
