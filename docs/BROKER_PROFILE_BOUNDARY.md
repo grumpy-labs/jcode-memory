@@ -33,6 +33,7 @@ Regression coverage:
 - `broker_serve_subcommand_parses`
 - `broker_server_mode_forces_broker_profile_and_default_socket`
 - `daemon_lock_path_follows_socket_name`
+- `broker_headless_session_exposes_context_artifacts_over_api`
 
 ## Future Product Split
 

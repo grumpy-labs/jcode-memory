@@ -8,6 +8,7 @@ mod test_support;
 
 mod ambient;
 mod binary_integration;
+mod broker_runtime;
 mod burst_spawn;
 mod provider_behavior;
 mod safety;
