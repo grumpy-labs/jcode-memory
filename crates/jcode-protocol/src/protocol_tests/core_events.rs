@@ -374,6 +374,26 @@ fn test_broker_context_event_roundtrip() -> Result<()> {
                 tags: vec!["broker".to_string()],
                 source: Some("ses_broker_456".to_string()),
                 score: None,
+                origin: BrokerContextOrigin {
+                    tool: Some("memory".to_string()),
+                    source: Some("ses_broker_456".to_string()),
+                    session_id: Some("ses_broker_456".to_string()),
+                    working_dir: Some("/tmp/project".to_string()),
+                    ..Default::default()
+                },
+                relevance: Some(BrokerContextRelevance {
+                    query: Some("project memory".to_string()),
+                    retrieval_mode: Some("keyword".to_string()),
+                    rank: Some(1),
+                    matched_terms: vec!["project".to_string(), "memory".to_string()],
+                    ..Default::default()
+                }),
+                fragments: vec![BrokerContextFragment {
+                    relation: "self".to_string(),
+                    content: "Project memory".to_string(),
+                    content_format: "plain_text".to_string(),
+                    ..Default::default()
+                }],
                 metadata: serde_json::json!({"category": "fact"}),
             },
             BrokerContextItem {
@@ -387,6 +407,14 @@ fn test_broker_context_event_roundtrip() -> Result<()> {
                 tags: vec!["pending".to_string(), "high".to_string()],
                 source: Some("ses_broker_456".to_string()),
                 score: None,
+                origin: BrokerContextOrigin {
+                    tool: Some("todo".to_string()),
+                    session_id: Some("ses_broker_456".to_string()),
+                    source: Some("ses_broker_456".to_string()),
+                    ..Default::default()
+                },
+                relevance: None,
+                fragments: Vec::new(),
                 metadata: serde_json::json!({"status": "pending", "priority": "high"}),
             },
             BrokerContextItem {
@@ -400,6 +428,13 @@ fn test_broker_context_event_roundtrip() -> Result<()> {
                 tags: Vec::new(),
                 source: Some("broker_tool_registry".to_string()),
                 score: None,
+                origin: BrokerContextOrigin {
+                    tool: Some("tool_registry".to_string()),
+                    source: Some("broker_tool_registry".to_string()),
+                    ..Default::default()
+                },
+                relevance: None,
+                fragments: Vec::new(),
                 metadata: serde_json::json!({"name": "memory"}),
             },
         ],
@@ -446,11 +481,22 @@ fn test_broker_context_event_roundtrip() -> Result<()> {
     assert_eq!(items.len(), 3);
     assert_eq!(items[0].kind, "memory");
     assert_eq!(items[0].content_format, "plain_text");
+    assert_eq!(items[0].origin.tool.as_deref(), Some("memory"));
+    assert_eq!(
+        items[0]
+            .relevance
+            .as_ref()
+            .and_then(|relevance| relevance.query.as_deref()),
+        Some("project memory")
+    );
+    assert_eq!(items[0].fragments[0].relation, "self");
     assert_eq!(items[0].metadata["category"], "fact");
     assert_eq!(items[1].kind, "todo");
     assert_eq!(items[1].content_format, "plain_text");
+    assert_eq!(items[1].origin.tool.as_deref(), Some("todo"));
     assert_eq!(items[1].metadata["status"], "pending");
     assert_eq!(items[2].kind, "tool");
+    assert_eq!(items[2].origin.tool.as_deref(), Some("tool_registry"));
     assert_eq!(items[2].metadata["name"], "memory");
     assert_eq!(memories[0].scope, "project");
     assert_eq!(memories[0].content, "Project memory");

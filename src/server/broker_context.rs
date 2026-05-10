@@ -1,6 +1,9 @@
 use super::SessionAgents;
 use crate::memory::{MemoryEntry, MemoryManager, MemoryScope};
-use crate::protocol::{BrokerContextItem, BrokerMemoryContextItem, ServerEvent};
+use crate::protocol::{
+    BrokerContextItem, BrokerContextOrigin, BrokerContextRelevance, BrokerMemoryContextItem,
+    ServerEvent,
+};
 use crate::todo::TodoItem;
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -70,7 +73,15 @@ async fn broker_context_event(
     let memories = collect_broker_memories(working_dir.as_deref(), query, limit)?;
     let side_panel = crate::side_panel::snapshot_for_session(&session_id).unwrap_or_default();
     let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
-    let items = collect_context_items(&session_id, &tool_names, &memories, &side_panel, &todos);
+    let items = collect_context_items(
+        &session_id,
+        working_dir.as_deref(),
+        query,
+        &tool_names,
+        &memories,
+        &side_panel,
+        &todos,
+    );
 
     Ok(ServerEvent::BrokerContext {
         id,
@@ -171,6 +182,8 @@ fn memory_context_item(entry: MemoryEntry, scope: &str) -> BrokerMemoryContextIt
 
 fn collect_context_items(
     session_id: &str,
+    working_dir: Option<&str>,
+    query: Option<&str>,
     tool_names: &[String],
     memories: &[BrokerMemoryContextItem],
     side_panel: &jcode_side_panel_types::SidePanelSnapshot,
@@ -183,13 +196,15 @@ fn collect_context_items(
             .iter()
             .map(|tool_name| tool_broker_item(tool_name)),
     );
-    items.extend(memories.iter().map(memory_broker_item));
     items.extend(
-        side_panel
-            .pages
+        memories
             .iter()
-            .map(|page| side_panel_broker_item(page, side_panel.focused_page_id.as_deref())),
+            .enumerate()
+            .map(|(index, memory)| memory_broker_item(memory, working_dir, query, index + 1)),
     );
+    items.extend(side_panel.pages.iter().map(|page| {
+        side_panel_broker_item(session_id, page, side_panel.focused_page_id.as_deref())
+    }));
     items.extend(todos.iter().map(|todo| todo_broker_item(session_id, todo)));
 
     items
@@ -207,13 +222,25 @@ fn tool_broker_item(tool_name: &str) -> BrokerContextItem {
         tags: Vec::new(),
         source: Some("broker_tool_registry".to_string()),
         score: None,
+        origin: BrokerContextOrigin {
+            tool: Some("tool_registry".to_string()),
+            source: Some("broker_tool_registry".to_string()),
+            ..Default::default()
+        },
+        relevance: None,
+        fragments: Vec::new(),
         metadata: json!({
             "name": tool_name,
         }),
     }
 }
 
-fn memory_broker_item(memory: &BrokerMemoryContextItem) -> BrokerContextItem {
+fn memory_broker_item(
+    memory: &BrokerMemoryContextItem,
+    working_dir: Option<&str>,
+    query: Option<&str>,
+    rank: usize,
+) -> BrokerContextItem {
     BrokerContextItem {
         id: memory.id.clone(),
         kind: "memory".to_string(),
@@ -225,6 +252,14 @@ fn memory_broker_item(memory: &BrokerMemoryContextItem) -> BrokerContextItem {
         tags: memory.tags.clone(),
         source: memory.source.clone(),
         score: None,
+        origin: BrokerContextOrigin {
+            tool: Some("memory".to_string()),
+            source: memory.source.clone(),
+            working_dir: working_dir.map(str::to_string),
+            ..Default::default()
+        },
+        relevance: memory_relevance(query, rank),
+        fragments: Vec::new(),
         metadata: json!({
             "category": memory.category,
             "scope": memory.scope,
@@ -233,6 +268,7 @@ fn memory_broker_item(memory: &BrokerMemoryContextItem) -> BrokerContextItem {
 }
 
 fn side_panel_broker_item(
+    session_id: &str,
     page: &jcode_side_panel_types::SidePanelPage,
     focused_page_id: Option<&str>,
 ) -> BrokerContextItem {
@@ -257,6 +293,15 @@ fn side_panel_broker_item(
         tags,
         source: Some(page.file_path.clone()),
         score: None,
+        origin: BrokerContextOrigin {
+            tool: Some(kind.to_string()),
+            source: Some(page.file_path.clone()),
+            session_id: Some(session_id.to_string()),
+            path: Some(page.file_path.clone()),
+            ..Default::default()
+        },
+        relevance: None,
+        fragments: Vec::new(),
         metadata: json!({
             "format": page.format,
             "source": page.source,
@@ -286,6 +331,14 @@ fn todo_broker_item(session_id: &str, todo: &TodoItem) -> BrokerContextItem {
         tags,
         source: Some(session_id.to_string()),
         score: None,
+        origin: BrokerContextOrigin {
+            tool: Some("todo".to_string()),
+            source: Some(session_id.to_string()),
+            session_id: Some(session_id.to_string()),
+            ..Default::default()
+        },
+        relevance: None,
+        fragments: Vec::new(),
         metadata: json!({
             "status": todo.status,
             "priority": todo.priority,
@@ -293,6 +346,22 @@ fn todo_broker_item(session_id: &str, todo: &TodoItem) -> BrokerContextItem {
             "assigned_to": todo.assigned_to,
         }),
     }
+}
+
+fn memory_relevance(query: Option<&str>, rank: usize) -> Option<BrokerContextRelevance> {
+    let query = query.map(str::trim).filter(|query| !query.is_empty())?;
+    Some(BrokerContextRelevance {
+        query: Some(query.to_string()),
+        retrieval_mode: Some("keyword".to_string()),
+        rank: Some(rank),
+        matched_terms: query
+            .split_whitespace()
+            .map(|term| term.trim_matches(|ch: char| !ch.is_alphanumeric()))
+            .filter(|term| !term.is_empty())
+            .map(|term| term.to_ascii_lowercase())
+            .collect(),
+        ..Default::default()
+    })
 }
 
 fn summarize_content(content: &str) -> String {

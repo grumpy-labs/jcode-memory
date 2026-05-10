@@ -93,8 +93,92 @@ pub struct BrokerContextItem {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<f32>,
+    #[serde(default, skip_serializing_if = "broker_context_origin_is_empty")]
+    pub origin: BrokerContextOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relevance: Option<BrokerContextRelevance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fragments: Vec<BrokerContextFragment>,
     #[serde(default, skip_serializing_if = "broker_context_metadata_is_empty")]
     pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BrokerContextOrigin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "broker_context_metadata_is_empty")]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BrokerContextRelevance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrieval_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_terms: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_match: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrokerContextFragment {
+    pub relation: String,
+    pub content: String,
+    #[serde(default = "default_broker_context_content_format")]
+    pub content_format: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+}
+
+impl Default for BrokerContextFragment {
+    fn default() -> Self {
+        Self {
+            relation: String::new(),
+            content: String::new(),
+            content_format: default_broker_context_content_format(),
+            role: None,
+            message_index: None,
+            message_id: None,
+            timestamp: None,
+        }
+    }
 }
 
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
@@ -2031,6 +2115,23 @@ fn default_broker_context_limit() -> usize {
 
 fn default_broker_context_content_format() -> String {
     "plain_text".to_string()
+}
+
+fn broker_context_origin_is_empty(origin: &BrokerContextOrigin) -> bool {
+    origin.tool.is_none()
+        && origin.source.is_none()
+        && origin.session_id.is_none()
+        && origin.working_dir.is_none()
+        && origin.path.is_none()
+        && origin.uri.is_none()
+        && origin.provider_key.is_none()
+        && origin.model.is_none()
+        && origin.message_id.is_none()
+        && origin.message_index.is_none()
+        && origin.role.is_none()
+        && origin.timestamp.is_none()
+        && origin.updated_at.is_none()
+        && broker_context_metadata_is_empty(&origin.metadata)
 }
 
 fn broker_context_metadata_is_empty(value: &serde_json::Value) -> bool {

@@ -25,6 +25,7 @@ The broker profile should run headless and API-first. The TUI remains useful, bu
 - Broker-safe tools may still write side-panel snapshots as durable context artifacts. This preserves inspectability without making the TUI load-bearing.
 - The typed `broker_context` protocol request exposes broker-safe tool inventory, scoped memory items, working directory, and side-panel context artifacts without requiring debug command strings.
 - `broker_context.items` is the normalized context stream for provider adapters. It currently maps broker tools, memories, goal/side-panel artifacts, and session todos while keeping the legacy `tool_names`, `memories`, and `side_panel` fields available during the transition.
+- Each broker context item carries explicit `origin`, optional `relevance`, and optional `fragments` fields so future session-search, conversation-search, and graph-database records can keep provenance separate from durable memory semantics.
 - `jcode broker serve` starts the headless broker runtime with the broker tool profile and a distinct default socket, `jcode-broker.sock`.
 
 Regression coverage:

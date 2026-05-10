@@ -230,7 +230,7 @@ async fn typed_broker_context_api_returns_memory_tools_and_artifacts() -> Result
             .map(|memory| memory.id.clone())
             .context("missing explicit memory in legacy memories field")?;
         assert!(
-            item_keys.contains(&("memory".to_string(), memory_id)),
+            item_keys.contains(&("memory".to_string(), memory_id.clone())),
             "broker context items should include the memory item, got {items:?}"
         );
         assert!(
@@ -254,6 +254,8 @@ async fn typed_broker_context_api_returns_memory_tools_and_artifacts() -> Result
             .context("missing todo broker item")?;
         assert_eq!(todo_item.scope, "session");
         assert_eq!(todo_item.content_format, "plain_text");
+        assert_eq!(todo_item.origin.tool.as_deref(), Some("todo"));
+        assert_eq!(todo_item.origin.session_id.as_deref(), Some(session_id.as_str()));
         assert_eq!(
             todo_item.title.as_deref(),
             Some("Normalize broker context item contract")
@@ -265,11 +267,37 @@ async fn typed_broker_context_api_returns_memory_tools_and_artifacts() -> Result
             .find(|item| item.kind == "goal" && item.id == "goal.typed-broker-context-api")
             .context("missing goal broker item")?;
         assert_eq!(goal_item.content_format, "markdown");
+        assert_eq!(goal_item.origin.tool.as_deref(), Some("goal"));
+        assert!(
+            goal_item
+                .origin
+                .path
+                .as_deref()
+                .unwrap_or_default()
+                .ends_with("goal.typed-broker-context-api.md")
+        );
         let tool_item = items
             .iter()
             .find(|item| item.kind == "tool" && item.id == "memory")
             .context("missing memory tool broker item")?;
+        assert_eq!(tool_item.origin.tool.as_deref(), Some("tool_registry"));
         assert_eq!(tool_item.metadata["name"], "memory");
+        let memory_item = items
+            .iter()
+            .find(|item| item.kind == "memory" && item.id == memory_id)
+            .context("missing memory broker item")?;
+        assert_eq!(memory_item.origin.tool.as_deref(), Some("memory"));
+        assert_eq!(
+            memory_item.origin.working_dir.as_deref(),
+            Some(project_dir.to_string_lossy().as_ref())
+        );
+        let relevance = memory_item
+            .relevance
+            .as_ref()
+            .context("memory broker item should include relevance")?;
+        assert_eq!(relevance.query.as_deref(), Some("Typed broker"));
+        assert_eq!(relevance.retrieval_mode.as_deref(), Some("keyword"));
+        assert!(relevance.rank.is_some());
 
         assert_eq!(
             side_panel.focused_page_id.as_deref(),
