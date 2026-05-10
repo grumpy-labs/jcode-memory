@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::args::{
@@ -49,6 +50,25 @@ fn prepare_server_command_env(args: &Args, mode: ServerCommandMode) {
     }
 }
 
+fn use_no_model_broker_provider(args: &Args, mode: ServerCommandMode) -> bool {
+    mode == ServerCommandMode::Broker
+        && args.provider == ProviderChoice::Auto
+        && args.model.is_none()
+        && args.provider_profile.is_none()
+}
+
+async fn init_server_provider(
+    args: &Args,
+    mode: ServerCommandMode,
+) -> Result<Arc<dyn provider::Provider>> {
+    if use_no_model_broker_provider(args, mode) {
+        crate::logging::info("Using broker no-model provider");
+        return Ok(Arc::new(provider::no_model::NoModelProvider::broker()));
+    }
+
+    provider_init::init_provider(&args.provider, args.model.as_deref()).await
+}
+
 async fn run_server_command(
     args: &Args,
     mode: ServerCommandMode,
@@ -62,7 +82,7 @@ async fn run_server_command(
         server::configure_temporary_server(owner_pid, temp_idle_timeout_secs);
     }
     let provider_start = Instant::now();
-    let provider = provider_init::init_provider(&args.provider, args.model.as_deref()).await?;
+    let provider = init_server_provider(args, mode).await?;
     let provider_ms = provider_start.elapsed().as_millis();
     let server_new_start = Instant::now();
     let server = server::Server::new(provider);

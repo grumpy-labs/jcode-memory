@@ -11,9 +11,11 @@ import logging
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONTEXT_LIMIT = 8
 DEFAULT_MAX_CHARS = 2400
+DEFAULT_STARTUP_TIMEOUT_SECONDS = 5.0
 
 
 JCODE_BROKER_CONTEXT_SCHEMA = {
@@ -99,6 +102,23 @@ def _jcode_runtime_dir() -> Path:
         suffix = os.environ.get("USERNAME") or os.environ.get("USER") or "user"
         suffix = "".join(ch for ch in suffix if ch.isalnum() or ch in "-_")[:64] or "user"
     return Path(tempfile.gettempdir()) / f"jcode-{suffix}"
+
+
+def _config_bool(config: Dict[str, Any], key: str, default: bool) -> bool:
+    value = config.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _config_float(config: Dict[str, Any], key: str, default: float) -> float:
+    value = config.get(key, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class BrokerSocketClient:
@@ -221,6 +241,11 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         self._context_limit = int(self._config.get("context_limit", DEFAULT_CONTEXT_LIMIT))
         self._max_chars = int(self._config.get("max_chars", DEFAULT_MAX_CHARS))
         self._socket_path = str(self._config.get("socket_path") or _default_socket_path())
+        self._auto_start = _config_bool(self._config, "auto_start", True)
+        self._startup_timeout = _config_float(
+            self._config, "startup_timeout_seconds", DEFAULT_STARTUP_TIMEOUT_SECONDS
+        )
+        self._broker_process: Optional[subprocess.Popen[Any]] = None
 
     @property
     def name(self) -> str:
@@ -229,6 +254,8 @@ class JcodeGraphMemoryProvider(MemoryProvider):
     def is_available(self) -> bool:
         if Path(self._socket_path).exists():
             return True
+        if not self._auto_start:
+            return False
         return shutil.which("jcode") is not None or shutil.which("jcode-memory") is not None
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
@@ -244,11 +271,15 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             working_dir=str(self._working_dir) if self._working_dir else None,
             timeout=float(self._config.get("timeout_seconds", 2.0)),
         )
-        try:
-            self._client.connect()
-        except Exception as exc:
-            logger.debug("jcode broker connect failed: %s", exc)
-            self._client = None
+        if self._connect_client():
+            return
+        if self._auto_start and self._start_broker():
+            deadline = time.monotonic() + max(0.0, self._startup_timeout)
+            while time.monotonic() <= deadline:
+                if self._connect_client():
+                    return
+                time.sleep(0.05)
+        self._client = None
 
     def system_prompt_block(self) -> str:
         if self._client is None:
@@ -289,9 +320,31 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         if self._client is not None:
             self._client.close()
             self._client = None
+        if self._broker_process is not None:
+            process = self._broker_process
+            self._broker_process = None
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
         return [
+            {
+                "key": "auto_start",
+                "description": "Start jcode broker serve when the socket is unavailable",
+                "default": "true",
+            },
+            {
+                "key": "jcode_binary",
+                "description": "Path to jcode or jcode-memory binary for auto-start",
+                "default": "jcode",
+            },
             {
                 "key": "socket_path",
                 "description": "Path to the jcode broker Unix socket",
@@ -311,6 +364,11 @@ class JcodeGraphMemoryProvider(MemoryProvider):
                 "key": "max_chars",
                 "description": "Maximum formatted context characters to inject",
                 "default": str(DEFAULT_MAX_CHARS),
+            },
+            {
+                "key": "startup_timeout_seconds",
+                "description": "Seconds to wait for auto-started broker socket readiness",
+                "default": str(DEFAULT_STARTUP_TIMEOUT_SECONDS),
             },
         ]
 
@@ -338,6 +396,58 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         except Exception as exc:
             logger.debug("jcode broker_context failed: %s", exc)
             return None
+
+    def _connect_client(self) -> bool:
+        if self._client is None:
+            return False
+        try:
+            self._client.connect()
+            return True
+        except Exception as exc:
+            logger.debug("jcode broker connect failed: %s", exc)
+            self._client.close()
+            return False
+
+    def _resolve_jcode_binary(self) -> Optional[str]:
+        configured = self._config.get("jcode_binary") or os.environ.get("JCODE_BINARY")
+        if configured:
+            return str(configured)
+        return shutil.which("jcode") or shutil.which("jcode-memory")
+
+    def _start_broker(self) -> bool:
+        if self._broker_process is not None and self._broker_process.poll() is None:
+            return True
+        binary = self._resolve_jcode_binary()
+        if not binary:
+            return False
+
+        socket_path = Path(self._socket_path)
+        socket_path.parent.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env.setdefault("JCODE_RUNTIME_DIR", str(socket_path.parent))
+        env["JCODE_NON_INTERACTIVE"] = "1"
+        command = [
+            binary,
+            "broker",
+            "serve",
+            "--socket",
+            str(socket_path),
+            "--quiet",
+        ]
+        try:
+            self._broker_process = subprocess.Popen(
+                command,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return True
+        except Exception as exc:
+            logger.debug("Failed to start jcode broker: %s", exc)
+            self._broker_process = None
+            return False
 
     def _format_prefetch(self, event: Dict[str, Any]) -> str:
         items = event.get("items") or []

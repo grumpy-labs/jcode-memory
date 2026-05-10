@@ -12,6 +12,7 @@ pub mod gemini;
 pub mod jcode;
 pub mod models;
 mod multi_provider;
+pub mod no_model;
 pub mod openai;
 pub(crate) mod openai_request;
 pub mod openrouter;

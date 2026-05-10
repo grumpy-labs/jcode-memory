@@ -7,11 +7,13 @@ import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "adapters" / "hermes"))
 
+import jcode_graph  # noqa: E402
 from jcode_graph import (  # noqa: E402
     BrokerSocketClient,
     JcodeGraphMemoryProvider,
@@ -176,6 +178,57 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         provider = JcodeGraphMemoryProvider({"socket_path": os.devnull})
         schemas = provider.get_tool_schemas()
         self.assertEqual(schemas[0]["name"], "jcode_broker_context")
+
+    def test_provider_auto_starts_broker_when_socket_is_missing(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.terminated = False
+
+            def poll(self):
+                return None
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_binary = Path(tmp) / "jcode"
+            fake_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_binary.chmod(0o755)
+            socket_path = str(Path(tmp) / "broker.sock")
+            fake_process = FakeProcess()
+
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": socket_path,
+                    "jcode_binary": str(fake_binary),
+                    "startup_timeout_seconds": 0,
+                }
+            )
+
+            with unittest.mock.patch.object(
+                jcode_graph.subprocess, "Popen", return_value=fake_process
+            ) as popen:
+                provider.initialize("hermes_session", working_dir="/tmp/project")
+                provider.shutdown()
+
+            popen.assert_called_once()
+            command = popen.call_args.args[0]
+            self.assertEqual(command[:3], [str(fake_binary), "broker", "serve"])
+            self.assertIn("--socket", command)
+            self.assertIn(socket_path, command)
+            self.assertIn("--quiet", command)
+            self.assertEqual(
+                popen.call_args.kwargs["env"]["JCODE_RUNTIME_DIR"],
+                str(Path(socket_path).parent),
+            )
+            self.assertEqual(
+                popen.call_args.kwargs["env"]["JCODE_NON_INTERACTIVE"],
+                "1",
+            )
+            self.assertTrue(fake_process.terminated)
 
 
 if __name__ == "__main__":

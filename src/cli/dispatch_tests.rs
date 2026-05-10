@@ -120,6 +120,51 @@ fn broker_server_mode_respects_explicit_socket() {
 }
 
 #[test]
+fn broker_server_mode_uses_no_model_provider_by_default() {
+    let default_args =
+        Args::try_parse_from(["jcode", "broker", "serve"]).expect("parse broker serve");
+    assert!(use_no_model_broker_provider(
+        &default_args,
+        ServerCommandMode::Broker
+    ));
+
+    let standard_args = Args::try_parse_from(["jcode", "serve"]).expect("parse serve");
+    assert!(!use_no_model_broker_provider(
+        &standard_args,
+        ServerCommandMode::Standard
+    ));
+
+    let explicit_provider_args =
+        Args::try_parse_from(["jcode", "--provider", "claude", "broker", "serve"])
+            .expect("parse broker serve with provider");
+    assert!(!use_no_model_broker_provider(
+        &explicit_provider_args,
+        ServerCommandMode::Broker
+    ));
+
+    let explicit_model_args =
+        Args::try_parse_from(["jcode", "--model", "claude-opus-4-6", "broker", "serve"])
+            .expect("parse broker serve with model");
+    assert!(!use_no_model_broker_provider(
+        &explicit_model_args,
+        ServerCommandMode::Broker
+    ));
+
+    let explicit_profile_args = Args::try_parse_from([
+        "jcode",
+        "--provider-profile",
+        "local-gateway",
+        "broker",
+        "serve",
+    ])
+    .expect("parse broker serve with provider profile");
+    assert!(!use_no_model_broker_provider(
+        &explicit_profile_args,
+        ServerCommandMode::Broker
+    ));
+}
+
+#[test]
 fn standard_server_mode_preserves_existing_profile_and_socket() {
     let _guard = crate::storage::lock_test_env();
     let _non_interactive = EnvVarGuard::remove("JCODE_NON_INTERACTIVE");
