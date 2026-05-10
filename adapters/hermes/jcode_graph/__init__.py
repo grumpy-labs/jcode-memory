@@ -11,6 +11,8 @@ import logging
 import os
 import shutil
 import socket
+import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -77,10 +79,26 @@ def _default_socket_path() -> str:
     configured = os.environ.get("JCODE_BROKER_SOCKET")
     if configured:
         return configured
-    runtime_dir = os.environ.get("JCODE_RUNTIME_DIR")
-    if runtime_dir:
-        return str(Path(runtime_dir) / "jcode-broker.sock")
-    return str(Path.home() / ".local" / "share" / "jcode" / "jcode-broker.sock")
+    return str(_jcode_runtime_dir() / "jcode-broker.sock")
+
+
+def _jcode_runtime_dir() -> Path:
+    configured = os.environ.get("JCODE_RUNTIME_DIR")
+    if configured:
+        return Path(configured)
+    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg_runtime:
+        return Path(xdg_runtime)
+    if sys.platform == "darwin":
+        mac_tmp = os.environ.get("TMPDIR")
+        if mac_tmp:
+            return Path(mac_tmp)
+    try:
+        suffix = str(os.geteuid())
+    except AttributeError:
+        suffix = os.environ.get("USERNAME") or os.environ.get("USER") or "user"
+        suffix = "".join(ch for ch in suffix if ch.isalnum() or ch in "-_")[:64] or "user"
+    return Path(tempfile.gettempdir()) / f"jcode-{suffix}"
 
 
 class BrokerSocketClient:

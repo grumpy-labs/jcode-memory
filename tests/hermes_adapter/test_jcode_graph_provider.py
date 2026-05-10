@@ -12,7 +12,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "adapters" / "hermes"))
 
-from jcode_graph import BrokerSocketClient, JcodeGraphMemoryProvider  # noqa: E402
+from jcode_graph import (  # noqa: E402
+    BrokerSocketClient,
+    JcodeGraphMemoryProvider,
+    _default_socket_path,
+)
 
 
 class FakeBrokerServer:
@@ -112,6 +116,41 @@ class BrokerSocketClientTests(unittest.TestCase):
         self.assertEqual(server.requests[1]["type"], "broker_context")
         self.assertEqual(server.requests[1]["query"], "project memory")
         self.assertEqual(server.requests[1]["limit"], 3)
+
+
+class RuntimePathTests(unittest.TestCase):
+    def test_default_socket_prefers_jcode_runtime_dir(self) -> None:
+        previous = {
+            "JCODE_BROKER_SOCKET": os.environ.get("JCODE_BROKER_SOCKET"),
+            "JCODE_RUNTIME_DIR": os.environ.get("JCODE_RUNTIME_DIR"),
+            "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR"),
+        }
+        try:
+            os.environ.pop("JCODE_BROKER_SOCKET", None)
+            os.environ["JCODE_RUNTIME_DIR"] = "/tmp/jcode-smoke-runtime"
+            os.environ["XDG_RUNTIME_DIR"] = "/tmp/xdg-runtime"
+
+            self.assertEqual(
+                _default_socket_path(),
+                "/tmp/jcode-smoke-runtime/jcode-broker.sock",
+            )
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_default_socket_accepts_explicit_override(self) -> None:
+        previous = os.environ.get("JCODE_BROKER_SOCKET")
+        try:
+            os.environ["JCODE_BROKER_SOCKET"] = "/tmp/custom-broker.sock"
+            self.assertEqual(_default_socket_path(), "/tmp/custom-broker.sock")
+        finally:
+            if previous is None:
+                os.environ.pop("JCODE_BROKER_SOCKET", None)
+            else:
+                os.environ["JCODE_BROKER_SOCKET"] = previous
 
 
 class JcodeGraphMemoryProviderTests(unittest.TestCase):
