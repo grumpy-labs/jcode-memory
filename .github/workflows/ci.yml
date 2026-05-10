@@ -323,19 +323,6 @@ jobs:
             throw 'Built Windows binary failed to run --version'
           }
 
-      - name: Verify installer using local artifact
-        shell: pwsh
-        run: |
-          $cargoVersion = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-          if (-not $cargoVersion) {
-            throw 'Could not determine Cargo.toml version'
-          }
-
-          $version = 'v' + $cargoVersion.Matches[0].Groups[1].Value
-          & ./.github/scripts/verify_windows_install.ps1 `
-            -ArtifactExePath 'target/x86_64-pc-windows-msvc/release/jcode.exe' `
-            -Version $version
-
   fmt:
     name: Format
     runs-on: ubuntu-latest

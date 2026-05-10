@@ -538,7 +538,6 @@ Path-classified counts below are approximate. Inline `#[cfg(test)]` modules insi
 | 4 | `src/tui/ui_tests/tools.rs` |
 | 1 | `src/stdin_detect.rs` |
 | 1 | `docs/MEMORY_ARCHITECTURE.md` |
-| 1 | `docs/IOS_CLIENT.md` |
 
 ## Highest-value improvement themes
 
@@ -558,4 +557,3 @@ Path-classified counts below are approximate. Inline `#[cfg(test)]` modules insi
 3. move inline tests out of production mega-files where practical
 4. replace easy production `unwrap`/`expect` hotspots with explicit error handling, starting with tool/auth/build modules
 5. continue splitting TUI render and event-handling functions into domain-focused helpers
-

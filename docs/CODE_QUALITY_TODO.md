@@ -476,5 +476,3 @@ Generated from `docs/CODE_QUALITY_AUDIT_2026-04-18.md`. This section enumerates 
 - [ ] Resolve markers in `src/tui/ui_tests/tools.rs` (4 markers)
 - [ ] Resolve markers in `src/stdin_detect.rs` (1 markers)
 - [ ] Resolve markers in `docs/MEMORY_ARCHITECTURE.md` (1 markers)
-- [ ] Resolve markers in `docs/IOS_CLIENT.md` (1 markers)
-
