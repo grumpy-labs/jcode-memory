@@ -28,6 +28,7 @@ The broker profile should run headless and API-first. The TUI remains useful, bu
 - Each broker context item carries explicit `origin`, optional `relevance`, and optional `fragments` fields so future session-search, conversation-search, and graph-database records can keep provenance separate from durable memory semantics.
 - Session and conversation search hits should enter the same stream as `session_search_hit` and `conversation_search_hit` items. These are evidence items with provenance and relevance, not durable memory records unless a later consolidation policy promotes them.
 - `jcode broker serve` starts the headless broker runtime with the broker tool profile and a distinct default socket, `jcode-broker.sock`.
+- `adapters/hermes/jcode_graph` is the first Hermes memory-provider adapter scaffold. It is context-only for now: it connects to a running broker socket, injects formatted `broker_context.items` through `prefetch()`, and exposes a `jcode_broker_context` tool without changing Hermes config or replacing Honcho.
 
 Regression coverage:
 
@@ -40,6 +41,7 @@ Regression coverage:
 - `broker_headless_session_exposes_context_artifacts_over_api`
 - `typed_broker_context_api_returns_memory_tools_and_artifacts`
 - `test_broker_context_event_roundtrip` covers memory, todo, tool, session-search-hit, and conversation-search-hit item shapes.
+- `tests/hermes_adapter/test_jcode_graph_provider.py`
 
 ## Future Product Split
 
