@@ -1,56 +1,11 @@
 {
-  "total": 1983,
+  "total": 1949,
   "totals_by_pattern": {
-    "dot_ok": 650,
-    "let_underscore": 875,
-    "unwrap_or_default": 458
+    "dot_ok": 642,
+    "let_underscore": 868,
+    "unwrap_or_default": 439
   },
   "tracked_files": {
-    "crates/jcode-desktop/build.rs": {
-      "dot_ok": 2,
-      "let_underscore": 0,
-      "unwrap_or_default": 0
-    },
-    "crates/jcode-desktop/src/desktop_prefs.rs": {
-      "dot_ok": 1,
-      "let_underscore": 0,
-      "unwrap_or_default": 1
-    },
-    "crates/jcode-desktop/src/main.rs": {
-      "dot_ok": 0,
-      "let_underscore": 0,
-      "unwrap_or_default": 1
-    },
-    "crates/jcode-desktop/src/render_helpers.rs": {
-      "dot_ok": 0,
-      "let_underscore": 0,
-      "unwrap_or_default": 1
-    },
-    "crates/jcode-desktop/src/session_data.rs": {
-      "dot_ok": 1,
-      "let_underscore": 0,
-      "unwrap_or_default": 1
-    },
-    "crates/jcode-desktop/src/session_launch.rs": {
-      "dot_ok": 3,
-      "let_underscore": 7,
-      "unwrap_or_default": 0
-    },
-    "crates/jcode-desktop/src/single_session.rs": {
-      "dot_ok": 0,
-      "let_underscore": 0,
-      "unwrap_or_default": 13
-    },
-    "crates/jcode-desktop/src/single_session_render.rs": {
-      "dot_ok": 1,
-      "let_underscore": 0,
-      "unwrap_or_default": 0
-    },
-    "crates/jcode-desktop/src/workspace.rs": {
-      "dot_ok": 0,
-      "let_underscore": 0,
-      "unwrap_or_default": 2
-    },
     "crates/jcode-notify-email/src/lib.rs": {
       "dot_ok": 0,
       "let_underscore": 0,

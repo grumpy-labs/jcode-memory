@@ -322,11 +322,7 @@ fn test_selfdev_build_command_can_target_all() {
     let build =
         build::selfdev_build_command_for_target(temp.path(), build::SelfDevBuildTarget::All);
     assert!(build.display.contains("-p jcode --bin jcode"));
-    assert!(
-        build
-            .display
-            .contains("-p jcode-desktop --bin jcode-desktop")
-    );
+    assert!(!build.display.contains("jcode-desktop"));
 }
 
 #[test]
@@ -339,14 +335,7 @@ fn test_selfdev_build_command_can_target_tui_only() {
 }
 
 #[test]
-fn test_selfdev_build_command_can_target_desktop_only() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let build =
-        build::selfdev_build_command_for_target(temp.path(), build::SelfDevBuildTarget::Desktop);
-    assert!(!build.display.contains("-p jcode --bin jcode"));
-    assert!(
-        build
-            .display
-            .contains("-p jcode-desktop --bin jcode-desktop")
-    );
+fn test_selfdev_build_target_rejects_removed_desktop_target() {
+    assert!(build::SelfDevBuildTarget::parse(Some("desktop")).is_err());
+    assert!(build::SelfDevBuildTarget::parse(Some("jcode-desktop")).is_err());
 }

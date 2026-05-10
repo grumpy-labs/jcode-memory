@@ -30,7 +30,6 @@ FORBIDDEN_INTERNAL_DEPS = {
     "jcode-agent-runtime",
     "jcode-azure-auth",
     "jcode-core",
-    "jcode-desktop",
     "jcode-embedding",
     "jcode-notify-email",
     "jcode-pdf",

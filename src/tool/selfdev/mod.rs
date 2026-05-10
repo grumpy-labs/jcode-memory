@@ -400,8 +400,8 @@ impl Tool for SelfDevTool {
                 "reason": { "type": "string" },
                 "target": {
                     "type": "string",
-                    "enum": ["auto", "tui", "desktop", "all"],
-                    "description": "Build target for action=build. auto chooses from changed paths; tui builds jcode; desktop builds jcode-desktop; all builds both."
+                    "enum": ["auto", "tui", "all"],
+                    "description": "Build target for action=build. auto and tui build jcode; all builds all retained binaries."
                 },
                 "command": {
                     "type": "string",
