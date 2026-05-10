@@ -23,6 +23,7 @@ The broker profile should run headless and API-first. The TUI remains useful, bu
 - `RegistryProfile::Broker` does not expose the manual `side_panel` tool.
 - `RegistryProfile::Full` exposes operator presentation tools.
 - Broker-safe tools may still write side-panel snapshots as durable context artifacts. This preserves inspectability without making the TUI load-bearing.
+- The typed `broker_context` protocol request exposes broker-safe tool inventory, scoped memory items, working directory, and side-panel context artifacts without requiring debug command strings.
 - `jcode broker serve` starts the headless broker runtime with the broker tool profile and a distinct default socket, `jcode-broker.sock`.
 
 Regression coverage:
@@ -34,6 +35,7 @@ Regression coverage:
 - `broker_server_mode_forces_broker_profile_and_default_socket`
 - `daemon_lock_path_follows_socket_name`
 - `broker_headless_session_exposes_context_artifacts_over_api`
+- `typed_broker_context_api_returns_memory_tools_and_artifacts`
 
 ## Future Product Split
 

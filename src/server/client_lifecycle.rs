@@ -1,3 +1,4 @@
+use super::broker_context::handle_broker_context;
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
     handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
@@ -149,6 +150,23 @@ async fn handle_lightweight_control_request(
     });
 
     match request {
+        Request::BrokerContext {
+            id,
+            session_id,
+            query,
+            limit,
+        } => {
+            handle_broker_context(
+                id,
+                session_id,
+                query,
+                limit,
+                None,
+                sessions,
+                &client_event_tx,
+            )
+            .await;
+        }
         Request::CommShare {
             id,
             session_id: req_session_id,
@@ -1651,6 +1669,24 @@ pub(super) async fn handle_client(
                 if let Some(snapshot) = try_available_models_snapshot(&agent) {
                     last_available_models_snapshot = Some(snapshot);
                 }
+            }
+
+            Request::BrokerContext {
+                id,
+                session_id,
+                query,
+                limit,
+            } => {
+                handle_broker_context(
+                    id,
+                    session_id,
+                    query,
+                    limit,
+                    Some(&client_session_id),
+                    &sessions,
+                    &client_event_tx,
+                )
+                .await;
             }
 
             Request::GetCompactedHistory {

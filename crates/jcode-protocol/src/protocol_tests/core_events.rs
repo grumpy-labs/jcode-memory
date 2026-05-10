@@ -33,6 +33,33 @@ fn test_compacted_history_request_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_broker_context_request_roundtrip() -> Result<()> {
+    let req = Request::BrokerContext {
+        id: 12,
+        session_id: Some("ses_broker_123".to_string()),
+        query: Some("project memory".to_string()),
+        limit: 5,
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"type\":\"broker_context\""));
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 12);
+    let Request::BrokerContext {
+        session_id,
+        query,
+        limit,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(session_id.as_deref(), Some("ses_broker_123"));
+    assert_eq!(query.as_deref(), Some("project memory"));
+    assert_eq!(limit, 5);
+    Ok(())
+}
+
+#[test]
 fn test_rewind_request_roundtrip() -> Result<()> {
     let req = Request::Rewind {
         id: 8,
@@ -325,6 +352,61 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
     assert_eq!(side_panel.pages.len(), 1);
     assert_eq!(side_panel.pages[0].title, "Notes");
     assert_eq!(side_panel.pages[0].content, "# Notes");
+    Ok(())
+}
+
+#[test]
+fn test_broker_context_event_roundtrip() -> Result<()> {
+    let event = ServerEvent::BrokerContext {
+        id: 33,
+        session_id: "ses_broker_456".to_string(),
+        working_dir: Some("/tmp/project".to_string()),
+        tool_names: vec!["goal".to_string(), "memory".to_string()],
+        memories: vec![BrokerMemoryContextItem {
+            id: "mem_1".to_string(),
+            category: "fact".to_string(),
+            scope: "project".to_string(),
+            content: "Project memory".to_string(),
+            tags: vec!["broker".to_string()],
+            source: Some("ses_broker_456".to_string()),
+        }],
+        side_panel: jcode_side_panel_types::SidePanelSnapshot {
+            focused_page_id: Some("goal.project-memory".to_string()),
+            pages: vec![jcode_side_panel_types::SidePanelPage {
+                id: "goal.project-memory".to_string(),
+                title: "Project Memory".to_string(),
+                file_path: "/tmp/project/.jcode/goal.md".to_string(),
+                format: jcode_side_panel_types::SidePanelPageFormat::Markdown,
+                source: jcode_side_panel_types::SidePanelPageSource::Managed,
+                content: "# Goal".to_string(),
+                updated_at_ms: 77,
+            }],
+        },
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"broker_context\""));
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::BrokerContext {
+        id,
+        session_id,
+        working_dir,
+        tool_names,
+        memories,
+        side_panel,
+    } = decoded
+    else {
+        return Err(anyhow!("expected BrokerContext event"));
+    };
+    assert_eq!(id, 33);
+    assert_eq!(session_id, "ses_broker_456");
+    assert_eq!(working_dir.as_deref(), Some("/tmp/project"));
+    assert_eq!(tool_names, vec!["goal", "memory"]);
+    assert_eq!(memories[0].scope, "project");
+    assert_eq!(memories[0].content, "Project memory");
+    assert_eq!(
+        side_panel.focused_page_id.as_deref(),
+        Some("goal.project-memory")
+    );
     Ok(())
 }
 

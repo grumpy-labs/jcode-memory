@@ -1,5 +1,6 @@
 mod await_members_state;
 mod background_tasks;
+mod broker_context;
 mod client_actions;
 mod client_api;
 mod client_comm;

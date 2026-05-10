@@ -62,6 +62,18 @@ pub struct SessionActivitySnapshot {
     pub current_tool_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrokerMemoryContextItem {
+    pub id: String,
+    pub category: String,
+    pub scope: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 /// Client request to server
@@ -159,6 +171,18 @@ pub enum Request {
     /// Get full conversation history (for TUI sync on connect)
     #[serde(rename = "get_history")]
     GetHistory { id: u64 },
+
+    /// Get a structured broker-oriented context snapshot for a live session.
+    #[serde(rename = "broker_context")]
+    BrokerContext {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default = "default_broker_context_limit")]
+        limit: usize,
+    },
 
     /// Get a bounded view of compacted historical messages for lazy transcript expansion.
     #[serde(rename = "get_compacted_history")]
@@ -937,6 +961,21 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         activity: Option<SessionActivitySnapshot>,
         /// Session-scoped side panel pages and active focus state
+        #[serde(default, skip_serializing_if = "snapshot_is_empty")]
+        side_panel: SidePanelSnapshot,
+    },
+
+    /// Structured context snapshot for broker clients.
+    #[serde(rename = "broker_context")]
+    BrokerContext {
+        id: u64,
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_names: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        memories: Vec<BrokerMemoryContextItem>,
         #[serde(default, skip_serializing_if = "snapshot_is_empty")]
         side_panel: SidePanelSnapshot,
     },
@@ -1866,6 +1905,7 @@ impl Request {
             Request::ClientDebugResponse { id, .. } => *id,
             Request::Subscribe { id, .. } => *id,
             Request::GetHistory { id } => *id,
+            Request::BrokerContext { id, .. } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
             Request::Reload { id } => *id,
             Request::ResumeSession { id, .. } => *id,
@@ -1927,6 +1967,7 @@ impl Request {
         matches!(
             self,
             Request::Ping { .. }
+                | Request::BrokerContext { .. }
                 | Request::CommShare { .. }
                 | Request::CommRead { .. }
                 | Request::CommMessage { .. }
@@ -1957,6 +1998,10 @@ impl Request {
 
 fn default_model_direction() -> i8 {
     1
+}
+
+fn default_broker_context_limit() -> usize {
+    8
 }
 
 /// Encode an event as a newline-terminated JSON string
