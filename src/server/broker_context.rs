@@ -9,7 +9,7 @@ use crate::protocol::{
 use crate::todo::TodoItem;
 use anyhow::{Context, Result};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -17,6 +17,8 @@ use tokio::sync::mpsc;
 
 type TranscriptExtractionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<crate::sidecar::ExtractedMemory>>> + Send + 'a>>;
+
+const BROKER_SEMANTIC_THRESHOLD: f32 = crate::memory::EMBEDDING_SIMILARITY_THRESHOLD;
 
 trait TranscriptMemoryExtractor {
     fn extract<'a>(
@@ -337,16 +339,19 @@ async fn broker_context_event(
     };
     tool_names.sort();
 
-    let memories =
-        collect_broker_memories(working_dir.as_deref(), query, limit, include_provenance)?;
+    let memory_results =
+        collect_broker_memory_results(working_dir.as_deref(), query, limit, include_provenance)?;
+    let memories: Vec<BrokerMemoryContextItem> = memory_results
+        .iter()
+        .map(|result| result.memory.clone())
+        .collect();
     let side_panel = crate::side_panel::snapshot_for_session(&session_id).unwrap_or_default();
     let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
     let items = collect_context_items(
         &session_id,
         working_dir.as_deref(),
-        query,
         &tool_names,
-        &memories,
+        &memory_results,
         &side_panel,
         &todos,
     );
@@ -533,12 +538,63 @@ fn link_derived_memories(
     Ok(())
 }
 
+#[cfg(test)]
 fn collect_broker_memories(
     working_dir: Option<&str>,
     query: Option<&str>,
     limit: usize,
     include_provenance: bool,
 ) -> Result<Vec<BrokerMemoryContextItem>> {
+    collect_broker_memory_results(working_dir, query, limit, include_provenance)
+        .map(|results| results.into_iter().map(|result| result.memory).collect())
+}
+
+#[derive(Debug, Clone)]
+struct BrokerMemoryResult {
+    memory: BrokerMemoryContextItem,
+    relevance: Option<BrokerContextRelevance>,
+}
+
+#[derive(Debug)]
+struct BrokerMemorySearchHit {
+    entry: MemoryEntry,
+    score: Option<f32>,
+    retrieval_mode: Option<&'static str>,
+}
+
+fn collect_broker_memory_results(
+    working_dir: Option<&str>,
+    query: Option<&str>,
+    limit: usize,
+    include_provenance: bool,
+) -> Result<Vec<BrokerMemoryResult>> {
+    collect_broker_memory_results_impl(working_dir, query, None, limit, include_provenance)
+}
+
+#[cfg(test)]
+fn collect_broker_memory_results_with_query_embedding(
+    working_dir: Option<&str>,
+    query: &str,
+    query_embedding: &[f32],
+    limit: usize,
+    include_provenance: bool,
+) -> Result<Vec<BrokerMemoryResult>> {
+    collect_broker_memory_results_impl(
+        working_dir,
+        Some(query),
+        Some(query_embedding),
+        limit,
+        include_provenance,
+    )
+}
+
+fn collect_broker_memory_results_impl(
+    working_dir: Option<&str>,
+    query: Option<&str>,
+    query_embedding: Option<&[f32]>,
+    limit: usize,
+    include_provenance: bool,
+) -> Result<Vec<BrokerMemoryResult>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -552,11 +608,12 @@ fn collect_broker_memories(
     let mut memories = Vec::new();
 
     if working_dir.is_some() {
-        append_scoped_memories(
+        append_scoped_memory_results(
             &manager,
             MemoryScope::Project,
             "project",
             query,
+            query_embedding,
             limit,
             include_provenance,
             &mut seen,
@@ -564,11 +621,12 @@ fn collect_broker_memories(
         )?;
     }
 
-    append_scoped_memories(
+    append_scoped_memory_results(
         &manager,
         MemoryScope::Global,
         "global",
         query,
+        query_embedding,
         limit,
         include_provenance,
         &mut seen,
@@ -579,40 +637,194 @@ fn collect_broker_memories(
     Ok(memories)
 }
 
-fn append_scoped_memories(
+fn append_scoped_memory_results(
     manager: &MemoryManager,
     scope: MemoryScope,
     scope_label: &str,
     query: Option<&str>,
+    query_embedding: Option<&[f32]>,
     limit: usize,
     include_provenance: bool,
     seen: &mut HashSet<String>,
-    memories: &mut Vec<BrokerMemoryContextItem>,
+    memories: &mut Vec<BrokerMemoryResult>,
 ) -> Result<()> {
-    let mut entries = match query {
-        Some(query) if !query.trim().is_empty() => manager.search_scoped(query, scope)?,
-        _ => manager.list_all_scoped(scope)?,
-    };
-    entries.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    let hits = scoped_memory_search_hits(manager, scope, query, query_embedding, limit)?;
 
-    for entry in entries {
+    for hit in hits {
         if memories.len() >= limit {
             break;
         }
+        let entry = hit.entry;
         if !seen.insert(entry.id.clone()) {
             continue;
         }
         if !include_provenance && is_provenance_memory(&entry) {
             continue;
         }
-        memories.push(memory_context_item(entry, scope_label));
+        let rank = memories.len() + 1;
+        let relevance = memory_relevance(query, &entry, hit.retrieval_mode, hit.score, rank);
+        memories.push(BrokerMemoryResult {
+            memory: memory_context_item(entry, scope_label),
+            relevance,
+        });
     }
 
     Ok(())
+}
+
+fn scoped_memory_search_hits(
+    manager: &MemoryManager,
+    scope: MemoryScope,
+    query: Option<&str>,
+    query_embedding: Option<&[f32]>,
+    limit: usize,
+) -> Result<Vec<BrokerMemorySearchHit>> {
+    let query = query.map(str::trim).filter(|query| !query.is_empty());
+    if let Some(query) = query {
+        let semantic_hits = semantic_cascade_hits(manager, scope, query, query_embedding, limit)?;
+        if !semantic_hits.is_empty() {
+            return Ok(semantic_hits);
+        }
+
+        let mut entries = manager.search_scoped(query, scope)?;
+        sort_entries_by_updated_at(&mut entries);
+        return Ok(entries
+            .into_iter()
+            .map(|entry| BrokerMemorySearchHit {
+                entry,
+                score: None,
+                retrieval_mode: Some("keyword"),
+            })
+            .collect());
+    }
+
+    let mut entries = manager.list_all_scoped(scope)?;
+    sort_entries_by_updated_at(&mut entries);
+    Ok(entries
+        .into_iter()
+        .map(|entry| BrokerMemorySearchHit {
+            entry,
+            score: None,
+            retrieval_mode: None,
+        })
+        .collect())
+}
+
+fn semantic_cascade_hits(
+    manager: &MemoryManager,
+    scope: MemoryScope,
+    query: &str,
+    query_embedding: Option<&[f32]>,
+    limit: usize,
+) -> Result<Vec<BrokerMemorySearchHit>> {
+    let hits = match query_embedding {
+        Some(embedding) => find_semantic_cascade_with_embedding(manager, embedding, limit, scope)?,
+        None => manager.find_similar_with_cascade_scoped(
+            query,
+            BROKER_SEMANTIC_THRESHOLD,
+            limit,
+            scope,
+        )?,
+    };
+
+    Ok(hits
+        .into_iter()
+        .map(|(entry, score)| BrokerMemorySearchHit {
+            entry,
+            score: Some(score),
+            retrieval_mode: Some("semantic_cascade"),
+        })
+        .collect())
+}
+
+fn find_semantic_cascade_with_embedding(
+    manager: &MemoryManager,
+    query_embedding: &[f32],
+    limit: usize,
+    scope: MemoryScope,
+) -> Result<Vec<(MemoryEntry, f32)>> {
+    let embedding_hits = manager.find_similar_with_embedding_scoped(
+        query_embedding,
+        BROKER_SEMANTIC_THRESHOLD,
+        limit,
+        scope,
+    )?;
+    if embedding_hits.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let seed_ids: Vec<String> = embedding_hits
+        .iter()
+        .map(|(entry, _)| entry.id.clone())
+        .collect();
+    let seed_scores: Vec<f32> = embedding_hits.iter().map(|(_, score)| *score).collect();
+    let mut merged: HashMap<String, f32> = embedding_hits
+        .iter()
+        .map(|(entry, score)| (entry.id.clone(), *score))
+        .collect();
+    let mut project_graph = if scope.includes_project() {
+        Some(manager.load_project_graph()?)
+    } else {
+        None
+    };
+    let mut global_graph = if scope.includes_global() {
+        Some(manager.load_global_graph()?)
+    } else {
+        None
+    };
+
+    if let Some(graph) = project_graph.as_mut() {
+        merge_cascade_scores(
+            &mut merged,
+            graph.cascade_retrieve(&seed_ids, &seed_scores, 2, limit * 2),
+        );
+    }
+    if let Some(graph) = global_graph.as_mut() {
+        merge_cascade_scores(
+            &mut merged,
+            graph.cascade_retrieve(&seed_ids, &seed_scores, 2, limit * 2),
+        );
+    }
+
+    let mut scored: Vec<(MemoryEntry, f32)> = merged
+        .into_iter()
+        .filter_map(|(id, score)| {
+            project_graph
+                .as_ref()
+                .and_then(|graph| graph.get_memory(&id))
+                .or_else(|| {
+                    global_graph
+                        .as_ref()
+                        .and_then(|graph| graph.get_memory(&id))
+                })
+                .cloned()
+                .map(|entry| (entry, score))
+        })
+        .collect();
+    scored.sort_by(|(a_entry, a_score), (b_entry, b_score)| {
+        b_score
+            .total_cmp(a_score)
+            .then_with(|| a_entry.id.cmp(&b_entry.id))
+    });
+    scored.truncate(limit);
+    Ok(scored)
+}
+
+fn merge_cascade_scores(merged: &mut HashMap<String, f32>, scores: Vec<(String, f32)>) {
+    for (id, score) in scores {
+        let existing = merged.get(&id).copied().unwrap_or(0.0);
+        if score > existing {
+            merged.insert(id, score);
+        }
+    }
+}
+
+fn sort_entries_by_updated_at(entries: &mut [MemoryEntry]) {
+    entries.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
 }
 
 fn is_provenance_memory(entry: &MemoryEntry) -> bool {
@@ -634,9 +846,8 @@ fn memory_context_item(entry: MemoryEntry, scope: &str) -> BrokerMemoryContextIt
 fn collect_context_items(
     session_id: &str,
     working_dir: Option<&str>,
-    query: Option<&str>,
     tool_names: &[String],
-    memories: &[BrokerMemoryContextItem],
+    memories: &[BrokerMemoryResult],
     side_panel: &jcode_side_panel_types::SidePanelSnapshot,
     todos: &[TodoItem],
 ) -> Vec<BrokerContextItem> {
@@ -650,8 +861,7 @@ fn collect_context_items(
     items.extend(
         memories
             .iter()
-            .enumerate()
-            .map(|(index, memory)| memory_broker_item(memory, working_dir, query, index + 1)),
+            .map(|memory| memory_broker_item(memory, working_dir)),
     );
     items.extend(side_panel.pages.iter().map(|page| {
         side_panel_broker_item(session_id, page, side_panel.focused_page_id.as_deref())
@@ -686,12 +896,23 @@ fn tool_broker_item(tool_name: &str) -> BrokerContextItem {
     }
 }
 
-fn memory_broker_item(
-    memory: &BrokerMemoryContextItem,
-    working_dir: Option<&str>,
-    query: Option<&str>,
-    rank: usize,
-) -> BrokerContextItem {
+fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) -> BrokerContextItem {
+    let memory = &result.memory;
+    let score = result
+        .relevance
+        .as_ref()
+        .and_then(|relevance| relevance.score);
+    let mut metadata = json!({
+        "category": memory.category,
+        "scope": memory.scope,
+    });
+    if let Some(mode) = result
+        .relevance
+        .as_ref()
+        .and_then(|relevance| relevance.retrieval_mode.as_deref())
+    {
+        metadata["retrieval_mode"] = json!(mode);
+    }
     BrokerContextItem {
         id: memory.id.clone(),
         kind: "memory".to_string(),
@@ -702,19 +923,16 @@ fn memory_broker_item(
         content: Some(memory.content.clone()),
         tags: memory.tags.clone(),
         source: memory.source.clone(),
-        score: None,
+        score,
         origin: BrokerContextOrigin {
             tool: Some("memory".to_string()),
             source: memory.source.clone(),
             working_dir: working_dir.map(str::to_string),
             ..Default::default()
         },
-        relevance: memory_relevance(query, rank),
+        relevance: result.relevance.clone(),
         fragments: Vec::new(),
-        metadata: json!({
-            "category": memory.category,
-            "scope": memory.scope,
-        }),
+        metadata,
     }
 }
 
@@ -799,20 +1017,44 @@ fn todo_broker_item(session_id: &str, todo: &TodoItem) -> BrokerContextItem {
     }
 }
 
-fn memory_relevance(query: Option<&str>, rank: usize) -> Option<BrokerContextRelevance> {
+fn memory_relevance(
+    query: Option<&str>,
+    entry: &MemoryEntry,
+    retrieval_mode: Option<&str>,
+    score: Option<f32>,
+    rank: usize,
+) -> Option<BrokerContextRelevance> {
     let query = query.map(str::trim).filter(|query| !query.is_empty())?;
+    let normalized_query = crate::memory_types::normalize_search_text(query);
+    let exact_match =
+        !normalized_query.is_empty() && entry.searchable_text().contains(normalized_query.as_str());
     Some(BrokerContextRelevance {
         query: Some(query.to_string()),
-        retrieval_mode: Some("keyword".to_string()),
+        retrieval_mode: retrieval_mode.map(str::to_string),
+        score,
         rank: Some(rank),
-        matched_terms: query
-            .split_whitespace()
-            .map(|term| term.trim_matches(|ch: char| !ch.is_alphanumeric()))
-            .filter(|term| !term.is_empty())
-            .map(|term| term.to_ascii_lowercase())
-            .collect(),
+        matched_terms: matched_query_terms(query, entry),
+        exact_match: Some(exact_match),
         ..Default::default()
     })
+}
+
+fn matched_query_terms(query: &str, entry: &MemoryEntry) -> Vec<String> {
+    let searchable = entry.searchable_text();
+    query_terms(query)
+        .into_iter()
+        .filter(|term| searchable.contains(term.as_str()))
+        .collect()
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    let normalized = crate::memory_types::normalize_search_text(query);
+    let mut seen = HashSet::new();
+    normalized
+        .split_whitespace()
+        .filter(|term| seen.insert((*term).to_string()))
+        .map(str::to_string)
+        .collect()
 }
 
 fn summarize_content(content: &str) -> String {
@@ -1121,5 +1363,122 @@ mod tests {
                     && matches!(edge.kind, EdgeKind::DerivedFrom)),
             "reinforced memory should link back to new transcript provenance"
         );
+    }
+
+    #[test]
+    fn broker_memory_retrieval_falls_back_to_keyword_when_embeddings_are_unavailable() {
+        with_temp_home(|home| {
+            let project_dir = home.join("project");
+            std::fs::create_dir_all(&project_dir).expect("create project dir");
+            let manager = MemoryManager::new().with_project_dir(&project_dir);
+            manager
+                .remember_project(MemoryEntry::new(
+                    MemoryCategory::Fact,
+                    "Rob wants broker retrieval to fall back without embeddings.",
+                ))
+                .expect("remember project memory");
+            manager
+                .remember_global(MemoryEntry::new(
+                    MemoryCategory::Preference,
+                    "Global memory should keep its own scope.",
+                ))
+                .expect("remember global memory");
+
+            let results = collect_broker_memory_results(
+                Some(project_dir.to_string_lossy().as_ref()),
+                Some("broker retrieval"),
+                8,
+                false,
+            )
+            .expect("collect broker memory results");
+
+            let hit = results
+                .iter()
+                .find(|result| {
+                    result
+                        .memory
+                        .content
+                        .contains("fall back without embeddings")
+                })
+                .expect("fallback keyword hit");
+            let relevance = hit.relevance.as_ref().expect("relevance metadata");
+            assert_eq!(relevance.retrieval_mode.as_deref(), Some("keyword"));
+            assert_eq!(relevance.rank, Some(1));
+            assert!(relevance.matched_terms.contains(&"broker".to_string()));
+            assert!(relevance.matched_terms.contains(&"retrieval".to_string()));
+            assert_eq!(hit.memory.scope, "project");
+        });
+    }
+
+    #[test]
+    fn broker_memory_retrieval_cascades_from_semantic_seed_to_tag_related_memory() {
+        with_temp_home(|home| {
+            let project_dir = home.join("project");
+            std::fs::create_dir_all(&project_dir).expect("create project dir");
+            let manager = MemoryManager::new().with_project_dir(&project_dir);
+            manager
+                .remember_project(
+                    MemoryEntry::new(
+                        MemoryCategory::Fact,
+                        "Semantic seed: broker retrieval uses embeddings.",
+                    )
+                    .with_tags(vec!["broker-cascade".to_string()])
+                    .with_embedding(vec![1.0, 0.0]),
+                )
+                .expect("remember semantic seed");
+            manager
+                .remember_project(
+                    MemoryEntry::new(
+                        MemoryCategory::Fact,
+                        "Tag-related memory appears through cascade traversal.",
+                    )
+                    .with_tags(vec!["broker-cascade".to_string()]),
+                )
+                .expect("remember cascade related memory");
+            manager
+                .remember_global(
+                    MemoryEntry::new(
+                        MemoryCategory::Fact,
+                        "Global semantic memory keeps global scope.",
+                    )
+                    .with_embedding(vec![0.6, 0.8]),
+                )
+                .expect("remember global semantic memory");
+
+            let results = collect_broker_memory_results_with_query_embedding(
+                Some(project_dir.to_string_lossy().as_ref()),
+                "semantic broker retrieval",
+                &[1.0, 0.0],
+                8,
+                false,
+            )
+            .expect("collect semantic broker memory results");
+
+            let related = results
+                .iter()
+                .find(|result| result.memory.content.contains("cascade traversal"))
+                .expect("cascade-related memory");
+            let relevance = related.relevance.as_ref().expect("relevance metadata");
+            assert_eq!(
+                relevance.retrieval_mode.as_deref(),
+                Some("semantic_cascade")
+            );
+            assert!(relevance.score.unwrap_or_default() > 0.0);
+            assert!(relevance.rank.unwrap_or_default() >= 2);
+            assert_eq!(related.memory.scope, "project");
+
+            let global = results
+                .iter()
+                .find(|result| result.memory.content.contains("global scope"))
+                .expect("global semantic memory");
+            assert_eq!(global.memory.scope, "global");
+            assert_eq!(
+                global
+                    .relevance
+                    .as_ref()
+                    .and_then(|relevance| relevance.retrieval_mode.as_deref()),
+                Some("semantic_cascade")
+            );
+        });
     }
 }
