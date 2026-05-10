@@ -93,6 +93,10 @@ impl RegistryProfile {
             Self::Broker => "broker",
         }
     }
+
+    pub(crate) fn exposes_operator_presentation_tools(self) -> bool {
+        matches!(self, Self::Full)
+    }
 }
 
 impl Clone for Registry {
@@ -155,12 +159,6 @@ impl Registry {
             &mut timings,
             "agentgrep",
             agentgrep::AgentGrepTool::new,
-        );
-        Self::insert_tool_timed(
-            &mut m,
-            &mut timings,
-            "side_panel",
-            side_panel::SidePanelTool::new,
         );
         Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
         Self::insert_tool_timed(
@@ -350,6 +348,9 @@ impl Registry {
         };
         // Clone the Arc entries (cheap refcount bumps, not deep copies)
         let mut tools = base.clone();
+        if profile.exposes_operator_presentation_tools() {
+            Self::insert_tool(&mut tools, "side_panel", side_panel::SidePanelTool::new());
+        }
         // SkillTool needs the skills registry reference (shared across sessions)
         Self::insert_tool(
             &mut tools,

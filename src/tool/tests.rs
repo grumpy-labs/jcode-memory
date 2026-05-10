@@ -109,6 +109,67 @@ async fn broker_profile_keeps_exact_context_broker_tool_set() {
     assert_eq!(names, expected);
 }
 
+#[test]
+fn registry_profile_marks_operator_presentation_boundary() {
+    assert!(RegistryProfile::Full.exposes_operator_presentation_tools());
+    assert!(!RegistryProfile::Harness.exposes_operator_presentation_tools());
+    assert!(!RegistryProfile::Broker.exposes_operator_presentation_tools());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn broker_goal_writes_context_artifact_without_side_panel_tool() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path().join("repo");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let home = temp.path().to_string_lossy().to_string();
+    let _home = EnvVarGuard::set("JCODE_HOME", &home);
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new_with_profile(provider, RegistryProfile::Broker).await;
+    let names: HashSet<String> = registry.tool_names().await.into_iter().collect();
+    assert!(!names.contains("side_panel"));
+    assert!(names.contains("goal"));
+
+    let ctx = ToolContext {
+        session_id: "ses_broker_goal_artifact".to_string(),
+        message_id: "msg1".to_string(),
+        tool_call_id: "tool1".to_string(),
+        working_dir: Some(project),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::AgentTurn,
+    };
+
+    let create = registry
+        .execute(
+            "goal",
+            serde_json::json!({
+                "action": "create",
+                "title": "Broker keeps context artifacts",
+                "scope": "project",
+                "next_steps": ["keep the broker headless"]
+            }),
+            ctx,
+        )
+        .await
+        .expect("create goal through broker profile");
+
+    assert!(create.output.contains("Created goal"));
+    let snapshot = crate::side_panel::snapshot_for_session("ses_broker_goal_artifact")
+        .expect("side panel snapshot");
+    assert_eq!(
+        snapshot.focused_page_id.as_deref(),
+        Some("goal.broker-keeps-context-artifacts")
+    );
+    let page = snapshot
+        .pages
+        .iter()
+        .find(|page| page.id == "goal.broker-keeps-context-artifacts")
+        .expect("goal context artifact page");
+    assert!(page.content.contains("keep the broker headless"));
+}
+
 #[tokio::test]
 async fn harness_profile_excludes_product_integrations_by_default() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
