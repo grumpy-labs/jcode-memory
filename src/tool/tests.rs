@@ -16,6 +16,12 @@ impl EnvVarGuard {
         crate::env::set_var(key, value);
         Self { key, previous }
     }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var(key).ok();
+        crate::env::remove_var(key);
+        Self { key, previous }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -103,6 +109,61 @@ async fn broker_profile_keeps_exact_context_broker_tool_set() {
     assert_eq!(names, expected);
 }
 
+#[tokio::test]
+async fn harness_profile_excludes_product_integrations_by_default() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new_with_profile(provider, RegistryProfile::Harness).await;
+    let names: HashSet<String> = registry.tool_names().await.into_iter().collect();
+
+    for kept in [
+        "agentgrep",
+        "apply_patch",
+        "bash",
+        "batch",
+        "conversation_search",
+        "goal",
+        "memory",
+        "selfdev",
+        "session_search",
+        "skill_manage",
+        "subagent",
+        "swarm",
+        "todo",
+    ] {
+        assert!(
+            names.contains(kept),
+            "harness profile should keep standalone harness tool {kept}"
+        );
+    }
+
+    for excluded in [
+        "browser",
+        "gmail",
+        "open",
+        "schedule",
+        "side_panel",
+        "webfetch",
+        "websearch",
+    ] {
+        assert!(
+            !names.contains(excluded),
+            "harness profile should gate product integration tool {excluded}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn registry_new_from_env_defaults_to_harness_profile() {
+    let _guard = crate::storage::lock_test_env();
+    let _env = EnvVarGuard::remove("JCODE_TOOL_PROFILE");
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new_from_env(provider).await;
+
+    assert_eq!(registry.profile(), RegistryProfile::Harness);
+    assert!(registry.tool_names().await.contains(&"memory".to_string()));
+    assert!(!registry.tool_names().await.contains(&"gmail".to_string()));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn registry_new_from_env_uses_broker_profile() {
     let _guard = crate::storage::lock_test_env();
@@ -113,6 +174,18 @@ async fn registry_new_from_env_uses_broker_profile() {
     assert_eq!(registry.profile(), RegistryProfile::Broker);
     assert!(registry.tool_names().await.contains(&"memory".to_string()));
     assert!(!registry.tool_names().await.contains(&"bash".to_string()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn registry_new_from_env_allows_full_product_profile() {
+    let _guard = crate::storage::lock_test_env();
+    let _env = EnvVarGuard::set("JCODE_TOOL_PROFILE", "full");
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new_from_env(provider).await;
+
+    assert_eq!(registry.profile(), RegistryProfile::Full);
+    assert!(registry.tool_names().await.contains(&"browser".to_string()));
+    assert!(registry.tool_names().await.contains(&"gmail".to_string()));
 }
 
 #[tokio::test]
@@ -138,6 +211,30 @@ async fn broker_profile_skips_dynamic_product_tools() {
         assert!(
             !names.contains(excluded),
             "broker profile should skip dynamic tool {excluded}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn harness_profile_skips_dynamic_product_tools() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new_with_profile(provider, RegistryProfile::Harness).await;
+
+    registry.register_ambient_tools().await;
+    registry.register_mcp_tools(None, None, None).await;
+
+    let names: HashSet<String> = registry.tool_names().await.into_iter().collect();
+
+    for excluded in [
+        "end_ambient_cycle",
+        "mcp",
+        "request_permission",
+        "schedule_ambient",
+        "send_message",
+    ] {
+        assert!(
+            !names.contains(excluded),
+            "harness profile should skip dynamic product tool {excluded}"
         );
     }
 }

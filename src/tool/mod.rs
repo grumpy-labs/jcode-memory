@@ -61,27 +61,31 @@ pub struct Registry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegistryProfile {
     Full,
+    Harness,
     Broker,
 }
 
 impl RegistryProfile {
     pub fn from_env_value(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
+            "full" | "product" | "all" => Self::Full,
+            "harness" | "" => Self::Harness,
             "broker" => Self::Broker,
-            _ => Self::Full,
+            _ => Self::Harness,
         }
     }
 
     pub fn from_env() -> Self {
         match std::env::var("JCODE_TOOL_PROFILE") {
             Ok(value) => Self::from_env_value(&value),
-            _ => Self::Full,
+            _ => Self::Harness,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::Full => "full",
+            Self::Harness => "harness",
             Self::Broker => "broker",
         }
     }
@@ -217,6 +221,65 @@ impl Registry {
         m
     }
 
+    fn build_harness_base_tools() -> HashMap<String, Arc<dyn Tool>> {
+        let init_start = std::time::Instant::now();
+        let mut timings = Vec::new();
+        let mut m = HashMap::new();
+        Self::insert_tool_timed(&mut m, &mut timings, "read", read::ReadTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "write", write::WriteTool::new);
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "agentgrep",
+            agentgrep::AgentGrepTool::new,
+        );
+        Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "multiedit",
+            multiedit::MultiEditTool::new,
+        );
+        Self::insert_tool_timed(&mut m, &mut timings, "patch", patch::PatchTool::new);
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "apply_patch",
+            apply_patch::ApplyPatchTool::new,
+        );
+        Self::insert_tool_timed(&mut m, &mut timings, "glob", glob::GlobTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "grep", grep::GrepTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "ls", ls::LsTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "codesearch",
+            codesearch::CodeSearchTool::new,
+        );
+        Self::insert_tool_timed(&mut m, &mut timings, "invalid", invalid::InvalidTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "lsp", lsp::LspTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "todo", todo::TodoTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "bg", bg::BgTool::new);
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "swarm",
+            communicate::CommunicateTool::new,
+        );
+        Self::insert_tool_timed(
+            &mut m,
+            &mut timings,
+            "session_search",
+            session_search::SessionSearchTool::new,
+        );
+        Self::insert_tool_timed(&mut m, &mut timings, "memory", memory::MemoryTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "goal", goal::GoalTool::new);
+        Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);
+        Self::log_base_tools_init(RegistryProfile::Harness, init_start, &timings);
+        m
+    }
+
     fn build_broker_base_tools() -> HashMap<String, Arc<dyn Tool>> {
         let init_start = std::time::Instant::now();
         let mut timings = Vec::new();
@@ -270,9 +333,11 @@ impl Registry {
     ) -> HashMap<String, Arc<dyn Tool>> {
         use std::sync::OnceLock;
         static FULL_BASE: OnceLock<HashMap<String, Arc<dyn Tool>>> = OnceLock::new();
+        static HARNESS_BASE: OnceLock<HashMap<String, Arc<dyn Tool>>> = OnceLock::new();
         static BROKER_BASE: OnceLock<HashMap<String, Arc<dyn Tool>>> = OnceLock::new();
         let base = match profile {
             RegistryProfile::Full => FULL_BASE.get_or_init(Self::build_full_base_tools),
+            RegistryProfile::Harness => HARNESS_BASE.get_or_init(Self::build_harness_base_tools),
             RegistryProfile::Broker => BROKER_BASE.get_or_init(Self::build_broker_base_tools),
         };
         // Clone the Arc entries (cheap refcount bumps, not deep copies)
@@ -317,7 +382,7 @@ impl Registry {
 
         // Per-session tools that need provider/registry references
         let session_tools_start = std::time::Instant::now();
-        if profile == RegistryProfile::Full {
+        if profile != RegistryProfile::Broker {
             Self::insert_tool(
                 &mut tools_map,
                 "subagent",
@@ -569,8 +634,11 @@ impl Registry {
         shared_pool: Option<std::sync::Arc<crate::mcp::SharedMcpPool>>,
         session_id: Option<String>,
     ) {
-        if self.profile == RegistryProfile::Broker {
-            crate::logging::info("Skipping MCP tools for broker tool profile");
+        if self.profile != RegistryProfile::Full {
+            crate::logging::info(&format!(
+                "Skipping MCP tools for {} tool profile",
+                self.profile.label()
+            ));
             return;
         }
 
@@ -685,8 +753,11 @@ impl Registry {
 
     /// Register ambient-mode tools (only for ambient sessions)
     pub async fn register_ambient_tools(&self) {
-        if self.profile == RegistryProfile::Broker {
-            crate::logging::info("Skipping ambient tools for broker tool profile");
+        if self.profile != RegistryProfile::Full {
+            crate::logging::info(&format!(
+                "Skipping ambient tools for {} tool profile",
+                self.profile.label()
+            ));
             return;
         }
 
