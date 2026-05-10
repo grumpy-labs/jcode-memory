@@ -10,8 +10,37 @@ use crate::todo::TodoItem;
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use tokio::sync::mpsc;
+
+type TranscriptExtractionFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<crate::sidecar::ExtractedMemory>>> + Send + 'a>>;
+
+trait TranscriptMemoryExtractor {
+    fn extract<'a>(
+        &'a self,
+        transcript: &'a str,
+        existing: &'a [String],
+    ) -> TranscriptExtractionFuture<'a>;
+}
+
+struct SidecarTranscriptMemoryExtractor;
+
+impl TranscriptMemoryExtractor for SidecarTranscriptMemoryExtractor {
+    fn extract<'a>(
+        &'a self,
+        transcript: &'a str,
+        existing: &'a [String],
+    ) -> TranscriptExtractionFuture<'a> {
+        Box::pin(async move {
+            crate::sidecar::Sidecar::new()
+                .extract_memories_with_existing(transcript, existing)
+                .await
+        })
+    }
+}
 
 pub(super) async fn handle_broker_turn_sync(
     id: u64,
@@ -191,8 +220,55 @@ async fn broker_transcript_sync_event(
         agent_guard.working_dir().map(str::to_string)
     };
 
-    let source = normalized_source(source, "hermes:transcript");
     let manager = manager_for_working_dir(working_dir.as_deref());
+    let source = normalized_source(source, "hermes:transcript");
+    let extractor = SidecarTranscriptMemoryExtractor;
+    broker_transcript_sync_event_for_manager_with_gate(
+        id,
+        session_id,
+        &manager,
+        transcript,
+        source,
+        crate::memory::memory_sidecar_enabled(),
+        &extractor,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn broker_transcript_sync_event_for_manager<E>(
+    id: u64,
+    session_id: String,
+    manager: &MemoryManager,
+    transcript: &str,
+    source: &str,
+    extractor: &E,
+) -> Result<ServerEvent>
+where
+    E: TranscriptMemoryExtractor + ?Sized,
+{
+    broker_transcript_sync_event_for_manager_with_gate(
+        id, session_id, manager, transcript, source, true, extractor,
+    )
+    .await
+}
+
+async fn broker_transcript_sync_event_for_manager_with_gate<E>(
+    id: u64,
+    session_id: String,
+    manager: &MemoryManager,
+    transcript: &str,
+    source: &str,
+    extraction_enabled: bool,
+    extractor: &E,
+) -> Result<ServerEvent>
+where
+    E: TranscriptMemoryExtractor + ?Sized,
+{
+    if transcript.trim().is_empty() {
+        anyhow::bail!("broker transcript sync requires transcript content");
+    }
+
     let content = format!(
         "External transcript synced from {source}.\n\n{}",
         transcript.trim()
@@ -208,8 +284,16 @@ async fn broker_transcript_sync_event(
         ],
     )?;
 
-    let (derived_memory_ids, extraction_status) =
-        extract_derived_memories(&manager, transcript, &session_id, source, &provenance_id).await?;
+    let (derived_memory_ids, extraction_status) = extract_derived_memories(
+        manager,
+        transcript,
+        &session_id,
+        source,
+        &provenance_id,
+        extraction_enabled,
+        extractor,
+    )
+    .await?;
     let mut memory_ids = vec![provenance_id.clone()];
     memory_ids.extend(derived_memory_ids.iter().cloned());
 
@@ -317,8 +401,10 @@ async fn extract_derived_memories(
     session_id: &str,
     source: &str,
     provenance_id: &str,
+    extraction_enabled: bool,
+    extractor: &(impl TranscriptMemoryExtractor + ?Sized),
 ) -> Result<(Vec<String>, BrokerMemoryExtractionStatus)> {
-    if !crate::memory::memory_sidecar_enabled() {
+    if !extraction_enabled {
         return Ok((
             Vec::new(),
             BrokerMemoryExtractionStatus::SkippedSidecarDisabled,
@@ -333,11 +419,7 @@ async fn extract_derived_memories(
         .map(|entry| entry.content)
         .collect();
 
-    let sidecar = crate::sidecar::Sidecar::new();
-    let extracted = match sidecar
-        .extract_memories_with_existing(transcript, &existing)
-        .await
-    {
+    let extracted = match extractor.extract(transcript, &existing).await {
         Ok(extracted) => extracted,
         Err(error) => {
             crate::logging::info(&format!("Broker transcript extraction failed: {error}"));
@@ -377,11 +459,52 @@ fn store_derived_memories(
                 format!("derived-from:{provenance_id}"),
             ])
             .with_trust(trust);
-        ids.push(manager.remember_project(entry)?);
+        if let Some(existing_id) = find_exact_duplicate_derived_memory(manager, &entry)? {
+            reinforce_memory(manager, &existing_id, session_id)?;
+            ids.push(existing_id);
+        } else {
+            ids.push(manager.remember_project(entry)?);
+        }
     }
 
     link_derived_memories(manager, provenance_id, &ids)?;
     Ok(ids)
+}
+
+fn find_exact_duplicate_derived_memory(
+    manager: &MemoryManager,
+    entry: &MemoryEntry,
+) -> Result<Option<String>> {
+    let target_content = crate::memory_types::normalize_memory_search_text(&entry.content, &[]);
+    for existing in manager.load_project_graph()?.active_memories() {
+        if is_provenance_memory(existing) || existing.category != entry.category {
+            continue;
+        }
+        let existing_content =
+            crate::memory_types::normalize_memory_search_text(&existing.content, &[]);
+        if existing_content == target_content {
+            return Ok(Some(existing.id.clone()));
+        }
+    }
+    Ok(None)
+}
+
+fn reinforce_memory(manager: &MemoryManager, memory_id: &str, session_id: &str) -> Result<bool> {
+    let mut project_graph = manager.load_project_graph()?;
+    if let Some(entry) = project_graph.get_memory_mut(memory_id) {
+        entry.reinforce(session_id, 0);
+        manager.save_project_graph(&project_graph)?;
+        return Ok(true);
+    }
+
+    let mut global_graph = manager.load_global_graph()?;
+    if let Some(entry) = global_graph.get_memory_mut(memory_id) {
+        entry.reinforce(session_id, 0);
+        manager.save_global_graph(&global_graph)?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 fn link_derived_memories(
@@ -707,7 +830,78 @@ fn summarize_content(content: &str) -> String {
 mod tests {
     use super::*;
     use crate::sidecar::ExtractedMemory;
+    use std::ffi::OsString;
     use std::path::Path;
+    use std::sync::Mutex;
+
+    struct TestHome {
+        old_home: Option<OsString>,
+        temp_home: tempfile::TempDir,
+    }
+
+    impl TestHome {
+        fn new() -> Self {
+            let old_home = std::env::var_os("JCODE_HOME");
+            let temp_home = tempfile::Builder::new()
+                .prefix("jcode-broker-context-test-")
+                .tempdir()
+                .expect("create temp home");
+            crate::env::set_var("JCODE_HOME", temp_home.path());
+            Self {
+                old_home,
+                temp_home,
+            }
+        }
+
+        fn path(&self) -> &Path {
+            self.temp_home.path()
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match self.old_home.as_ref() {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+
+    struct FakeTranscriptExtractor {
+        memories: Vec<ExtractedMemory>,
+        seen_existing: Mutex<Vec<String>>,
+    }
+
+    impl FakeTranscriptExtractor {
+        fn new(memories: Vec<ExtractedMemory>) -> Self {
+            Self {
+                memories,
+                seen_existing: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_existing(&self) -> Vec<String> {
+            self.seen_existing.lock().expect("seen existing").clone()
+        }
+    }
+
+    impl TranscriptMemoryExtractor for FakeTranscriptExtractor {
+        fn extract<'a>(
+            &'a self,
+            transcript: &'a str,
+            existing: &'a [String],
+        ) -> TranscriptExtractionFuture<'a> {
+            self.seen_existing
+                .lock()
+                .expect("seen existing")
+                .extend(existing.iter().cloned());
+            let memories = self.memories.clone();
+            Box::pin(async move {
+                assert!(!transcript.trim().is_empty());
+                Ok(memories)
+            })
+        }
+    }
 
     fn with_temp_home<F, T>(f: F) -> T
     where
@@ -792,5 +986,140 @@ mod tests {
                 "derived memory should link back to provenance"
             );
         });
+    }
+
+    #[tokio::test]
+    async fn transcript_sync_with_fake_extractor_returns_derived_memory_event_and_context() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let project_dir = _env.path().join("project");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let manager = MemoryManager::new().with_project_dir(&project_dir);
+        let extractor = FakeTranscriptExtractor::new(vec![ExtractedMemory {
+            category: "preference".to_string(),
+            content: "Rob prefers focused broker tests for memory-provider changes.".to_string(),
+            trust: "high".to_string(),
+        }]);
+
+        let event = broker_transcript_sync_event_for_manager(
+            77,
+            "ses_test".to_string(),
+            &manager,
+            "User: Remember Rob prefers focused broker tests.\nAssistant: Stored.",
+            "hermes:pre_compress",
+            &extractor,
+        )
+        .await
+        .expect("sync transcript");
+
+        let ServerEvent::BrokerTranscriptSynced {
+            memory_ids,
+            provenance_memory_ids,
+            derived_memory_ids,
+            extraction_status,
+            ..
+        } = event
+        else {
+            panic!("expected broker transcript synced event");
+        };
+
+        assert_eq!(extraction_status, BrokerMemoryExtractionStatus::Extracted);
+        assert_eq!(provenance_memory_ids.len(), 1);
+        assert_eq!(derived_memory_ids.len(), 1);
+        assert_eq!(memory_ids.len(), 2);
+        assert_eq!(extractor.seen_existing(), Vec::<String>::new());
+
+        let context = collect_broker_memories(
+            Some(project_dir.to_string_lossy().as_ref()),
+            Some("focused broker tests"),
+            8,
+            false,
+        )
+        .expect("collect broker memories");
+        assert!(
+            context
+                .iter()
+                .any(|memory| memory.id == derived_memory_ids[0]
+                    && memory.content.contains("focused broker tests")
+                    && memory.tags.iter().any(|tag| tag == "broker-derived")),
+            "derived memory should be recallable by default, got {context:?}"
+        );
+        assert!(
+            context
+                .iter()
+                .all(|memory| memory.id != provenance_memory_ids[0]),
+            "provenance memory should stay hidden by default, got {context:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn transcript_sync_reinforces_duplicate_derived_memory() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let project_dir = _env.path().join("project");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let manager = MemoryManager::new().with_project_dir(&project_dir);
+        let existing_id = manager
+            .remember_project(
+                MemoryEntry::new(
+                    MemoryCategory::Preference,
+                    "Rob prefers focused broker tests for memory-provider changes.",
+                )
+                .with_source("seed"),
+            )
+            .expect("seed existing memory");
+        let extractor = FakeTranscriptExtractor::new(vec![ExtractedMemory {
+            category: "preference".to_string(),
+            content: "Rob prefers focused broker tests for memory-provider changes.".to_string(),
+            trust: "high".to_string(),
+        }]);
+
+        let event = broker_transcript_sync_event_for_manager(
+            88,
+            "ses_duplicate".to_string(),
+            &manager,
+            "User: Rob again mentioned focused broker tests.",
+            "hermes:session_end",
+            &extractor,
+        )
+        .await
+        .expect("sync transcript");
+
+        let ServerEvent::BrokerTranscriptSynced {
+            provenance_memory_ids,
+            derived_memory_ids,
+            extraction_status,
+            ..
+        } = event
+        else {
+            panic!("expected broker transcript synced event");
+        };
+
+        assert_eq!(extraction_status, BrokerMemoryExtractionStatus::Extracted);
+        assert_eq!(derived_memory_ids, vec![existing_id.clone()]);
+
+        let graph = manager.load_project_graph().expect("load graph");
+        let existing = graph
+            .get_memory(&existing_id)
+            .expect("existing memory remains");
+        assert_eq!(existing.strength, 2);
+        assert_eq!(existing.reinforcements.len(), 1);
+        assert_eq!(existing.reinforcements[0].session_id, "ses_duplicate");
+        assert_eq!(
+            graph
+                .active_memories()
+                .filter(|memory| memory.content
+                    == "Rob prefers focused broker tests for memory-provider changes.")
+                .count(),
+            1
+        );
+        let edges = graph.edges.get(&existing_id).expect("derived edges");
+        assert!(
+            edges
+                .iter()
+                .any(|edge| edge.target == provenance_memory_ids[0]
+                    && matches!(edge.kind, EdgeKind::DerivedFrom)),
+            "reinforced memory should link back to new transcript provenance"
+        );
     }
 }
