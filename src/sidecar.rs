@@ -439,6 +439,21 @@ Output ONLY the formatted lines, no other text. If no NEW memories worth extract
         }
 
         let response = self.complete(&system, transcript).await?;
+        if std::env::var("JCODE_SIDECAR_DEBUG_RESPONSE")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+        {
+            crate::logging::info(&format!(
+                "Sidecar extraction raw response: {}",
+                crate::util::truncate_str(&response, 1000)
+            ));
+        }
 
         let memories = response
             .lines()
@@ -617,32 +632,105 @@ async fn collect_openai_sse_text(response: reqwest::Response) -> Result<String> 
                 if data == "[DONE]" {
                     return Ok(text);
                 }
-                if let Ok(event) = serde_json::from_str::<SseEvent>(data) {
-                    match event.kind.as_str() {
-                        "response.output_text.delta" => {
-                            if let Some(delta) = event.delta {
-                                text.push_str(&delta);
-                            }
-                        }
-                        "response.completed" | "response.incomplete" => {
-                            return Ok(text);
-                        }
-                        "response.failed" | "error" => {
-                            let msg = event
-                                .error
-                                .as_ref()
-                                .and_then(|e| e.as_str())
-                                .unwrap_or("unknown error");
-                            anyhow::bail!("OpenAI SSE error: {}", msg);
-                        }
-                        _ => {}
-                    }
+                if matches!(
+                    append_openai_sse_event_text(data, &mut text)?,
+                    OpenAiSseSignal::Complete
+                ) {
+                    return Ok(text);
                 }
             }
         }
     }
 
     Ok(text)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenAiSseSignal {
+    Continue,
+    Complete,
+}
+
+fn append_openai_sse_event_text(data: &str, text: &mut String) -> Result<OpenAiSseSignal> {
+    let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+        return Ok(OpenAiSseSignal::Continue);
+    };
+    let kind = event
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    match kind {
+        "response.output_text.delta" => {
+            if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
+                text.push_str(delta);
+            }
+        }
+        "response.output_text.done" => {
+            if let Some(final_text) = event.get("text").and_then(|value| value.as_str()) {
+                append_if_new(text, final_text);
+            }
+        }
+        "response.output_item.done" => append_output_item_text(&event, text),
+        "response.completed" | "response.incomplete" => return Ok(OpenAiSseSignal::Complete),
+        "response.failed" | "error" => {
+            let message = event
+                .get("error")
+                .and_then(|error| {
+                    error.as_str().map(str::to_string).or_else(|| {
+                        error
+                            .get("message")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string)
+                    })
+                })
+                .unwrap_or_else(|| "unknown error".to_string());
+            anyhow::bail!("OpenAI SSE error: {}", message);
+        }
+        _ => {}
+    }
+    Ok(OpenAiSseSignal::Continue)
+}
+
+fn append_output_item_text(event: &serde_json::Value, text: &mut String) {
+    let Some(content) = event
+        .get("item")
+        .and_then(|item| item.get("content"))
+        .and_then(|content| content.as_array())
+    else {
+        return;
+    };
+
+    for block in content {
+        let block_type = block
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if (block_type == "output_text" || block_type == "text")
+            && let Some(final_text) = block.get("text").and_then(|value| value.as_str())
+        {
+            append_if_new(text, final_text);
+        }
+    }
+}
+
+fn append_if_new(text: &mut String, candidate: &str) {
+    if candidate.is_empty() || text.contains(candidate) {
+        return;
+    }
+
+    let mut overlap = 0;
+    for prefix_len in candidate
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .chain(std::iter::once(candidate.len()))
+    {
+        if prefix_len > 0 && text.ends_with(&candidate[..prefix_len]) {
+            overlap = prefix_len;
+        }
+    }
+    if overlap < candidate.len() {
+        text.push_str(&candidate[overlap..]);
+    }
 }
 
 /// Extract text from a non-streaming OpenAI Responses API JSON response.
@@ -666,14 +754,6 @@ fn extract_openai_response_text(result: &serde_json::Value) -> Result<String> {
         }
     }
     Ok(text)
-}
-
-#[derive(Deserialize)]
-struct SseEvent {
-    #[serde(rename = "type")]
-    kind: String,
-    delta: Option<String>,
-    error: Option<serde_json::Value>,
 }
 
 // Claude API types
@@ -872,5 +952,29 @@ mod tests {
         let spark_request =
             build_openai_request(SIDECAR_OPENAI_MODEL, "system", "hello", true, None);
         assert!(spark_request.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn test_openai_sse_parser_collects_final_text_events() {
+        let mut text = String::new();
+        append_openai_sse_event_text(
+            r#"{"type":"response.output_text.delta","delta":"fact|sidecar "}"#,
+            &mut text,
+        )
+        .expect("parse output_text.delta");
+        append_openai_sse_event_text(
+            r#"{"type":"response.output_text.done","text":"fact|sidecar works|high\n"}"#,
+            &mut text,
+        )
+        .expect("parse output_text.done");
+        append_openai_sse_event_text(
+            r#"{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"\npreference|keep isolated runtime|high"}]}}"#,
+            &mut text,
+        )
+        .expect("parse output_item.done");
+
+        assert!(text.contains("fact|sidecar works|high"));
+        assert!(text.contains("preference|keep isolated runtime|high"));
+        assert!(!text.contains("fact|sidecar fact|sidecar"));
     }
 }

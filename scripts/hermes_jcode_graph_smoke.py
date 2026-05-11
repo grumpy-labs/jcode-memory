@@ -12,6 +12,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 
 def _add_default_hermes_repo_to_path() -> None:
@@ -40,6 +41,14 @@ def main() -> int:
     parser.add_argument("--sync-assistant", help="Optional assistant turn to sync before prefetch")
     parser.add_argument("--transcript-user", help="Optional user message for transcript hooks")
     parser.add_argument("--transcript-assistant", help="Optional assistant message for transcript hooks")
+    parser.add_argument(
+        "--require-derived-store-proof",
+        action="store_true",
+        help=(
+            "Require durable JCODE_HOME memory-store evidence that live sidecar "
+            "extraction created broker-derived memories linked to hidden provenance."
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
@@ -137,6 +146,11 @@ def main() -> int:
     }
     if raw_terms:
         result["raw_terms_checked"] = raw_terms
+    if args.require_derived_store_proof:
+        result["derived_store_proof"] = _derived_store_proof(
+            args.session_id,
+            raw_terms=raw_terms,
+        )
 
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -174,11 +188,26 @@ def main() -> int:
         success = success and diagnostics.get("turn_sync_count", 0) >= 1
     if args.transcript_user or args.transcript_assistant:
         success = success and diagnostics.get("transcript_sync_count", 0) >= 2
+    if args.require_derived_store_proof:
+        proof = result["derived_store_proof"]
+        success = (
+            success
+            and proof["hidden_provenance_count"] > 0
+            and proof["derived_memory_count"] > 0
+            and proof["derived_from_edge_count"] > 0
+            and proof["hidden_provenance_contains_synced_text"]
+        )
     if raw_terms:
+        provenance_proved = result["provenance_tool_contains_synced_text"]
+        if args.require_derived_store_proof:
+            provenance_proved = (
+                provenance_proved
+                or result["derived_store_proof"]["hidden_provenance_contains_synced_text"]
+            )
         success = (
             success
             and not result["default_prefetch_has_raw_provenance"]
-            and result["provenance_tool_contains_synced_text"]
+            and provenance_proved
         )
     return 0 if success else 1
 
@@ -208,6 +237,63 @@ def _is_provenance_item(item: dict) -> bool:
         or item.get("category") == "provenance"
         or item.get("title") == "provenance"
     )
+
+
+def _derived_store_proof(session_id: str, *, raw_terms: list[str]) -> dict[str, Any]:
+    """Inspect isolated JCODE_HOME memory JSON for live sidecar extraction evidence."""
+    jcode_home = Path(os.environ.get("JCODE_HOME", Path.home() / ".jcode"))
+    graph_paths = sorted((jcode_home / "memory" / "projects").glob("*.json"))
+    provenance_ids: set[str] = set()
+    derived_ids: set[str] = set()
+    derived_from_edges: set[tuple[str, str]] = set()
+    hidden_provenance_contains_synced_text = False
+    derived_memory_contents: list[str] = []
+
+    for graph_path in graph_paths:
+        try:
+            graph = json.loads(graph_path.read_text())
+        except Exception:
+            continue
+        memories = graph.get("memories") or {}
+        edges = graph.get("edges") or {}
+        for memory_id, memory in memories.items():
+            if not isinstance(memory, dict):
+                continue
+            tags = memory.get("tags") or []
+            content = str(memory.get("content") or "")
+            source = str(memory.get("source") or "")
+            content_matches_raw_terms = any(term in content for term in raw_terms)
+            if "broker-provenance" in tags and (
+                session_id in source or session_id in content or content_matches_raw_terms
+            ):
+                provenance_ids.add(memory_id)
+                if content_matches_raw_terms:
+                    hidden_provenance_contains_synced_text = True
+
+        for source_id, source_edges in edges.items():
+            source_memory = memories.get(source_id) or {}
+            if not isinstance(source_memory, dict):
+                continue
+            source_tags = source_memory.get("tags") or []
+            if "broker-derived" not in source_tags or not isinstance(source_edges, list):
+                continue
+            for edge in source_edges:
+                if not isinstance(edge, dict):
+                    continue
+                target_id = edge.get("target")
+                if edge.get("kind") == "derived_from" and target_id in provenance_ids:
+                    derived_ids.add(source_id)
+                    derived_memory_contents.append(str(source_memory.get("content") or ""))
+                    derived_from_edges.add((source_id, target_id))
+
+    return {
+        "graph_file_count": len(graph_paths),
+        "hidden_provenance_count": len(provenance_ids),
+        "derived_memory_count": len(derived_ids),
+        "derived_from_edge_count": len(derived_from_edges),
+        "hidden_provenance_contains_synced_text": hidden_provenance_contains_synced_text,
+        "derived_memory_contents": derived_memory_contents,
+    }
 
 
 if __name__ == "__main__":
