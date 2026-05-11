@@ -11,8 +11,11 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import queue
+import shutil
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -23,7 +26,7 @@ OPERATIONAL_WARNINGS = [
     "DuckDB is optimized for analytical/bulk workloads, so frequent tiny agent transactions need explicit benchmarking.",
     "DuckDB FTS indexes do not refresh automatically after table changes; ingestion must rebuild or refresh indexes deterministically.",
     "DuckDB VSS persistent HNSW indexes are still guarded by experimental persistence settings; treat vector indexes as rebuildable.",
-    "DuckPGQ is a community extension under active development; keep a recursive-CTE fallback for graph traversal proofs.",
+    "DuckPGQ is a community extension under active development; keep a recursive-CTE SQL graph fallback for graph traversal proofs.",
 ]
 
 
@@ -179,6 +182,35 @@ def duckdb_probe_queries() -> dict[str, str]:
             WHERE e.target_id = 'mem_derived_broker_tests'
             ORDER BY n.id
         """,
+        "sql_property_graph_fallback": """
+            WITH RECURSIVE paths(start_id, node_id, depth, path, edge_path) AS (
+                SELECT
+                    'mem_derived_broker_tests',
+                    'mem_derived_broker_tests',
+                    0,
+                    'mem_derived_broker_tests',
+                    ''
+                UNION ALL
+                SELECT
+                    p.start_id,
+                    e.target_id,
+                    p.depth + 1,
+                    p.path || '->' || e.target_id,
+                    CASE
+                        WHEN p.edge_path = '' THEN e.kind
+                        ELSE p.edge_path || '->' || e.kind
+                    END
+                FROM paths p
+                JOIN edges e ON e.source_id = p.node_id
+                WHERE p.depth < 3
+                  AND instr(p.path, e.target_id) = 0
+            )
+            SELECT p.start_id, p.node_id, p.depth, p.path, p.edge_path, n.kind
+            FROM paths p
+            JOIN nodes n ON n.id = p.node_id
+            WHERE p.node_id = 'mem_prov_transcript_1'
+            ORDER BY p.depth, p.path
+        """,
         "fts_search": """
             SELECT id, score
             FROM (
@@ -193,6 +225,19 @@ def duckdb_probe_queries() -> dict[str, str]:
             SELECT id, array_cosine_distance(embedding, [0.10, 0.20, 0.30]::FLOAT[3]) AS distance
             FROM chunks
             ORDER BY distance ASC, id
+            LIMIT 3
+        """,
+        "vault_reconcile_search": """
+            SELECT id, score
+            FROM (
+                SELECT
+                    id,
+                    fts_main_chunks.match_bm25(id, 'operational reconciliation') AS score
+                FROM chunks
+                WHERE deleted_at IS NULL
+            ) sq
+            WHERE score IS NOT NULL
+            ORDER BY score DESC, id
             LIMIT 3
         """,
         "duckpgq_property_graph": """
@@ -230,9 +275,19 @@ def run_probe(require_duckdb: bool = False, require_extensions: bool = False) ->
         load_records(con, records)
         checks = [
             timed_check("recursive_neighborhood", lambda: check_recursive_neighborhood(con)),
+            timed_check("sql_property_graph_fallback", lambda: check_sql_graph_fallback(con)),
             timed_check("link_neighborhood", lambda: check_link_neighborhood(con)),
             timed_check("fts_search", lambda: check_fts(con)),
             timed_check("vector_search", lambda: check_vector(con)),
+            timed_check(
+                "single_writer_broker_service",
+                lambda: check_single_writer_broker_service(duckdb),
+            ),
+            timed_check(
+                "vault_update_delete_reconciliation",
+                lambda: check_vault_update_delete_reconciliation(con),
+            ),
+            timed_check("backup_restore", lambda: check_backup_restore(duckdb)),
             timed_check("duckpgq_property_graph", lambda: check_duckpgq(con)),
             timed_check("parquet_export", lambda: check_parquet_export(con)),
         ]
@@ -259,7 +314,8 @@ def load_records(con: Any, records: GraphProofRecords) -> None:
             content VARCHAR NOT NULL,
             tags_json VARCHAR NOT NULL,
             source_uri VARCHAR NOT NULL,
-            checksum VARCHAR NOT NULL
+            checksum VARCHAR NOT NULL,
+            deleted_at VARCHAR
         )
         """
     )
@@ -281,7 +337,8 @@ def load_records(con: Any, records: GraphProofRecords) -> None:
             heading VARCHAR NOT NULL,
             content VARCHAR NOT NULL,
             embedding FLOAT[3] NOT NULL,
-            checksum VARCHAR NOT NULL
+            checksum VARCHAR NOT NULL,
+            deleted_at VARCHAR
         )
         """
     )
@@ -359,6 +416,19 @@ def check_link_neighborhood(con: Any) -> tuple[bool, str, list[Any]]:
     return found, "Vault chunk can be retrieved as note evidence near derived memory", rows
 
 
+def check_sql_graph_fallback(con: Any) -> tuple[bool, str, list[Any]]:
+    rows = con.execute(duckdb_probe_queries()["sql_property_graph_fallback"]).fetchall()
+    found = any(
+        row[1] == "mem_prov_transcript_1" and "DerivedFrom" in str(row[4])
+        for row in rows
+    )
+    return (
+        found,
+        "Pure SQL recursive CTE path query can replace DuckPGQ for core traversal",
+        rows,
+    )
+
+
 def check_fts(con: Any) -> tuple[bool, str, list[Any]]:
     con.execute("INSTALL fts")
     con.execute("LOAD fts")
@@ -375,6 +445,215 @@ def check_vector(con: Any) -> tuple[bool, str, list[Any]]:
     rows = con.execute(duckdb_probe_queries()["vector_search"]).fetchall()
     found = bool(rows) and rows[0][0] == "vault_chunk_jcode_plan_1"
     return found, "DuckDB VSS can retrieve nearest chunks with fixed-size ARRAY embeddings", rows
+
+
+_STOP_WRITER = object()
+
+
+class SingleWriterDuckDbService:
+    """Tiny proof service: one thread owns the DuckDB write connection."""
+
+    def __init__(self, duckdb_module: Any, db_path: Path) -> None:
+        self._duckdb = duckdb_module
+        self._db_path = db_path
+        self._queue: queue.Queue[Any] = queue.Queue()
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="duckdb-proof-writer")
+        self._thread.start()
+        if not self._ready.wait(timeout=5):
+            raise RuntimeError("single-writer service did not start")
+
+    def execute(self, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> list[Any]:
+        response: queue.Queue[Any] = queue.Queue(maxsize=1)
+        self._queue.put((sql, params, response))
+        ok, payload = response.get(timeout=10)
+        if not ok:
+            raise payload
+        return payload
+
+    def close(self) -> None:
+        self._queue.put(_STOP_WRITER)
+        self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        con = self._duckdb.connect(database=str(self._db_path))
+        self._ready.set()
+        try:
+            while True:
+                item = self._queue.get()
+                if item is _STOP_WRITER:
+                    break
+                sql, params, response = item
+                try:
+                    cursor = con.execute(sql, params)
+                    rows = cursor.fetchall() if cursor.description else []
+                    response.put((True, rows))
+                except Exception as exc:  # pragma: no cover - failure path is reported in check.
+                    response.put((False, exc))
+        finally:
+            con.close()
+
+
+def check_single_writer_broker_service(duckdb_module: Any) -> tuple[bool, str, list[Any]]:
+    with tempfile.TemporaryDirectory(prefix="jcode-duckdb-writer-") as tmp:
+        service = SingleWriterDuckDbService(duckdb_module, Path(tmp) / "broker.duckdb")
+        try:
+            service.execute(
+                """
+                CREATE TABLE broker_writes (
+                    id VARCHAR PRIMARY KEY,
+                    client_id INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    content VARCHAR NOT NULL
+                )
+                """
+            )
+            errors: list[BaseException] = []
+
+            def client(client_id: int) -> None:
+                try:
+                    for sequence in range(8):
+                        service.execute(
+                            """
+                            INSERT INTO broker_writes
+                            (id, client_id, sequence, content)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            [
+                                f"client-{client_id}-{sequence}",
+                                client_id,
+                                sequence,
+                                f"broker write {client_id}/{sequence}",
+                            ],
+                        )
+                except BaseException as exc:  # pragma: no cover - failure path is asserted below.
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=client, args=(idx,)) for idx in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+            if errors:
+                raise errors[0]
+
+            rows = service.execute(
+                """
+                SELECT count(*) AS total, count(DISTINCT client_id) AS clients, max(sequence) AS max_sequence
+                FROM broker_writes
+                """
+            )
+        finally:
+            service.close()
+
+    found = bool(rows) and rows[0] == (32, 4, 7)
+    return (
+        found,
+        "Single-writer broker service can serialize concurrent client writes into DuckDB",
+        rows,
+    )
+
+
+def check_vault_update_delete_reconciliation(con: Any) -> tuple[bool, str, list[Any]]:
+    updated_content = (
+        "Phase 5 proves DuckDB operational reconciliation for updated Vault chunks."
+    )
+    deleted_at = "2026-05-11T00:00:00Z"
+    con.execute(
+        """
+        UPDATE nodes
+        SET content = ?, checksum = ?
+        WHERE id = 'vault_chunk_jcode_plan_1'
+        """,
+        [updated_content, "sha256:chunk-2"],
+    )
+    con.execute(
+        """
+        UPDATE chunks
+        SET content = ?, checksum = ?
+        WHERE id = 'vault_chunk_jcode_plan_1'
+        """,
+        [updated_content, "sha256:chunk-2"],
+    )
+    con.execute(
+        """
+        UPDATE nodes
+        SET deleted_at = ?
+        WHERE id = 'vault_task_sidecar_live_proof'
+        """,
+        [deleted_at],
+    )
+    con.execute(
+        """
+        UPDATE chunks
+        SET deleted_at = ?
+        WHERE id = 'vault_task_sidecar_live_proof'
+        """,
+        [deleted_at],
+    )
+    con.execute(
+        """
+        DELETE FROM edges
+        WHERE source_id = 'vault_task_sidecar_live_proof'
+           OR target_id = 'vault_task_sidecar_live_proof'
+        """
+    )
+    con.execute("INSTALL fts")
+    con.execute("LOAD fts")
+    con.execute("PRAGMA create_fts_index('chunks', 'id', 'content', overwrite = 1)")
+    rows = con.execute(duckdb_probe_queries()["vault_reconcile_search"]).fetchall()
+    tombstones = con.execute(
+        """
+        SELECT id, deleted_at
+        FROM nodes
+        WHERE deleted_at IS NOT NULL
+        ORDER BY id
+        """
+    ).fetchall()
+    active_edges = con.execute(
+        """
+        SELECT count(*)
+        FROM edges
+        WHERE source_id = 'vault_task_sidecar_live_proof'
+           OR target_id = 'vault_task_sidecar_live_proof'
+        """
+    ).fetchone()[0]
+
+    found_update = any(row[0] == "vault_chunk_jcode_plan_1" for row in rows)
+    found_delete = ("vault_task_sidecar_live_proof", deleted_at) in tombstones
+    found_edges_removed = active_edges == 0
+    return (
+        found_update and found_delete and found_edges_removed,
+        "Vault chunk update refreshes FTS and deleted records are tombstoned/unlinked",
+        [*rows, *tombstones, ("active_deleted_edges", active_edges)],
+    )
+
+
+def check_backup_restore(duckdb_module: Any) -> tuple[bool, str, list[Any]]:
+    with tempfile.TemporaryDirectory(prefix="jcode-duckdb-backup-") as tmp:
+        db_path = Path(tmp) / "broker.duckdb"
+        backup_path = Path(tmp) / "broker.backup.duckdb"
+        con = duckdb_module.connect(database=str(db_path))
+        try:
+            load_records(con, sample_records())
+        finally:
+            con.close()
+        shutil.copy2(db_path, backup_path)
+        restored = duckdb_module.connect(database=str(backup_path), read_only=True)
+        try:
+            rows = restored.execute(
+                """
+                SELECT
+                    (SELECT count(*) FROM nodes) AS node_count,
+                    (SELECT count(*) FROM edges) AS edge_count,
+                    (SELECT count(*) FROM chunks) AS chunk_count
+                """
+            ).fetchall()
+        finally:
+            restored.close()
+
+    found = bool(rows) and rows[0] == (5, 5, 3)
+    return found, "DuckDB file backup can be restored and queried read-only", rows
 
 
 def check_duckpgq(con: Any) -> tuple[bool, str, list[Any]]:
@@ -434,11 +713,17 @@ def result_payload(
 def recommendation(checks: list[dict[str, Any]]) -> dict[str, str]:
     by_name = {check["name"]: check["status"] for check in checks}
     core_passed = by_name.get("recursive_neighborhood") == "pass" and by_name.get("link_neighborhood") == "pass"
+    graph_fallback_passed = by_name.get("sql_property_graph_fallback") == "pass"
     fts_passed = by_name.get("fts_search") == "pass"
     vector_passed = by_name.get("vector_search") == "pass"
+    writer_passed = by_name.get("single_writer_broker_service") == "pass"
+    reconcile_passed = by_name.get("vault_update_delete_reconciliation") == "pass"
+    backup_passed = by_name.get("backup_restore") == "pass"
     graph_extension_passed = by_name.get("duckpgq_property_graph") == "pass"
 
-    if core_passed and fts_passed and vector_passed and graph_extension_passed:
+    if core_passed and graph_fallback_passed and fts_passed and vector_passed and writer_passed and reconcile_passed and backup_passed:
+        operational = "DuckDB's no-DuckPGQ path is viable enough for a whole-Vault operational proof behind a single-writer broker service."
+    elif core_passed and fts_passed and vector_passed and graph_extension_passed:
         operational = "DuckDB remains a serious operational candidate if jcode owns a single-writer broker service."
     elif core_passed and (fts_passed or vector_passed):
         operational = "DuckDB is promising, but extension or graph-query gaps still need follow-up before it can displace SurrealDB."
@@ -457,7 +742,7 @@ def recommendation(checks: list[dict[str, Any]]) -> dict[str, str]:
 def should_exit_ok(payload: dict[str, Any], require_extensions: bool) -> bool:
     if not payload["duckdb_available"] or payload["failed"]:
         return False
-    required = {"recursive_neighborhood", "link_neighborhood"}
+    required = {"recursive_neighborhood", "link_neighborhood", "sql_property_graph_fallback"}
     if require_extensions:
         required.update({"fts_search", "vector_search", "duckpgq_property_graph"})
     passed = set(payload["passed"])

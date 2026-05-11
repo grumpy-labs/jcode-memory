@@ -24,6 +24,7 @@ The likely architecture is still hybrid:
 ## References Used
 
 - DuckDB graph queries / DuckPGQ: https://duckdb.org/docs/current/guides/sql_features/graph_queries
+- DuckDB recursive CTEs / `WITH RECURSIVE`: https://duckdb.org/docs/current/sql/query_syntax/with
 - DuckDB full-text search: https://duckdb.org/docs/current/core_extensions/full_text_search
 - DuckDB vector similarity search: https://duckdb.org/docs/current/core_extensions/vss
 - DuckDB concurrency: https://duckdb.org/docs/current/connect/concurrency
@@ -68,16 +69,31 @@ actually needs:
 
 ## Results
 
-Fresh run on 2026-05-11 with DuckDB Python `1.5.2`:
+Fresh core run on 2026-05-11 with DuckDB Python `1.5.2`:
 
 | Check | Result | Evidence |
 | --- | --- | --- |
 | Recursive graph traversal | Pass | Derived memory traversed to hidden transcript provenance through edges. |
+| SQL graph fallback | Pass | Pure SQL recursive CTE path query traversed `DerivedFrom` without DuckPGQ. |
 | Link-neighborhood recall | Pass | Vault chunk was retrieved as note evidence near derived memory. |
 | FTS/BM25 | Pass | `fts` retrieved the focused broker-test chunk. |
 | Vector search | Pass | `vss` retrieved nearest fixed-size array embeddings. |
+| Single-writer broker service | Pass | Four concurrent client threads serialized 32 writes through one DuckDB-owning writer service. |
+| Update/delete reconciliation | Pass | A changed Vault chunk refreshed FTS, and a deleted task was tombstoned and unlinked. |
+| Backup/restore | Pass | A DuckDB database file copy was reopened read-only with expected tables intact. |
 | Parquet export | Pass | Chunk table exported to Parquet. |
 | DuckPGQ property graph | Blocked | DuckDB tried to fetch `duckpgq` for `v1.5.2/osx_arm64`, but the community extension URL returned 404. |
+
+Whole-Vault read-only proof on `/Users/rob/Vault`:
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Inventory | Pass | 450 Markdown files, 95 attachments, 4,889 chunks, 4,783 headings, 1,560 tasks, 1,093 links, and 1,755 tag records. |
+| Source metadata | Pass | File records preserve path, checksum, size, and mtime metadata. |
+| FTS recall | Pass | Query `jcode broker memory DuckDB graph` returned the jcode plan and related TaskNotes chunks. |
+| Link neighborhoods | Pass | Wiki/Markdown links were imported into queryable `vault_link` records. |
+| Task extraction | Pass | Obsidian task lines were imported into queryable `vault_task` records. |
+| Vault hygiene findings | Review | 5 frontmatter parse issues, 48 broken/local unresolved links, and 0 duplicate case-insensitive paths were detected. |
 
 ## What This Means
 
@@ -85,30 +101,41 @@ DuckDB can represent the broker graph core today using normal relational tables
 and recursive CTE traversal. It can also support chunk search with FTS, vector
 nearest-neighbor retrieval through VSS, and Parquet export for data science.
 
-DuckDB is not yet proven as the operational broker store:
+The important DuckPGQ finding is that DuckPGQ is now optional for the first
+operational path. We can keep graph records in plain DuckDB tables and use
+recursive SQL path queries for core broker traversal while DuckPGQ remains a
+future ergonomics/performance enhancement.
+
+DuckDB is not yet fully proven as the operational broker store:
 
 - Native DuckDB writes are single-writer-process oriented.
 - DuckDB is optimized for analytical and bulk workloads, not many tiny
-  cross-process writes.
+  cross-process writes, so the broker should own writes through a single-writer
+  service.
 - FTS indexes do not auto-refresh when source tables change.
 - Persistent VSS/HNSW indexes still carry experimental persistence caveats.
 - DuckPGQ is not available in this local DuckDB/osx_arm64 proof, so graph
   extension ergonomics remain unproven here.
+- The whole-Vault proof is read-only and in-memory; durable service integration,
+  incremental watches, and vector embedding backfill still need proof.
 
 ## Recommendation
 
-Keep DuckDB in first position for the next proof because it passed enough of
-the jcode-shaped core to deserve deeper evaluation. Do not make it the canonical
-operational DB yet.
+Keep DuckDB in first position. The no-DuckPGQ path is viable enough to justify a
+whole-Vault operational proof behind a single-writer broker service. Do not make
+it the canonical operational DB yet, but stop treating DuckPGQ availability as a
+blocker.
 
 Next DuckDB proof requirements:
 
-- single-writer broker service model
-- repeated small writes under broker-like concurrency
-- update/delete reconciliation for Vault chunks
+- durable single-writer broker service module/API, not only this proof harness
+- repeated small writes under broker-like concurrency on a larger corpus
+- incremental update/delete reconciliation for Vault chunks
 - index refresh timing for FTS/vector
 - backup/restore and rebuild-from-source behavior
-- whole-Vault inventory/import timing
+- vector embedding backfill for whole-Vault chunks
+- broker context formatting from `vault_chunk`, `vault_link`, and `vault_task`
+  records without prompt bloat
 
 Keep SurrealDB as the current operational baseline until DuckDB passes those
 write, restore, and whole-Vault tests. Even if DuckDB does not become the

@@ -43,10 +43,23 @@ class DuckDbCandidateProbeTests(unittest.TestCase):
         queries = probe.duckdb_probe_queries()
 
         self.assertIn("recursive_neighborhood", queries)
+        self.assertIn("sql_property_graph_fallback", queries)
         self.assertIn("fts_search", queries)
         self.assertIn("vector_search", queries)
         self.assertIn("duckpgq_property_graph", queries)
         self.assertIn("single writer", probe.OPERATIONAL_WARNINGS[0].lower())
+
+    def test_duckdb_probe_reports_operational_store_checks(self):
+        probe = load_probe_module()
+
+        payload = probe.run_probe(require_duckdb=True)
+        check_names = {check["name"] for check in payload["checks"]}
+
+        self.assertIn("sql_property_graph_fallback", check_names)
+        self.assertIn("single_writer_broker_service", check_names)
+        self.assertIn("vault_update_delete_reconciliation", check_names)
+        self.assertIn("backup_restore", check_names)
+        self.assertIn("sql_property_graph_fallback", payload["passed"])
 
 
 if __name__ == "__main__":
