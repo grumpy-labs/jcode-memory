@@ -8,10 +8,11 @@ use crate::protocol::{
 };
 use crate::todo::TodoItem;
 use anyhow::{Context, Result};
+use jcode_session_types::SessionSearchResult;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use tokio::sync::mpsc;
 
@@ -19,6 +20,8 @@ type TranscriptExtractionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<crate::sidecar::ExtractedMemory>>> + Send + 'a>>;
 
 const BROKER_SEMANTIC_THRESHOLD: f32 = crate::memory::EMBEDDING_SIMILARITY_THRESHOLD;
+const BROKER_SEARCH_HIT_LIMIT: usize = 3;
+const BROKER_SKILL_SUMMARY_LIMIT: usize = 8;
 
 trait TranscriptMemoryExtractor {
     fn extract<'a>(
@@ -330,11 +333,12 @@ async fn broker_context_event(
             .with_context(|| format!("session not found: {session_id}"))?
     };
 
-    let (working_dir, mut tool_names) = {
+    let (working_dir, mut tool_names, session_snapshot) = {
         let agent_guard = agent.lock().await;
         (
             agent_guard.working_dir().map(str::to_string),
             agent_guard.tool_names().await,
+            agent_guard.session_snapshot(),
         )
     };
     tool_names.sort();
@@ -347,6 +351,11 @@ async fn broker_context_event(
         .collect();
     let side_panel = crate::side_panel::snapshot_for_session(&session_id).unwrap_or_default();
     let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
+    let skill_summaries = collect_skill_context_summaries(working_dir.as_deref(), query);
+    let session_search_hits =
+        collect_session_search_hits(&session_id, working_dir.as_deref(), query, limit)?;
+    let conversation_search_hits =
+        collect_conversation_search_hits(&session_snapshot, query, limit);
     let items = collect_context_items(
         &session_id,
         working_dir.as_deref(),
@@ -354,6 +363,9 @@ async fn broker_context_event(
         &memory_results,
         &side_panel,
         &todos,
+        &skill_summaries,
+        &session_search_hits,
+        &conversation_search_hits,
     );
 
     Ok(ServerEvent::BrokerContext {
@@ -562,8 +574,6 @@ struct BrokerMemorySearchHit {
     retrieval_mode: Option<&'static str>,
 }
 
-// Populated by later Phase 2 emitters; kept here so the item mapper contract is stable.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct BrokerSkillContextSummary {
     name: String,
@@ -574,7 +584,6 @@ struct BrokerSkillContextSummary {
     allowed_tools: Vec<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct BrokerSearchHitContext {
     id: String,
@@ -886,6 +895,9 @@ fn collect_context_items(
     memories: &[BrokerMemoryResult],
     side_panel: &jcode_side_panel_types::SidePanelSnapshot,
     todos: &[TodoItem],
+    skill_summaries: &[BrokerSkillContextSummary],
+    session_search_hits: &[BrokerSearchHitContext],
+    conversation_search_hits: &[BrokerSearchHitContext],
 ) -> Vec<BrokerContextItem> {
     let mut items = Vec::new();
 
@@ -903,8 +915,209 @@ fn collect_context_items(
         side_panel_broker_item(session_id, page, side_panel.focused_page_id.as_deref())
     }));
     items.extend(todos.iter().map(|todo| todo_broker_item(session_id, todo)));
+    items.extend(
+        skill_summaries
+            .iter()
+            .map(|skill| skill_broker_item(skill, working_dir)),
+    );
+    items.extend(
+        session_search_hits
+            .iter()
+            .map(session_search_hit_broker_item),
+    );
+    items.extend(
+        conversation_search_hits
+            .iter()
+            .map(conversation_search_hit_broker_item),
+    );
 
     items
+}
+
+fn collect_session_search_hits(
+    session_id: &str,
+    working_dir: Option<&str>,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<Vec<BrokerSearchHitContext>> {
+    let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let hit_limit = broker_search_hit_limit(limit);
+    if hit_limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let options = crate::tool::session_search::StructuredSessionSearchOptions::broker_prior_session(
+        session_id,
+        working_dir.map(str::to_string),
+        hit_limit,
+    );
+    let report = crate::tool::session_search::search_jcode_sessions_structured(query, options)?;
+    Ok(report
+        .results
+        .into_iter()
+        .take(hit_limit)
+        .enumerate()
+        .map(|(idx, result)| search_result_hit_context(result, query, idx + 1))
+        .collect())
+}
+
+fn collect_conversation_search_hits(
+    session: &crate::session::Session,
+    query: Option<&str>,
+    limit: usize,
+) -> Vec<BrokerSearchHitContext> {
+    let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) else {
+        return Vec::new();
+    };
+    let hit_limit = broker_search_hit_limit(limit);
+    if hit_limit == 0 {
+        return Vec::new();
+    }
+
+    let options =
+        crate::tool::session_search::StructuredSessionSearchOptions::broker_current_session(
+            session.id.clone(),
+            hit_limit,
+        );
+    crate::tool::session_search::search_session_structured(session, query, options)
+        .results
+        .into_iter()
+        .take(hit_limit)
+        .enumerate()
+        .map(|(idx, result)| search_result_hit_context(result, query, idx + 1))
+        .collect()
+}
+
+fn search_result_hit_context(
+    result: SessionSearchResult,
+    query: &str,
+    rank: usize,
+) -> BrokerSearchHitContext {
+    let message_id = result.message_id.clone();
+    let message_index = result.message_index;
+    let id = message_id
+        .clone()
+        .or_else(|| message_index.map(|idx| idx.to_string()))
+        .unwrap_or_else(|| "metadata".to_string());
+    let session_label = result
+        .title
+        .clone()
+        .or_else(|| result.short_name.clone())
+        .unwrap_or_else(|| result.session_id.clone());
+    let title = format!("{} match in {}", result.role, session_label);
+    let summary = format!("{} search hit from {}", result.role, session_label);
+    let metadata = json!({
+        "source": result.source,
+        "result_kind": result.kind.label(),
+        "session_title": result.title,
+        "short_name": result.short_name,
+        "source_session_path": session_path_for_metadata(&result.session_id),
+        "context_count": result.context.len(),
+    });
+
+    BrokerSearchHitContext {
+        id,
+        title,
+        summary,
+        content: result.snippet.clone(),
+        snippet: result.snippet,
+        session_id: result.session_id,
+        working_dir: result.working_dir,
+        provider_key: result.provider_key,
+        model: result.model,
+        message_id,
+        message_index,
+        role: Some(result.role),
+        timestamp: result
+            .message_timestamp
+            .map(|timestamp| timestamp.to_rfc3339()),
+        updated_at: Some(result.updated_at.to_rfc3339()),
+        query: Some(query.to_string()),
+        score: Some(result.score as f32),
+        rank: Some(rank),
+        matched_terms: result.matched_terms,
+        metadata,
+    }
+}
+
+fn session_path_for_metadata(session_id: &str) -> Option<String> {
+    crate::session::session_path(session_id)
+        .ok()
+        .map(|path| path.display().to_string())
+}
+
+fn collect_skill_context_summaries(
+    working_dir: Option<&str>,
+    query: Option<&str>,
+) -> Vec<BrokerSkillContextSummary> {
+    let working_path = working_dir.map(PathBuf::from);
+    let registry = match crate::skill::SkillRegistry::load_for_working_dir(working_path.as_deref())
+    {
+        Ok(registry) => registry,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Broker context skill summary load failed: {error}"
+            ));
+            return Vec::new();
+        }
+    };
+    let terms = query.map(query_terms).unwrap_or_default();
+    let mut summaries: Vec<BrokerSkillContextSummary> = registry
+        .list()
+        .into_iter()
+        .filter_map(|skill| {
+            let scope = skill_scope_for_path(&skill.path, working_path.as_deref());
+            let is_project_local = scope == "project";
+            if !is_project_local && !skill_matches_query(&skill.name, &skill.description, &terms) {
+                return None;
+            }
+            Some(BrokerSkillContextSummary {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                scope: scope.to_string(),
+                source: "skill_registry".to_string(),
+                path: Some(skill.path.display().to_string()),
+                allowed_tools: skill.allowed_tools.clone().unwrap_or_default(),
+            })
+        })
+        .collect();
+    summaries.sort_by(|a, b| {
+        skill_scope_rank(&a.scope)
+            .cmp(&skill_scope_rank(&b.scope))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    summaries.truncate(BROKER_SKILL_SUMMARY_LIMIT);
+    summaries
+}
+
+fn skill_scope_for_path(path: &Path, working_dir: Option<&Path>) -> &'static str {
+    if working_dir.is_some_and(|working_dir| path.starts_with(working_dir)) {
+        "project"
+    } else {
+        "global"
+    }
+}
+
+fn skill_scope_rank(scope: &str) -> usize {
+    if scope == "project" { 0 } else { 1 }
+}
+
+fn skill_matches_query(name: &str, description: &str, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return false;
+    }
+    let searchable = format!("{name} {description}").to_ascii_lowercase();
+    terms.iter().any(|term| searchable.contains(term.as_str()))
+}
+
+fn broker_search_hit_limit(limit: usize) -> usize {
+    if limit == 0 {
+        0
+    } else {
+        limit.min(BROKER_SEARCH_HIT_LIMIT)
+    }
 }
 
 fn tool_broker_item(tool_name: &str) -> BrokerContextItem {
@@ -1053,7 +1266,6 @@ fn todo_broker_item(session_id: &str, todo: &TodoItem) -> BrokerContextItem {
     }
 }
 
-#[allow(dead_code)]
 fn skill_broker_item(
     skill: &BrokerSkillContextSummary,
     working_dir: Option<&str>,
@@ -1090,7 +1302,6 @@ fn skill_broker_item(
     }
 }
 
-#[allow(dead_code)]
 fn session_search_hit_broker_item(hit: &BrokerSearchHitContext) -> BrokerContextItem {
     search_hit_broker_item(
         "session_search_hit",
@@ -1102,7 +1313,6 @@ fn session_search_hit_broker_item(hit: &BrokerSearchHitContext) -> BrokerContext
     )
 }
 
-#[allow(dead_code)]
 fn conversation_search_hit_broker_item(hit: &BrokerSearchHitContext) -> BrokerContextItem {
     search_hit_broker_item(
         "conversation_search_hit",
@@ -1114,7 +1324,6 @@ fn conversation_search_hit_broker_item(hit: &BrokerSearchHitContext) -> BrokerCo
     )
 }
 
-#[allow(dead_code)]
 fn search_hit_broker_item(
     kind: &str,
     origin_tool: &str,
@@ -1177,7 +1386,6 @@ fn search_hit_broker_item(
     }
 }
 
-#[allow(dead_code)]
 fn search_hit_metadata(metadata: &serde_json::Value) -> serde_json::Value {
     let mut map = match metadata {
         serde_json::Value::Object(map) => map.clone(),

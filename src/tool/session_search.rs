@@ -129,6 +129,128 @@ impl Default for SessionSearchTool {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct StructuredSessionSearchOptions {
+    pub(crate) current_session_id: String,
+    pub(crate) working_dir_filter: Option<String>,
+    pub(crate) limit: usize,
+    pub(crate) max_per_session: usize,
+    pub(crate) include_current: bool,
+    pub(crate) include_tools: bool,
+    pub(crate) include_system: bool,
+    pub(crate) context_before: usize,
+    pub(crate) context_after: usize,
+    pub(crate) max_scan_sessions: usize,
+}
+
+impl StructuredSessionSearchOptions {
+    pub(crate) fn broker_prior_session(
+        current_session_id: impl Into<String>,
+        working_dir_filter: Option<String>,
+        limit: usize,
+    ) -> Self {
+        let limit = limit.clamp(1, MAX_LIMIT);
+        Self {
+            current_session_id: current_session_id.into(),
+            working_dir_filter,
+            limit,
+            max_per_session: DEFAULT_MAX_PER_SESSION.min(limit),
+            include_current: false,
+            include_tools: false,
+            include_system: false,
+            context_before: 0,
+            context_after: 0,
+            max_scan_sessions: DEFAULT_MAX_SCAN_SESSIONS,
+        }
+    }
+
+    pub(crate) fn broker_current_session(
+        current_session_id: impl Into<String>,
+        limit: usize,
+    ) -> Self {
+        let limit = limit.clamp(1, MAX_LIMIT);
+        Self {
+            current_session_id: current_session_id.into(),
+            working_dir_filter: None,
+            limit,
+            max_per_session: limit,
+            include_current: true,
+            include_tools: false,
+            include_system: false,
+            context_before: 0,
+            context_after: 0,
+            max_scan_sessions: 1,
+        }
+    }
+
+    fn to_search_options(&self) -> SearchOptions {
+        SearchOptions {
+            current_session_id: self.current_session_id.clone(),
+            working_dir_filter: self.working_dir_filter.clone(),
+            limit: self.limit,
+            max_per_session: self.max_per_session,
+            include_current: self.include_current,
+            include_tools: self.include_tools,
+            include_system: self.include_system,
+            include_external: false,
+            role_filter: None,
+            provider_filter: None,
+            model_filter: None,
+            source_filter: Some("jcode".to_string()),
+            saved_filter: None,
+            debug_filter: None,
+            canary_filter: None,
+            after: None,
+            before: None,
+            context_before: self.context_before,
+            context_after: self.context_after,
+            max_scan_sessions: self.max_scan_sessions,
+        }
+    }
+}
+
+pub(crate) fn search_jcode_sessions_structured(
+    query: &str,
+    options: StructuredSessionSearchOptions,
+) -> Result<SearchReport> {
+    let query = QueryProfile::new(query);
+    let search_options = options.to_search_options();
+    let mut report = if query.is_actionable() {
+        let sessions_dir = storage::jcode_dir()?.join("sessions");
+        search_sessions_blocking(
+            &sessions_dir,
+            &query,
+            &search_options,
+            &search_options.current_session_id,
+        )?
+    } else {
+        SearchReport::default()
+    };
+    report
+        .results
+        .retain(|result| result.kind == SearchResultKind::Message);
+    Ok(report)
+}
+
+pub(crate) fn search_session_structured(
+    session: &Session,
+    query: &str,
+    options: StructuredSessionSearchOptions,
+) -> SearchReport {
+    let query = QueryProfile::new(query);
+    let search_options = options.to_search_options();
+    let mut report = SearchReport::default();
+    if query.is_actionable() {
+        append_session_results(&mut report.results, session, &query, &search_options);
+        report
+            .results
+            .retain(|result| result.kind == SearchResultKind::Message);
+        report.results.sort_unstable_by(compare_results);
+        report.results = group_and_limit_results(report.results, &search_options);
+    }
+    report
+}
+
+#[derive(Debug, Clone)]
 struct SearchOptions {
     current_session_id: String,
     working_dir_filter: Option<String>,

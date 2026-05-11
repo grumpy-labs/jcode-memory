@@ -650,6 +650,10 @@ impl Agent {
         &self.session.id
     }
 
+    pub(crate) fn session_snapshot(&self) -> Session {
+        self.session.clone()
+    }
+
     /// Mark this agent session as closed and persist it.
     pub fn mark_closed(&mut self) {
         crate::telemetry::end_session_with_reason(

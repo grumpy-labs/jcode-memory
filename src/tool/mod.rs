@@ -26,7 +26,7 @@ mod open;
 mod patch;
 mod read;
 pub mod selfdev;
-mod session_search;
+pub(crate) mod session_search;
 mod side_panel;
 mod skill;
 mod task;

@@ -1,5 +1,6 @@
 use crate::test_support::*;
 use jcode::protocol::BrokerMemoryExtractionStatus;
+use serde_json::json;
 use std::collections::HashSet;
 
 #[tokio::test]
@@ -312,6 +313,250 @@ async fn typed_broker_context_api_returns_memory_tools_and_artifacts() -> Result
         assert!(goal_page
             .content
             .contains("return context without debug command strings"));
+
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
+    result
+}
+
+#[tokio::test]
+async fn broker_context_emits_phase_2_context_evidence_candidates_and_boundaries() -> Result<()> {
+    let _env = setup_test_env()?;
+    let _profile = EnvVarGuard::set("JCODE_TOOL_PROFILE", "broker");
+    let runtime_dir = short_runtime_dir(format!(
+        "jcode-broker-phase-2-context-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let project_dir = runtime_dir.join("project");
+    std::fs::create_dir_all(&project_dir)?;
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+
+    let mut prior_session =
+        Session::create_with_id("prior-phase-2-session".to_string(), None, None);
+    prior_session.working_dir = Some(project_dir.to_string_lossy().to_string());
+    prior_session.provider_key = Some("mock".to_string());
+    prior_session.model = Some("mock".to_string());
+    prior_session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "Prior phase two context evidence should appear as a session search hit."
+                .to_string(),
+            cache_control: None,
+        }],
+    );
+    prior_session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "tool-noise".to_string(),
+            name: "bash".to_string(),
+            input: json!({"cmd": "phase two context evidence hidden tool noise"}),
+        }],
+    );
+    prior_session.save()?;
+
+    let skill_dir = project_dir.join(".jcode/skills/phase-two-context");
+    std::fs::create_dir_all(&skill_dir)?;
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: phase-two-context\ndescription: Phase two context evidence summaries for broker tests.\nallowed-tools: memory, session_search\n---\n# Phase Two Context\nThis full body should not be injected automatically.\n",
+    )?;
+
+    let provider = MockProvider::new();
+    provider.queue_response(vec![
+        StreamEvent::TextDelta(
+            "Assistant noted current phase two context evidence from the active transcript."
+                .to_string(),
+        ),
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".to_string()),
+        },
+    ]);
+    let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
+    let server_instance =
+        server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+
+    let result = async {
+        wait_for_server_ready(&socket_path, &debug_socket_path).await?;
+
+        let create_command = format!("create_session:{}", project_dir.display());
+        let session_id =
+            debug_create_headless_session_with_command(debug_socket_path.clone(), &create_command)
+                .await?;
+
+        debug_run_command_json(
+            debug_socket_path.clone(),
+            r#"tool:goal {"action":"create","title":"Phase Two Context Goal","scope":"project","next_steps":["keep goals in typed broker context"]}"#,
+            Some(&session_id),
+        )
+        .await?;
+
+        debug_run_command_json(
+            debug_socket_path.clone(),
+            r#"tool:todo {"todos":[{"id":"todo-phase-2-context","content":"Finish Phase 2 context parity","status":"pending","priority":"high"}]}"#,
+            Some(&session_id),
+        )
+        .await?;
+
+        jcode::side_panel::write_markdown_page(
+            &session_id,
+            "artifact.phase-two-context",
+            Some("Phase Two Artifact"),
+            "Phase two context evidence artifact stays typed, not presentation UI.",
+            false,
+        )?;
+
+        let mut client = server::Client::connect_with_path(socket_path.clone()).await?;
+        let resume_id = client.resume_session(&session_id).await?;
+        let _ = collect_until_history_unix(&mut client, resume_id).await?;
+
+        let message_id =
+            client
+                .send_message("Current phase two context evidence belongs in conversation search.")
+                .await?;
+        let _ = collect_until_done_unix(&mut client, message_id).await?;
+
+        let context_event = client
+            .get_broker_context(
+                Some(session_id.clone()),
+                Some("phase two context evidence".to_string()),
+                8,
+            )
+            .await?;
+
+        let ServerEvent::BrokerContext {
+            tool_names, items, ..
+        } = context_event
+        else {
+            anyhow::bail!("expected broker context event, got {context_event:?}");
+        };
+
+        let tool_names: HashSet<String> = tool_names.into_iter().collect();
+        for expected in [
+            "memory",
+            "goal",
+            "todo",
+            "session_search",
+            "conversation_search",
+            "swarm",
+            "skill_manage",
+        ] {
+            assert!(tool_names.contains(expected), "missing broker tool {expected}");
+        }
+        for forbidden in [
+            "side_panel",
+            "agentgrep",
+            "bash",
+            "write",
+            "edit",
+            "patch",
+            "browser",
+            "gmail",
+            "mcp",
+            "selfdev",
+            "debug_socket",
+            "schedule_ambient",
+        ] {
+            assert!(
+                !tool_names.contains(forbidden),
+                "broker context should not expose noisy/operator tool {forbidden}: {tool_names:?}"
+            );
+        }
+
+        let session_hit = items
+            .iter()
+            .find(|item| item.kind == "session_search_hit")
+            .context("missing session search hit item")?;
+        assert_eq!(
+            session_hit.origin.session_id.as_deref(),
+            Some("prior-phase-2-session")
+        );
+        assert!(
+            session_hit
+                .fragments
+                .iter()
+                .any(|fragment| fragment.content.contains("session search hit")),
+            "session hit should include snippet fragments, got {session_hit:?}"
+        );
+        assert_eq!(session_hit.metadata["durable_memory"], false);
+        assert_ne!(session_hit.kind, "memory");
+        assert!(
+            !session_hit
+                .content
+                .as_deref()
+                .unwrap_or_default()
+                .contains("hidden tool noise"),
+            "session evidence should hide tool-only noise"
+        );
+
+        let conversation_hit = items
+            .iter()
+            .find(|item| item.kind == "conversation_search_hit")
+            .context("missing conversation search hit item")?;
+        assert_eq!(
+            conversation_hit.origin.session_id.as_deref(),
+            Some(session_id.as_str())
+        );
+        assert!(
+            conversation_hit
+                .fragments
+                .iter()
+                .any(|fragment| fragment.content.contains("conversation search")),
+            "conversation hit should include active transcript snippet, got {conversation_hit:?}"
+        );
+
+        let skill_item = items
+            .iter()
+            .find(|item| item.kind == "skill" && item.id == "skill:phase-two-context")
+            .context("missing project-local skill summary item")?;
+        assert_eq!(
+            skill_item.summary.as_deref(),
+            Some("Phase two context evidence summaries for broker tests.")
+        );
+        assert_eq!(skill_item.metadata["name"], "phase-two-context");
+        assert_eq!(
+            skill_item.metadata["allowed_tools"],
+            json!(["memory", "session_search"])
+        );
+        assert!(
+            !skill_item
+                .content
+                .as_deref()
+                .unwrap_or_default()
+                .contains("full body should not be injected"),
+            "broker should not auto-inject full skill body"
+        );
+
+        assert!(
+            items
+                .iter()
+                .any(|item| item.kind == "goal" && item.id == "goal.phase-two-context-goal"),
+            "goal item should remain in typed context, got {items:?}"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| item.kind == "todo" && item.id == "todo-phase-2-context"),
+            "todo item should remain in typed context, got {items:?}"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| item.kind == "side_panel"
+                    && item.id == "artifact.phase-two-context"
+                    && item
+                        .content
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("typed, not presentation UI")),
+            "non-goal side-panel artifact should remain a typed artifact, got {items:?}"
+        );
 
         Ok::<_, anyhow::Error>(())
     }
