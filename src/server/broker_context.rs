@@ -3,8 +3,8 @@ use crate::memory::TrustLevel;
 use crate::memory::{MemoryCategory, MemoryEntry, MemoryManager, MemoryScope};
 use crate::memory_graph::EdgeKind;
 use crate::protocol::{
-    BrokerContextItem, BrokerContextOrigin, BrokerContextRelevance, BrokerMemoryContextItem,
-    BrokerMemoryExtractionStatus, ServerEvent,
+    BrokerContextFragment, BrokerContextItem, BrokerContextOrigin, BrokerContextRelevance,
+    BrokerMemoryContextItem, BrokerMemoryExtractionStatus, ServerEvent,
 };
 use crate::todo::TodoItem;
 use anyhow::{Context, Result};
@@ -562,6 +562,42 @@ struct BrokerMemorySearchHit {
     retrieval_mode: Option<&'static str>,
 }
 
+// Populated by later Phase 2 emitters; kept here so the item mapper contract is stable.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct BrokerSkillContextSummary {
+    name: String,
+    description: String,
+    scope: String,
+    source: String,
+    path: Option<String>,
+    allowed_tools: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct BrokerSearchHitContext {
+    id: String,
+    title: String,
+    summary: String,
+    content: String,
+    snippet: String,
+    session_id: String,
+    working_dir: Option<String>,
+    provider_key: Option<String>,
+    model: Option<String>,
+    message_id: Option<String>,
+    message_index: Option<usize>,
+    role: Option<String>,
+    timestamp: Option<String>,
+    updated_at: Option<String>,
+    query: Option<String>,
+    score: Option<f32>,
+    rank: Option<usize>,
+    matched_terms: Vec<String>,
+    metadata: serde_json::Value,
+}
+
 fn collect_broker_memory_results(
     working_dir: Option<&str>,
     query: Option<&str>,
@@ -1015,6 +1051,145 @@ fn todo_broker_item(session_id: &str, todo: &TodoItem) -> BrokerContextItem {
             "assigned_to": todo.assigned_to,
         }),
     }
+}
+
+#[allow(dead_code)]
+fn skill_broker_item(
+    skill: &BrokerSkillContextSummary,
+    working_dir: Option<&str>,
+) -> BrokerContextItem {
+    let mut metadata = json!({
+        "name": skill.name,
+        "allowed_tools": skill.allowed_tools,
+    });
+    if let Some(path) = skill.path.as_deref() {
+        metadata["path"] = json!(path);
+    }
+
+    BrokerContextItem {
+        id: format!("skill:{}", skill.name),
+        kind: "skill".to_string(),
+        scope: skill.scope.clone(),
+        content_format: "plain_text".to_string(),
+        title: Some(skill.name.clone()),
+        summary: Some(skill.description.clone()),
+        content: Some(skill.description.clone()),
+        tags: vec!["skill".to_string()],
+        source: skill.path.clone().or_else(|| Some(skill.source.clone())),
+        score: None,
+        origin: BrokerContextOrigin {
+            tool: Some("skill_registry".to_string()),
+            source: Some(skill.source.clone()),
+            working_dir: working_dir.map(str::to_string),
+            path: skill.path.clone(),
+            ..Default::default()
+        },
+        relevance: None,
+        fragments: Vec::new(),
+        metadata,
+    }
+}
+
+#[allow(dead_code)]
+fn session_search_hit_broker_item(hit: &BrokerSearchHitContext) -> BrokerContextItem {
+    search_hit_broker_item(
+        "session_search_hit",
+        "session_search",
+        "project",
+        "session",
+        format!("session:{}:{}", hit.session_id, hit.id),
+        hit,
+    )
+}
+
+#[allow(dead_code)]
+fn conversation_search_hit_broker_item(hit: &BrokerSearchHitContext) -> BrokerContextItem {
+    search_hit_broker_item(
+        "conversation_search_hit",
+        "conversation_search",
+        "session",
+        "conversation",
+        format!("conversation:{}:{}", hit.session_id, hit.id),
+        hit,
+    )
+}
+
+#[allow(dead_code)]
+fn search_hit_broker_item(
+    kind: &str,
+    origin_tool: &str,
+    scope: &str,
+    tag: &str,
+    id: String,
+    hit: &BrokerSearchHitContext,
+) -> BrokerContextItem {
+    let metadata = search_hit_metadata(&hit.metadata);
+    let relevance = hit.query.as_ref().map(|query| BrokerContextRelevance {
+        query: Some(query.clone()),
+        retrieval_mode: Some(origin_tool.to_string()),
+        score: hit.score,
+        rank: hit.rank,
+        matched_terms: hit.matched_terms.clone(),
+        exact_match: Some(false),
+    });
+    let fragments = if hit.snippet.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![BrokerContextFragment {
+            relation: "match".to_string(),
+            content: hit.snippet.clone(),
+            content_format: "plain_text".to_string(),
+            role: hit.role.clone(),
+            message_index: hit.message_index,
+            message_id: hit.message_id.clone(),
+            timestamp: hit.timestamp.clone(),
+        }]
+    };
+
+    BrokerContextItem {
+        id,
+        kind: kind.to_string(),
+        scope: scope.to_string(),
+        content_format: "plain_text".to_string(),
+        title: Some(hit.title.clone()),
+        summary: Some(hit.summary.clone()),
+        content: Some(hit.content.clone()),
+        tags: vec!["search_hit".to_string(), tag.to_string()],
+        source: Some(origin_tool.to_string()),
+        score: hit.score,
+        origin: BrokerContextOrigin {
+            tool: Some(origin_tool.to_string()),
+            source: Some(origin_tool.to_string()),
+            session_id: Some(hit.session_id.clone()),
+            working_dir: hit.working_dir.clone(),
+            provider_key: hit.provider_key.clone(),
+            model: hit.model.clone(),
+            message_id: hit.message_id.clone(),
+            message_index: hit.message_index,
+            role: hit.role.clone(),
+            timestamp: hit.timestamp.clone(),
+            updated_at: hit.updated_at.clone(),
+            ..Default::default()
+        },
+        relevance,
+        fragments,
+        metadata,
+    }
+}
+
+#[allow(dead_code)]
+fn search_hit_metadata(metadata: &serde_json::Value) -> serde_json::Value {
+    let mut map = match metadata {
+        serde_json::Value::Object(map) => map.clone(),
+        serde_json::Value::Null => serde_json::Map::new(),
+        value => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".to_string(), value.clone());
+            map
+        }
+    };
+    map.insert("durable_memory".to_string(), json!(false));
+    serde_json::Value::Object(map)
 }
 
 fn memory_relevance(
@@ -1480,5 +1655,197 @@ mod tests {
                 Some("semantic_cascade")
             );
         });
+    }
+
+    #[test]
+    fn broker_context_mapper_contract_covers_phase_2_item_kinds() {
+        let memory_result = BrokerMemoryResult {
+            memory: BrokerMemoryContextItem {
+                id: "mem_phase_2".to_string(),
+                category: "fact".to_string(),
+                scope: "project".to_string(),
+                content: "Phase 2 context keeps typed items as the adapter surface.".to_string(),
+                tags: vec!["phase-2".to_string()],
+                source: Some("derived:hermes:ses_contract".to_string()),
+            },
+            relevance: Some(BrokerContextRelevance {
+                query: Some("typed context".to_string()),
+                retrieval_mode: Some("keyword".to_string()),
+                rank: Some(1),
+                matched_terms: vec!["context".to_string()],
+                exact_match: Some(false),
+                ..Default::default()
+            }),
+        };
+        let goal_page = jcode_side_panel_types::SidePanelPage {
+            id: "goal.phase-2-context".to_string(),
+            title: "Phase 2 Context".to_string(),
+            file_path: "/tmp/project/.jcode/goals/phase-2.md".to_string(),
+            format: jcode_side_panel_types::SidePanelPageFormat::Markdown,
+            source: jcode_side_panel_types::SidePanelPageSource::Managed,
+            content: "# Phase 2\n\nKeep context typed.".to_string(),
+            updated_at_ms: 100,
+        };
+        let note_page = jcode_side_panel_types::SidePanelPage {
+            id: "note.phase-2-context".to_string(),
+            title: "Phase 2 Note".to_string(),
+            file_path: "/tmp/project/.jcode/notes/phase-2.md".to_string(),
+            format: jcode_side_panel_types::SidePanelPageFormat::Markdown,
+            source: jcode_side_panel_types::SidePanelPageSource::Ephemeral,
+            content: "Context note content.".to_string(),
+            updated_at_ms: 101,
+        };
+        let todo = TodoItem {
+            id: "todo-phase-2".to_string(),
+            content: "Normalize broker context items".to_string(),
+            status: "in_progress".to_string(),
+            priority: "high".to_string(),
+            blocked_by: Vec::new(),
+            assigned_to: Some("broker".to_string()),
+        };
+        let skill = BrokerSkillContextSummary {
+            name: "hermes-jcode-graph".to_string(),
+            description: "Summarize Hermes graph memory adapter behavior.".to_string(),
+            scope: "project".to_string(),
+            source: "skill_registry".to_string(),
+            path: Some("/tmp/project/.jcode/skills/hermes-jcode-graph/SKILL.md".to_string()),
+            allowed_tools: vec!["memory".to_string(), "goal".to_string()],
+        };
+        let session_hit = BrokerSearchHitContext {
+            id: "42".to_string(),
+            title: "Prior session evidence".to_string(),
+            summary: "Prior session mentioned typed context.".to_string(),
+            content: "The prior session said typed context should stay evidence.".to_string(),
+            snippet: "typed context should stay evidence".to_string(),
+            session_id: "ses_prior".to_string(),
+            working_dir: Some("/tmp/project".to_string()),
+            provider_key: Some("openai".to_string()),
+            model: Some("gpt-5.4".to_string()),
+            message_id: Some("msg_42".to_string()),
+            message_index: Some(42),
+            role: Some("assistant".to_string()),
+            timestamp: Some("2026-05-10T12:00:00Z".to_string()),
+            updated_at: Some("2026-05-10T12:05:00Z".to_string()),
+            query: Some("typed context".to_string()),
+            score: Some(0.88),
+            rank: Some(2),
+            matched_terms: vec!["typed".to_string(), "context".to_string()],
+            metadata: json!({"channel": "session_history"}),
+        };
+        let conversation_hit = BrokerSearchHitContext {
+            id: "3".to_string(),
+            title: "Current conversation evidence".to_string(),
+            summary: "Current conversation mentioned the adapter surface.".to_string(),
+            content: "This turn asked for the broker_context.items contract.".to_string(),
+            snippet: "broker_context.items contract".to_string(),
+            session_id: "ses_contract".to_string(),
+            working_dir: Some("/tmp/project".to_string()),
+            provider_key: None,
+            model: None,
+            message_id: Some("msg_3".to_string()),
+            message_index: Some(3),
+            role: Some("user".to_string()),
+            timestamp: None,
+            updated_at: None,
+            query: Some("typed context".to_string()),
+            score: Some(0.74),
+            rank: Some(3),
+            matched_terms: vec!["context".to_string()],
+            metadata: json!({"turn": 3}),
+        };
+
+        let items = vec![
+            tool_broker_item("memory"),
+            memory_broker_item(&memory_result, Some("/tmp/project")),
+            side_panel_broker_item("ses_contract", &goal_page, Some("goal.phase-2-context")),
+            side_panel_broker_item("ses_contract", &note_page, Some("goal.phase-2-context")),
+            todo_broker_item("ses_contract", &todo),
+            skill_broker_item(&skill, Some("/tmp/project")),
+            session_search_hit_broker_item(&session_hit),
+            conversation_search_hit_broker_item(&conversation_hit),
+        ];
+
+        let kinds: HashSet<String> = items.iter().map(|item| item.kind.clone()).collect();
+        for expected in [
+            "memory",
+            "goal",
+            "todo",
+            "side_panel",
+            "skill",
+            "session_search_hit",
+            "conversation_search_hit",
+            "tool",
+        ] {
+            assert!(
+                kinds.contains(expected),
+                "missing context item kind {expected}"
+            );
+        }
+        for item in &items {
+            assert!(
+                item.origin.tool.is_some(),
+                "{} should keep a stable origin tool",
+                item.kind
+            );
+            assert!(
+                !item.scope.trim().is_empty(),
+                "{} should keep a stable scope",
+                item.kind
+            );
+            if item.kind != "tool" {
+                assert!(
+                    item.summary
+                        .as_deref()
+                        .is_some_and(|summary| !summary.trim().is_empty()),
+                    "{} should have a useful summary",
+                    item.kind
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn broker_search_hit_items_are_evidence_not_durable_memory() {
+        let hit = BrokerSearchHitContext {
+            id: "7".to_string(),
+            title: "Search evidence".to_string(),
+            summary: "Search evidence is prompt context only.".to_string(),
+            content: "Search hits should not masquerade as durable memory.".to_string(),
+            snippet: "not masquerade as durable memory".to_string(),
+            session_id: "ses_evidence".to_string(),
+            working_dir: Some("/tmp/project".to_string()),
+            provider_key: None,
+            model: None,
+            message_id: Some("msg_7".to_string()),
+            message_index: Some(7),
+            role: Some("assistant".to_string()),
+            timestamp: None,
+            updated_at: None,
+            query: Some("durable memory".to_string()),
+            score: Some(0.91),
+            rank: Some(1),
+            matched_terms: vec!["durable".to_string(), "memory".to_string()],
+            metadata: json!({"source_session_path": "/tmp/project/.jcode/sessions/ses_evidence.json"}),
+        };
+
+        let session_item = session_search_hit_broker_item(&hit);
+        let conversation_item = conversation_search_hit_broker_item(&hit);
+
+        for item in [session_item, conversation_item] {
+            assert_ne!(item.kind, "memory");
+            assert_eq!(item.metadata["durable_memory"], false);
+            assert_eq!(
+                item.relevance
+                    .as_ref()
+                    .and_then(|relevance| relevance.query.as_deref()),
+                Some("durable memory")
+            );
+            assert_eq!(item.fragments.len(), 1);
+            assert_eq!(item.fragments[0].relation, "match");
+            assert_eq!(
+                item.fragments[0].content,
+                "not masquerade as durable memory"
+            );
+        }
     }
 }
