@@ -16,8 +16,9 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 try:
     from agent.memory_provider import MemoryProvider
@@ -29,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONTEXT_LIMIT = 8
 DEFAULT_MAX_CHARS = 2400
+DEFAULT_ITEM_MAX_CHARS = 360
+DEFAULT_TRANSCRIPT_MAX_CHARS = 12000
+DEFAULT_TURN_BUFFER_LIMIT = 12
+DEFAULT_TURN_BUFFER_MAX_CHARS = 2000
+DEFAULT_TOOL_INVENTORY_LIMIT = 8
 DEFAULT_STARTUP_TIMEOUT_SECONDS = 5.0
 
 
@@ -49,6 +55,12 @@ JCODE_BROKER_CONTEXT_SCHEMA = {
             "limit": {
                 "type": "integer",
                 "description": "Maximum broker context items to request.",
+            },
+            "include_provenance": {
+                "type": "boolean",
+                "description": (
+                    "Explicitly request hidden raw provenance. Normal prefetch keeps this off."
+                ),
             },
         },
         "required": [],
@@ -172,18 +184,26 @@ class BrokerSocketClient:
                 except Exception:
                     pass
                 self._sock = None
+            self._broker_session_id = None
 
-    def broker_context(self, query: str = "", limit: int = DEFAULT_CONTEXT_LIMIT) -> Dict[str, Any]:
+    def broker_context(
+        self,
+        query: str = "",
+        limit: int = DEFAULT_CONTEXT_LIMIT,
+        *,
+        include_provenance: bool = False,
+    ) -> Dict[str, Any]:
         with self._lock:
             self.connect()
-            request_id = self._send(
-                {
-                    "type": "broker_context",
-                    "id": self._next_request_id(),
-                    "query": query or None,
-                    "limit": max(0, int(limit)),
-                }
-            )
+            request: Dict[str, Any] = {
+                "type": "broker_context",
+                "id": self._next_request_id(),
+                "query": query or None,
+                "limit": max(0, int(limit)),
+            }
+            if include_provenance:
+                request["include_provenance"] = True
+            request_id = self._send(request)
             return self._read_response(request_id, "broker_context")
 
     def broker_turn_sync(
@@ -286,12 +306,38 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         self._working_dir = self._config.get("working_dir") or os.getcwd()
         self._context_limit = int(self._config.get("context_limit", DEFAULT_CONTEXT_LIMIT))
         self._max_chars = int(self._config.get("max_chars", DEFAULT_MAX_CHARS))
+        self._item_max_chars = int(self._config.get("item_max_chars", DEFAULT_ITEM_MAX_CHARS))
+        self._transcript_max_chars = int(
+            self._config.get("transcript_max_chars", DEFAULT_TRANSCRIPT_MAX_CHARS)
+        )
+        self._turn_buffer_limit = int(
+            self._config.get("turn_buffer_limit", DEFAULT_TURN_BUFFER_LIMIT)
+        )
+        self._turn_buffer_max_chars = int(
+            self._config.get("turn_buffer_max_chars", DEFAULT_TURN_BUFFER_MAX_CHARS)
+        )
+        self._tool_inventory_limit = int(
+            self._config.get("tool_inventory_limit", DEFAULT_TOOL_INVENTORY_LIMIT)
+        )
         self._socket_path = str(self._config.get("socket_path") or _default_socket_path())
         self._auto_start = _config_bool(self._config, "auto_start", True)
+        self._sync_turns = _config_bool(self._config, "sync_turns", True)
+        self._sync_transcripts = _config_bool(self._config, "sync_transcripts", True)
+        self._include_provenance = _config_bool(self._config, "include_provenance", False)
         self._startup_timeout = _config_float(
             self._config, "startup_timeout_seconds", DEFAULT_STARTUP_TIMEOUT_SECONDS
         )
         self._broker_process: Optional[subprocess.Popen[Any]] = None
+        self._recent_turns: Deque[Dict[str, str]] = deque(maxlen=max(0, self._turn_buffer_limit))
+        self._diagnostics: Dict[str, Any] = {
+            "turn_sync_count": 0,
+            "transcript_sync_count": 0,
+            "last_extraction_status": None,
+            "last_prefetch_item_count": 0,
+            "last_prefetch_chars": 0,
+            "last_transcript_chars": 0,
+            "turn_buffer_size": 0,
+        }
 
     @property
     def name(self) -> str:
@@ -302,7 +348,7 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             return True
         if not self._auto_start:
             return False
-        return shutil.which("jcode") is not None or shutil.which("jcode-memory") is not None
+        return self._resolve_jcode_binary() is not None
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         self._session_id = session_id
@@ -312,11 +358,7 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             or kwargs.get("cwd")
             or os.getcwd()
         )
-        self._client = BrokerSocketClient(
-            self._socket_path,
-            working_dir=str(self._working_dir) if self._working_dir else None,
-            timeout=float(self._config.get("timeout_seconds", 2.0)),
-        )
+        self._client = self._new_client()
         if self._connect_client():
             return
         if self._auto_start and self._start_broker():
@@ -338,22 +380,34 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        del session_id
-        event = self._fetch_context(query=query, limit=self._context_limit)
+        self._ensure_session(session_id)
+        event = self._fetch_context(
+            query=query,
+            limit=self._context_limit,
+            include_provenance=self._include_provenance,
+        )
         if not event:
             return ""
-        return self._format_prefetch(event)
+        text = self._format_prefetch(event, include_provenance=self._include_provenance)
+        self._diagnostics["last_prefetch_chars"] = len(text)
+        return text
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+        self._ensure_session(session_id)
+        self._remember_turn(user_content, assistant_content)
+        if not self._sync_turns:
+            return None
         if self._client is None:
             return None
         try:
-            self._client.broker_turn_sync(
+            event = self._client.broker_turn_sync(
                 session_id="",
                 user_content=user_content,
                 assistant_content=assistant_content,
                 source=str(self._config.get("source") or "hermes"),
             )
+            self._diagnostics["turn_sync_count"] += 1
+            self._diagnostics["last_extraction_status"] = event.get("extraction_status")
         except Exception as exc:
             logger.debug("jcode broker_turn_sync failed: %s", exc)
         return None
@@ -375,6 +429,7 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         event = self._fetch_context(
             query=str(args.get("query") or ""),
             limit=int(args.get("limit") or self._context_limit),
+            include_provenance=_config_bool(args, "include_provenance", False),
         )
         return json.dumps(event or {"error": "jcode broker context unavailable"})
 
@@ -423,6 +478,21 @@ class JcodeGraphMemoryProvider(MemoryProvider):
                 "default": "hermes",
             },
             {
+                "key": "sync_turns",
+                "description": "Write completed Hermes turns as hidden broker provenance",
+                "default": "true",
+            },
+            {
+                "key": "sync_transcripts",
+                "description": "Send compression/session-end transcripts for derived extraction",
+                "default": "true",
+            },
+            {
+                "key": "include_provenance",
+                "description": "Inject hidden raw provenance during normal prefetch",
+                "default": "false",
+            },
+            {
                 "key": "context_limit",
                 "description": "Maximum broker context items per prefetch",
                 "default": str(DEFAULT_CONTEXT_LIMIT),
@@ -431,6 +501,31 @@ class JcodeGraphMemoryProvider(MemoryProvider):
                 "key": "max_chars",
                 "description": "Maximum formatted context characters to inject",
                 "default": str(DEFAULT_MAX_CHARS),
+            },
+            {
+                "key": "item_max_chars",
+                "description": "Maximum characters per formatted broker context item",
+                "default": str(DEFAULT_ITEM_MAX_CHARS),
+            },
+            {
+                "key": "transcript_max_chars",
+                "description": "Maximum transcript characters sent to broker extraction hooks",
+                "default": str(DEFAULT_TRANSCRIPT_MAX_CHARS),
+            },
+            {
+                "key": "turn_buffer_limit",
+                "description": "Maximum recent turns retained for fallback transcript sync",
+                "default": str(DEFAULT_TURN_BUFFER_LIMIT),
+            },
+            {
+                "key": "turn_buffer_max_chars",
+                "description": "Maximum characters retained per buffered turn field",
+                "default": str(DEFAULT_TURN_BUFFER_MAX_CHARS),
+            },
+            {
+                "key": "tool_inventory_limit",
+                "description": "Maximum broker tool names shown in normal prefetch",
+                "default": str(DEFAULT_TOOL_INVENTORY_LIMIT),
             },
             {
                 "key": "startup_timeout_seconds",
@@ -455,30 +550,110 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         except Exception as exc:
             logger.debug("Failed to save jcode_graph config: %s", exc)
 
-    def _fetch_context(self, *, query: str, limit: int) -> Optional[Dict[str, Any]]:
+    def diagnostics(self) -> Dict[str, Any]:
+        data = dict(self._diagnostics)
+        data["turn_buffer_size"] = len(self._recent_turns)
+        data["session_id"] = self._session_id
+        data["socket_path"] = self._socket_path
+        return data
+
+    def _fetch_context(
+        self,
+        *,
+        query: str,
+        limit: int,
+        include_provenance: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         if self._client is None:
             return None
         try:
-            return self._client.broker_context(query=query, limit=limit)
+            event = self._client.broker_context(
+                query=query,
+                limit=limit,
+                include_provenance=include_provenance,
+            )
+            self._diagnostics["last_prefetch_item_count"] = len(event.get("items") or [])
+            return event
         except Exception as exc:
             logger.debug("jcode broker_context failed: %s", exc)
             return None
 
     def _sync_transcript(self, messages: List[Dict[str, Any]], *, source: str) -> None:
+        if not self._sync_transcripts:
+            return None
         if self._client is None:
             return None
-        transcript = _messages_to_transcript(messages)
+        transcript = _messages_to_transcript(messages) or self._recent_turns_to_transcript()
         if not transcript:
             return None
+        transcript = _truncate_text(transcript, self._transcript_max_chars)
         try:
-            self._client.broker_transcript_sync(
+            event = self._client.broker_transcript_sync(
                 session_id="",
                 transcript=transcript,
                 source=source,
             )
+            self._diagnostics["transcript_sync_count"] += 1
+            self._diagnostics["last_transcript_chars"] = len(transcript)
+            self._diagnostics["last_extraction_status"] = event.get("extraction_status")
+            if source == "hermes:session_end":
+                self._recent_turns.clear()
         except Exception as exc:
             logger.debug("jcode broker_transcript_sync failed: %s", exc)
         return None
+
+    def _new_client(self) -> BrokerSocketClient:
+        return BrokerSocketClient(
+            self._socket_path,
+            working_dir=str(self._working_dir) if self._working_dir else None,
+            timeout=float(self._config.get("timeout_seconds", 2.0)),
+        )
+
+    def _ensure_session(self, session_id: str = "") -> None:
+        next_session_id = str(session_id or self._session_id or "").strip()
+        if not next_session_id:
+            return
+        if not self._session_id:
+            self._session_id = next_session_id
+            return
+        if next_session_id == self._session_id:
+            return
+
+        if self._client is not None:
+            self._client.close()
+        self._recent_turns.clear()
+        self._session_id = next_session_id
+        self._client = self._new_client()
+        if self._connect_client():
+            return
+        if self._auto_start and self._start_broker():
+            deadline = time.monotonic() + max(0.0, self._startup_timeout)
+            while time.monotonic() <= deadline:
+                if self._connect_client():
+                    return
+                time.sleep(0.05)
+        self._client = None
+
+    def _remember_turn(self, user_content: str, assistant_content: str) -> None:
+        if self._recent_turns.maxlen == 0:
+            return
+        user = _truncate_text(str(user_content or "").strip(), self._turn_buffer_max_chars)
+        assistant = _truncate_text(
+            str(assistant_content or "").strip(),
+            self._turn_buffer_max_chars,
+        )
+        if not user and not assistant:
+            return
+        self._recent_turns.append({"user": user, "assistant": assistant})
+
+    def _recent_turns_to_transcript(self) -> str:
+        lines: List[str] = []
+        for turn in self._recent_turns:
+            if turn.get("user"):
+                lines.append(f"user: {turn['user']}")
+            if turn.get("assistant"):
+                lines.append(f"assistant: {turn['assistant']}")
+        return "\n".join(lines)
 
     def _connect_client(self) -> bool:
         if self._client is None:
@@ -494,7 +669,11 @@ class JcodeGraphMemoryProvider(MemoryProvider):
     def _resolve_jcode_binary(self) -> Optional[str]:
         configured = self._config.get("jcode_binary") or os.environ.get("JCODE_BINARY")
         if configured:
-            return str(configured)
+            candidate = str(configured)
+            if os.path.sep in candidate or (os.path.altsep and os.path.altsep in candidate):
+                path = Path(candidate)
+                return str(path) if path.is_file() and os.access(path, os.X_OK) else None
+            return shutil.which(candidate)
         return shutil.which("jcode") or shutil.which("jcode-memory")
 
     def _start_broker(self) -> bool:
@@ -532,28 +711,87 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             self._broker_process = None
             return False
 
-    def _format_prefetch(self, event: Dict[str, Any]) -> str:
-        items = event.get("items") or []
+    def _format_prefetch(self, event: Dict[str, Any], *, include_provenance: bool = False) -> str:
+        raw_items = event.get("items") or []
+        items = [
+            item
+            for item in raw_items
+            if isinstance(item, dict) and (include_provenance or not _is_provenance_item(item))
+        ]
         if not items:
             return ""
         lines = ["## jcode Broker Context"]
-        for item in items:
-            if not isinstance(item, dict):
+
+        sections = [
+            ("Memories", [item for item in items if item.get("kind") == "memory"]),
+            ("Goals and Todos", [item for item in items if item.get("kind") in {"goal", "todo"}]),
+            (
+                "Evidence",
+                [
+                    item
+                    for item in items
+                    if item.get("kind") in {"session_search_hit", "conversation_search_hit"}
+                ],
+            ),
+            ("Skill Candidates", [item for item in items if item.get("kind") == "skill"]),
+            ("Artifacts", [item for item in items if item.get("kind") == "side_panel"]),
+            (
+                "Broker Tools",
+                [item for item in items if item.get("kind") == "tool"][
+                    : max(0, self._tool_inventory_limit)
+                ],
+            ),
+        ]
+
+        covered = {id(item) for _, section_items in sections for item in section_items}
+        other_items = [item for item in items if id(item) not in covered]
+        if other_items:
+            sections.append(("Other Context", other_items))
+
+        for title, section_items in sections:
+            if not section_items:
                 continue
-            kind = item.get("kind") or "context"
-            scope = item.get("scope") or "session"
-            title = item.get("title") or item.get("id") or kind
-            content = item.get("summary") or item.get("content") or ""
-            origin = item.get("origin") or {}
-            source = origin.get("tool") or item.get("source") or "broker"
-            prefix = f"- [{kind}/{scope}/{source}] {title}"
-            if content:
-                prefix += f": {content}"
-            lines.append(prefix)
+            lines.append(f"### {title}")
+            if title == "Broker Tools":
+                names = [
+                    str(item.get("title") or item.get("id") or "").strip()
+                    for item in section_items
+                    if str(item.get("title") or item.get("id") or "").strip()
+                ]
+                if names:
+                    lines.append(f"- {', '.join(names)}")
+                continue
+            for item in section_items:
+                lines.append(self._format_item_line(item))
+
         text = "\n".join(lines)
         if len(text) > self._max_chars:
             return text[: self._max_chars].rstrip() + "\n..."
         return text
+
+    def _format_item_line(self, item: Dict[str, Any]) -> str:
+        kind = item.get("kind") or "context"
+        scope = item.get("scope") or "session"
+        title = item.get("title") or item.get("id") or kind
+        content = item.get("summary") or item.get("content") or ""
+        origin = item.get("origin") or {}
+        relevance = item.get("relevance") or {}
+        source = origin.get("tool") or item.get("source") or "broker"
+        details: List[str] = []
+        if origin.get("session_id"):
+            details.append(f"session={origin['session_id']}")
+        if origin.get("source") and origin.get("source") != source:
+            details.append(f"source={origin['source']}")
+        if relevance.get("rank") is not None:
+            details.append(f"rank={relevance['rank']}")
+        if relevance.get("retrieval_mode"):
+            details.append(f"mode={relevance['retrieval_mode']}")
+        suffix = f" ({'; '.join(details)})" if details else ""
+        line = f"- [{kind}/{scope}/{source}] {title}{suffix}"
+        content = _truncate_text(str(content or "").strip(), self._item_max_chars)
+        if content:
+            line += f": {content}"
+        return line
 
 
 def register(ctx: Any) -> None:
@@ -573,6 +811,24 @@ def _messages_to_transcript(messages: List[Dict[str, Any]]) -> str:
             continue
         lines.append(f"{role}: {content}")
     return "\n".join(lines)
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 4)].rstrip() + " ..."
+
+
+def _is_provenance_item(item: Dict[str, Any]) -> bool:
+    tags = item.get("tags") or []
+    metadata = item.get("metadata") or {}
+    if isinstance(tags, list) and "broker-provenance" in tags:
+        return True
+    if isinstance(metadata, dict) and metadata.get("provenance") is True:
+        return True
+    return item.get("category") == "provenance" or item.get("title") == "provenance"
 
 
 def _message_content_to_text(content: Any) -> str:
