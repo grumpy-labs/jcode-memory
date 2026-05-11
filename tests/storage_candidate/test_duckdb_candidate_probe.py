@@ -47,6 +47,7 @@ class DuckDbCandidateProbeTests(unittest.TestCase):
         self.assertIn("fts_search", queries)
         self.assertIn("vector_search", queries)
         self.assertIn("duckpgq_property_graph", queries)
+        self.assertIn("onager_pagerank", queries)
         self.assertIn("single writer", probe.OPERATIONAL_WARNINGS[0].lower())
 
     def test_duckdb_probe_reports_operational_store_checks(self):
@@ -59,6 +60,7 @@ class DuckDbCandidateProbeTests(unittest.TestCase):
         self.assertIn("single_writer_broker_service", check_names)
         self.assertIn("vault_update_delete_reconciliation", check_names)
         self.assertIn("backup_restore", check_names)
+        self.assertIn("onager_graph_analytics", check_names)
         self.assertIn("sql_property_graph_fallback", payload["passed"])
 
 

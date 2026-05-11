@@ -10,13 +10,16 @@ can support fast context recall without writing to the source Vault.
 from __future__ import annotations
 
 import argparse
+import queue
 import dataclasses
 import hashlib
 import json
 import re
 import sys
+import threading
 import time
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -457,6 +460,650 @@ def table_counts(con: Any) -> dict[str, int]:
     }
 
 
+_STOP_SERVICE = object()
+
+
+class DurableDuckDbBrokerService:
+    """Proof service where one worker owns all DuckDB writes and reads."""
+
+    def __init__(self, duckdb_module: Any, db_path: Path) -> None:
+        self._duckdb = duckdb_module
+        self.db_path = db_path.expanduser().resolve()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._queue: queue.Queue[Any] = queue.Queue()
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="duckdb-vault-broker")
+        self._thread.start()
+        if not self._ready.wait(timeout=5):
+            raise RuntimeError("durable DuckDB broker service did not start")
+
+    @classmethod
+    def start(cls, db_path: Path) -> "DurableDuckDbBrokerService":
+        import duckdb  # type: ignore
+
+        return cls(duckdb, db_path)
+
+    def execute(self, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> list[Any]:
+        response: queue.Queue[Any] = queue.Queue(maxsize=1)
+        self._queue.put(("execute", sql, params, response))
+        ok, payload = response.get(timeout=30)
+        if not ok:
+            raise payload
+        return payload
+
+    def execute_many(self, sql: str, rows: list[tuple[Any, ...]]) -> None:
+        if not rows:
+            return
+        response: queue.Queue[Any] = queue.Queue(maxsize=1)
+        self._queue.put(("executemany", sql, rows, response))
+        ok, payload = response.get(timeout=60)
+        if not ok:
+            raise payload
+
+    def close(self) -> None:
+        self._queue.put(_STOP_SERVICE)
+        self._thread.join(timeout=10)
+
+    def _run(self) -> None:
+        con = self._duckdb.connect(database=str(self.db_path))
+        self._ready.set()
+        try:
+            while True:
+                item = self._queue.get()
+                if item is _STOP_SERVICE:
+                    break
+                operation, sql, payload, response = item
+                try:
+                    if operation == "executemany":
+                        con.executemany(sql, payload)
+                        response.put((True, []))
+                    else:
+                        cursor = con.execute(sql, payload)
+                        rows = cursor.fetchall() if cursor.description else []
+                        response.put((True, rows))
+                except Exception as exc:  # pragma: no cover - surfaced through caller tests.
+                    response.put((False, exc))
+        finally:
+            con.close()
+
+    def initialize_schema(self) -> None:
+        self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vault_file (
+                id VARCHAR PRIMARY KEY,
+                path VARCHAR NOT NULL,
+                title VARCHAR NOT NULL,
+                checksum VARCHAR NOT NULL,
+                size_bytes BIGINT NOT NULL,
+                mtime_ns BIGINT NOT NULL,
+                frontmatter_json VARCHAR NOT NULL,
+                deleted_at VARCHAR
+            )
+            """
+        )
+        self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vault_chunk (
+                id VARCHAR PRIMARY KEY,
+                file_id VARCHAR NOT NULL,
+                path VARCHAR NOT NULL,
+                heading VARCHAR NOT NULL,
+                content VARCHAR NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                checksum VARCHAR NOT NULL,
+                deleted_at VARCHAR
+            )
+            """
+        )
+        self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vault_link (
+                id VARCHAR PRIMARY KEY,
+                source_file_id VARCHAR NOT NULL,
+                source_path VARCHAR NOT NULL,
+                target VARCHAR NOT NULL,
+                kind VARCHAR NOT NULL,
+                raw VARCHAR NOT NULL,
+                deleted_at VARCHAR
+            )
+            """
+        )
+        self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vault_tag (
+                file_id VARCHAR NOT NULL,
+                path VARCHAR NOT NULL,
+                tag VARCHAR NOT NULL,
+                deleted_at VARCHAR
+            )
+            """
+        )
+        self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vault_task (
+                id VARCHAR PRIMARY KEY,
+                file_id VARCHAR NOT NULL,
+                path VARCHAR NOT NULL,
+                checked BOOLEAN NOT NULL,
+                content VARCHAR NOT NULL,
+                line INTEGER NOT NULL,
+                deleted_at VARCHAR
+            )
+            """
+        )
+        self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vault_heading (
+                id VARCHAR PRIMARY KEY,
+                file_id VARCHAR NOT NULL,
+                path VARCHAR NOT NULL,
+                level INTEGER NOT NULL,
+                heading VARCHAR NOT NULL,
+                line INTEGER NOT NULL,
+                deleted_at VARCHAR
+            )
+            """
+        )
+        self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vault_embedding (
+                id VARCHAR PRIMARY KEY,
+                record_id VARCHAR NOT NULL,
+                record_kind VARCHAR NOT NULL,
+                embedding FLOAT[8] NOT NULL,
+                model VARCHAR NOT NULL,
+                updated_at VARCHAR NOT NULL
+            )
+            """
+        )
+
+    def replace_vault_records(self, records: VaultRecords) -> dict[str, int]:
+        self.initialize_schema()
+        for table in [
+            "vault_embedding",
+            "vault_heading",
+            "vault_task",
+            "vault_tag",
+            "vault_link",
+            "vault_chunk",
+            "vault_file",
+        ]:
+            self.execute(f"DELETE FROM {table}")
+        self._insert_active_records(records)
+        self.refresh_fts()
+        return self.counts()
+
+    def reconcile_vault_records(self, records: VaultRecords) -> dict[str, Any]:
+        self.initialize_schema()
+        deleted_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        existing_rows = self.execute(
+            """
+            SELECT id, checksum, deleted_at
+            FROM vault_file
+            """
+        )
+        existing = {row[0]: {"checksum": row[1], "deleted_at": row[2]} for row in existing_rows}
+        incoming = {record["id"]: record for record in records.files}
+        new_files = 0
+        updated_files = 0
+        unchanged_files = 0
+
+        for file_id, record in incoming.items():
+            old = existing.get(file_id)
+            if old is None:
+                new_files += 1
+                self._replace_one_file_records(file_id, records)
+            elif old["checksum"] != record["checksum"] or old["deleted_at"] is not None:
+                updated_files += 1
+                self._delete_active_file_records(file_id)
+                self._replace_one_file_records(file_id, records)
+            else:
+                unchanged_files += 1
+
+        tombstoned_files = 0
+        for file_id in set(existing) - set(incoming):
+            if existing[file_id]["deleted_at"] is None:
+                tombstoned_files += 1
+                self._tombstone_file_records(file_id, deleted_at)
+
+        self.refresh_fts()
+        self.backfill_embeddings()
+        return {
+            "new_files": new_files,
+            "updated_files": updated_files,
+            "unchanged_files": unchanged_files,
+            "tombstoned_files": tombstoned_files,
+            "deleted_at": deleted_at,
+            "counts": self.counts(),
+        }
+
+    def _replace_one_file_records(self, file_id: str, records: VaultRecords) -> None:
+        filtered = VaultRecords(
+            files=[record for record in records.files if record["id"] == file_id],
+            chunks=[record for record in records.chunks if record["file_id"] == file_id],
+            links=[record for record in records.links if record["source_file_id"] == file_id],
+            tags=[record for record in records.tags if record["file_id"] == file_id],
+            tasks=[record for record in records.tasks if record["file_id"] == file_id],
+            headings=[record for record in records.headings if record["file_id"] == file_id],
+            attachments=[],
+            frontmatter_errors=[],
+        )
+        self._insert_active_records(filtered)
+
+    def _delete_active_file_records(self, file_id: str) -> None:
+        for table, column in [
+            ("vault_heading", "file_id"),
+            ("vault_task", "file_id"),
+            ("vault_tag", "file_id"),
+            ("vault_link", "source_file_id"),
+            ("vault_chunk", "file_id"),
+            ("vault_file", "id"),
+        ]:
+            self.execute(f"DELETE FROM {table} WHERE {column} = ?", [file_id])
+        self.execute(
+            """
+            DELETE FROM vault_embedding
+            WHERE record_id NOT IN (SELECT id FROM vault_chunk)
+            """
+        )
+
+    def _tombstone_file_records(self, file_id: str, deleted_at: str) -> None:
+        for table, column in [
+            ("vault_heading", "file_id"),
+            ("vault_task", "file_id"),
+            ("vault_tag", "file_id"),
+            ("vault_link", "source_file_id"),
+            ("vault_chunk", "file_id"),
+            ("vault_file", "id"),
+        ]:
+            self.execute(
+                f"UPDATE {table} SET deleted_at = ? WHERE {column} = ? AND deleted_at IS NULL",
+                [deleted_at, file_id],
+            )
+
+    def _insert_active_records(self, records: VaultRecords) -> None:
+        self.execute_many(
+            """
+            INSERT INTO vault_file
+            (id, path, title, checksum, size_bytes, mtime_ns, frontmatter_json, deleted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            [
+                (
+                    record["id"],
+                    record["path"],
+                    record["title"],
+                    record["checksum"],
+                    record["size_bytes"],
+                    record["mtime_ns"],
+                    record["frontmatter_json"],
+                )
+                for record in records.files
+            ],
+        )
+        self.execute_many(
+            """
+            INSERT INTO vault_chunk
+            (id, file_id, path, heading, content, start_line, end_line, checksum, deleted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            [
+                (
+                    record["id"],
+                    record["file_id"],
+                    record["path"],
+                    record["heading"],
+                    record["content"],
+                    record["start_line"],
+                    record["end_line"],
+                    record["checksum"],
+                )
+                for record in records.chunks
+            ],
+        )
+        self.execute_many(
+            """
+            INSERT INTO vault_link
+            (id, source_file_id, source_path, target, kind, raw, deleted_at)
+            VALUES (?, ?, ?, ?, ?, ?, NULL)
+            """,
+            [
+                (
+                    record["id"],
+                    record["source_file_id"],
+                    record["source_path"],
+                    record["target"],
+                    record["kind"],
+                    record["raw"],
+                )
+                for record in records.links
+            ],
+        )
+        self.execute_many(
+            "INSERT INTO vault_tag (file_id, path, tag, deleted_at) VALUES (?, ?, ?, NULL)",
+            [(record["file_id"], record["path"], record["tag"]) for record in records.tags],
+        )
+        self.execute_many(
+            """
+            INSERT INTO vault_task
+            (id, file_id, path, checked, content, line, deleted_at)
+            VALUES (?, ?, ?, ?, ?, ?, NULL)
+            """,
+            [
+                (
+                    record["id"],
+                    record["file_id"],
+                    record["path"],
+                    record["checked"],
+                    record["content"],
+                    record["line"],
+                )
+                for record in records.tasks
+            ],
+        )
+        self.execute_many(
+            """
+            INSERT INTO vault_heading
+            (id, file_id, path, level, heading, line, deleted_at)
+            VALUES (?, ?, ?, ?, ?, ?, NULL)
+            """,
+            [
+                (
+                    record["id"],
+                    record["file_id"],
+                    record["path"],
+                    record["level"],
+                    record["heading"],
+                    record["line"],
+                )
+                for record in records.headings
+            ],
+        )
+
+    def refresh_fts(self) -> None:
+        active_chunks = self.execute(
+            "SELECT count(*) FROM vault_chunk WHERE deleted_at IS NULL"
+        )[0][0]
+        if active_chunks == 0:
+            return
+        self.execute("INSTALL fts")
+        self.execute("LOAD fts")
+        self.execute("PRAGMA create_fts_index('vault_chunk', 'id', 'content', overwrite = 1)")
+
+    def backfill_embeddings(self) -> int:
+        rows = self.execute(
+            """
+            SELECT id, content
+            FROM vault_chunk
+            WHERE deleted_at IS NULL
+              AND id NOT IN (SELECT record_id FROM vault_embedding)
+            ORDER BY id
+            """
+        )
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        embedding_rows = [
+            (
+                f"embedding:{record_id}",
+                record_id,
+                "vault_chunk",
+                *stable_text_embedding(content),
+                "jcode-hash-8",
+                now,
+            )
+            for record_id, content in rows
+        ]
+        self.execute_many(
+            """
+            INSERT INTO vault_embedding
+            (id, record_id, record_kind, embedding, model, updated_at)
+            VALUES (?, ?, ?, array_value(?, ?, ?, ?, ?, ?, ?, ?)::FLOAT[8], ?, ?)
+            """,
+            embedding_rows,
+        )
+        return len(embedding_rows)
+
+    def query_vault_context(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        self.refresh_fts()
+        rows = self.execute(
+            """
+            SELECT
+                c.id,
+                c.file_id,
+                c.path,
+                c.heading,
+                c.content,
+                c.start_line,
+                c.end_line,
+                c.checksum,
+                f.title,
+                f.checksum,
+                f.mtime_ns,
+                fts_main_vault_chunk.match_bm25(c.id, ?) AS score
+            FROM vault_chunk c
+            JOIN vault_file f ON f.id = c.file_id
+            WHERE c.deleted_at IS NULL
+              AND f.deleted_at IS NULL
+              AND score IS NOT NULL
+            ORDER BY score DESC, c.path, c.start_line
+            LIMIT ?
+            """,
+            [query, limit],
+        )
+        items = [
+            vault_chunk_context_item(row, query, rank)
+            for rank, row in enumerate(rows, start=1)
+        ]
+        task_limit = max(0, limit - len(items))
+        if task_limit:
+            items.extend(self.query_vault_task_context(query, task_limit, len(items) + 1))
+        return items
+
+    def query_vault_task_context(
+        self,
+        query: str,
+        limit: int,
+        start_rank: int = 1,
+    ) -> list[dict[str, Any]]:
+        terms = query_terms(query)
+        if not terms:
+            return []
+        conditions = " OR ".join(["lower(t.content) LIKE ?" for _ in terms])
+        params = [f"%{term}%" for term in terms]
+        params.append(limit)
+        rows = self.execute(
+            f"""
+            SELECT
+                t.id,
+                t.file_id,
+                t.path,
+                t.checked,
+                t.content,
+                t.line,
+                f.title,
+                f.checksum
+            FROM vault_task t
+            JOIN vault_file f ON f.id = t.file_id
+            WHERE t.deleted_at IS NULL
+              AND f.deleted_at IS NULL
+              AND ({conditions})
+            ORDER BY t.path, t.line
+            LIMIT ?
+            """,
+            params,
+        )
+        return [
+            vault_task_context_item(row, query, rank)
+            for rank, row in enumerate(rows, start=start_rank)
+        ]
+
+    def query_semantic_context(self, query: str, limit: int = 5) -> list[tuple[Any, ...]]:
+        self.backfill_embeddings()
+        vector = stable_text_embedding(query)
+        return self.execute(
+            """
+            SELECT
+                c.id,
+                c.path,
+                c.heading,
+                array_cosine_distance(e.embedding, array_value(?, ?, ?, ?, ?, ?, ?, ?)::FLOAT[8]) AS distance
+            FROM vault_embedding e
+            JOIN vault_chunk c ON c.id = e.record_id
+            JOIN vault_file f ON f.id = c.file_id
+            WHERE c.deleted_at IS NULL
+              AND f.deleted_at IS NULL
+            ORDER BY distance ASC, c.path, c.start_line
+            LIMIT ?
+            """,
+            [*vector, limit],
+        )
+
+    def counts(self) -> dict[str, int]:
+        tables = [
+            "vault_file",
+            "vault_chunk",
+            "vault_link",
+            "vault_tag",
+            "vault_task",
+            "vault_heading",
+            "vault_embedding",
+        ]
+        return {
+            table: int(self.execute(f"SELECT count(*) FROM {table}")[0][0])
+            for table in tables
+        }
+
+
+def stable_text_embedding(text: str) -> tuple[float, float, float, float, float, float, float, float]:
+    vector = [0.0] * 8
+    for term in query_terms(text):
+        digest = hashlib.sha256(term.encode("utf-8")).digest()
+        for idx in range(8):
+            vector[idx] += (digest[idx] / 255.0) - 0.5
+    norm = sum(value * value for value in vector) ** 0.5
+    if norm == 0.0:
+        vector[0] = 1.0
+        norm = 1.0
+    return tuple(value / norm for value in vector)  # type: ignore[return-value]
+
+
+def vault_chunk_context_item(row: tuple[Any, ...], query: str, rank: int) -> dict[str, Any]:
+    (
+        chunk_id,
+        file_id,
+        path,
+        heading,
+        content,
+        start_line,
+        end_line,
+        chunk_checksum,
+        title,
+        source_checksum,
+        mtime_ns,
+        score,
+    ) = row
+    uri = f"vault://{path}"
+    if heading:
+        uri = f"{uri}#{heading}"
+    return {
+        "id": f"vault_chunk:{chunk_id}",
+        "kind": "vault_chunk",
+        "scope": "vault",
+        "content_format": "markdown",
+        "title": f"{title} / {heading}" if heading else title,
+        "summary": summarize_content(content),
+        "content": content,
+        "tags": ["vault", "vault_chunk"],
+        "source": uri,
+        "score": float(score) if score is not None else None,
+        "origin": {
+            "tool": "vault_ingestion",
+            "source": "vault",
+            "path": path,
+            "uri": uri,
+        },
+        "relevance": {
+            "query": query,
+            "retrieval_mode": "duckdb_fts",
+            "score": float(score) if score is not None else None,
+            "rank": rank,
+            "matched_terms": matched_terms_for_text(query, content),
+            "exact_match": query.lower() in content.lower(),
+        },
+        "fragments": [
+            {
+                "relation": "source_span",
+                "content": content,
+                "content_format": "markdown",
+            }
+        ],
+        "metadata": {
+            "durable_memory": False,
+            "source_kind": "vault_chunk",
+            "file_id": file_id,
+            "source_checksum": source_checksum,
+            "chunk_checksum": chunk_checksum,
+            "start_line": start_line,
+            "end_line": end_line,
+            "mtime_ns": mtime_ns,
+            "heading": heading,
+        },
+    }
+
+
+def vault_task_context_item(row: tuple[Any, ...], query: str, rank: int) -> dict[str, Any]:
+    task_id, file_id, path, checked, content, line, title, source_checksum = row
+    uri = f"vault://{path}#L{line}"
+    return {
+        "id": f"vault_task:{task_id}",
+        "kind": "vault_task",
+        "scope": "vault",
+        "content_format": "plain_text",
+        "title": content,
+        "summary": "done" if checked else "open",
+        "content": content,
+        "tags": ["vault", "vault_task", "done" if checked else "open"],
+        "source": uri,
+        "score": None,
+        "origin": {
+            "tool": "vault_ingestion",
+            "source": "vault",
+            "path": path,
+            "uri": uri,
+        },
+        "relevance": {
+            "query": query,
+            "retrieval_mode": "duckdb_task_scan",
+            "rank": rank,
+            "matched_terms": matched_terms_for_text(query, content),
+            "exact_match": query.lower() in content.lower(),
+        },
+        "fragments": [
+            {
+                "relation": "task_line",
+                "content": content,
+                "content_format": "plain_text",
+            }
+        ],
+        "metadata": {
+            "durable_memory": False,
+            "source_kind": "vault_task",
+            "file_id": file_id,
+            "source_checksum": source_checksum,
+            "line": line,
+            "checked": bool(checked),
+            "title": title,
+        },
+    }
+
+
+def matched_terms_for_text(query: str, text: str) -> list[str]:
+    searchable = text.lower()
+    return [term for term in query_terms(query) if term in searchable]
+
+
 def run_vault_ingestion_proof(
     vault: Path,
     *,
@@ -583,6 +1230,25 @@ def normalized_link_target(target: str) -> str:
     return normalized.lower()
 
 
+def query_terms(query: str) -> list[str]:
+    normalized = re.sub(r"[^a-z0-9]+", " ", query.lower()).strip()
+    seen: set[str] = set()
+    terms: list[str] = []
+    for term in normalized.split():
+        if term and term not in seen:
+            seen.add(term)
+            terms.append(term)
+    return terms
+
+
+def summarize_content(content: str, limit: int = 160) -> str:
+    for line in content.splitlines():
+        line = line.strip()
+        if line:
+            return line[:limit]
+    return ""
+
+
 def run_checks(con: Any, *, query: str) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     checks.append(check("source_metadata", lambda: check_source_metadata(con)))
@@ -672,21 +1338,116 @@ def check_task_extraction(con: Any) -> tuple[bool, str, list[Any]]:
     return bool(rows), "Obsidian task lines become queryable Vault task records", rows
 
 
+def run_durable_broker_service_proof(
+    vault: Path,
+    db_path: Path,
+    *,
+    query: str = "jcode broker memory",
+    require_duckdb: bool = False,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    vault = vault.expanduser().resolve()
+    display_db_path = str(db_path.expanduser())
+    db_path = db_path.expanduser().resolve()
+    records = collect_vault_records(vault)
+    inventory = inventory_from_records(records)
+    try:
+        import duckdb  # type: ignore
+    except Exception as exc:
+        status = "fail" if require_duckdb else "blocked"
+        return {
+            "duckdb_available": False,
+            "duckdb_version": None,
+            "database_path": display_db_path,
+            "inventory": inventory,
+            "context_items": [],
+            "checks": [{"name": "duckdb_import", "status": status, "detail": str(exc)}],
+            "passed": [],
+            "blocked": ["duckdb_import"] if status == "blocked" else [],
+            "failed": ["duckdb_import"] if status == "fail" else [],
+            "exit_ok": False,
+        }
+
+    service = DurableDuckDbBrokerService(duckdb, db_path)
+    try:
+        counts = service.replace_vault_records(records)
+        context_items = service.query_vault_context(query, limit=8)
+        embedding_count = service.backfill_embeddings()
+        semantic_rows = service.query_semantic_context(query, limit=3)
+        counts = service.counts()
+        checks = [
+            {
+                "name": "durable_import",
+                "status": "pass"
+                if db_path.exists() and counts.get("vault_file", 0) == len(records.files)
+                else "fail",
+                "detail": "Vault records imported into a durable DuckDB file",
+                "rows": [counts],
+            },
+            {
+                "name": "vault_context_formatting",
+                "status": "pass"
+                if any(item.get("kind") == "vault_chunk" for item in context_items)
+                else "fail",
+                "detail": "Vault records format as broker context items with source provenance",
+                "rows": context_items[:3],
+            },
+            {
+                "name": "embedding_backfill",
+                "status": "pass" if embedding_count > 0 and bool(semantic_rows) else "fail",
+                "detail": "Vault chunks receive deterministic local embeddings and can be ranked by vector distance",
+                "rows": semantic_rows,
+            },
+        ]
+    finally:
+        service.close()
+
+    passed = [check["name"] for check in checks if check["status"] == "pass"]
+    failed = [check["name"] for check in checks if check["status"] == "fail"]
+    blocked = [check["name"] for check in checks if check["status"] == "blocked"]
+    return {
+        "duckdb_available": True,
+        "duckdb_version": getattr(duckdb, "__version__", None),
+        "database_path": display_db_path,
+        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        "inventory": inventory,
+        "tables": counts,
+        "context_items": context_items,
+        "checks": checks,
+        "passed": passed,
+        "blocked": blocked,
+        "failed": failed,
+        "exit_ok": not failed,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vault", default=str(Path.home() / "Vault"))
     parser.add_argument("--query", default="jcode broker memory")
     parser.add_argument("--db", default=":memory:", help="DuckDB database path; defaults to in-memory")
+    parser.add_argument(
+        "--durable-db",
+        help="Run the durable single-writer broker-service proof against this DuckDB file",
+    )
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--require-duckdb", action="store_true")
     args = parser.parse_args(argv)
 
-    payload = run_vault_ingestion_proof(
-        Path(args.vault),
-        query=args.query,
-        require_duckdb=args.require_duckdb,
-        database=args.db,
-    )
+    if args.durable_db:
+        payload = run_durable_broker_service_proof(
+            Path(args.vault),
+            Path(args.durable_db),
+            query=args.query,
+            require_duckdb=args.require_duckdb,
+        )
+    else:
+        payload = run_vault_ingestion_proof(
+            Path(args.vault),
+            query=args.query,
+            require_duckdb=args.require_duckdb,
+            database=args.db,
+        )
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:

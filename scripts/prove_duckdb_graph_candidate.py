@@ -247,6 +247,21 @@ def duckdb_probe_queries() -> dict[str, str]:
             )
             ORDER BY source_id, target_id
         """,
+        "onager_pagerank": """
+            WITH node_ids AS (
+                SELECT id, row_number() OVER (ORDER BY id)::BIGINT AS node_id
+                FROM nodes
+            ),
+            edge_ids AS (
+                SELECT source.node_id AS src, target.node_id AS dst
+                FROM edges
+                JOIN node_ids source ON source.id = edges.source_id
+                JOIN node_ids target ON target.id = edges.target_id
+            )
+            SELECT node_id, rank
+            FROM onager_ctr_pagerank((SELECT src, dst FROM edge_ids))
+            ORDER BY rank DESC, node_id
+        """,
     }
 
 
@@ -289,6 +304,7 @@ def run_probe(require_duckdb: bool = False, require_extensions: bool = False) ->
             ),
             timed_check("backup_restore", lambda: check_backup_restore(duckdb)),
             timed_check("duckpgq_property_graph", lambda: check_duckpgq(con)),
+            timed_check("onager_graph_analytics", lambda: check_onager(con)),
             timed_check("parquet_export", lambda: check_parquet_export(con)),
         ]
     finally:
@@ -675,6 +691,18 @@ def check_duckpgq(con: Any) -> tuple[bool, str, list[Any]]:
     rows = con.execute(duckdb_probe_queries()["duckpgq_property_graph"]).fetchall()
     found = any(row[0] == "mem_derived_broker_tests" and row[2] == "mem_prov_transcript_1" for row in rows)
     return found, "DuckPGQ property graph can represent jcode memory/Vault edges", rows
+
+
+def check_onager(con: Any) -> tuple[bool, str, list[Any]]:
+    con.execute("INSTALL onager FROM community")
+    con.execute("LOAD onager")
+    rows = con.execute(duckdb_probe_queries()["onager_pagerank"]).fetchall()
+    found = bool(rows) and all(len(row) == 2 for row in rows)
+    return (
+        found,
+        "Onager can run DuckDB-native graph analytics over broker edge tables",
+        rows,
+    )
 
 
 def check_parquet_export(con: Any) -> tuple[bool, str, list[Any]]:
