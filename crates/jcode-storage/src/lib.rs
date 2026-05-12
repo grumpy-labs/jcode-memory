@@ -4,6 +4,8 @@ use serde::de::DeserializeOwned;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "duckdb-storage")]
+pub mod duckdb_broker_store;
 pub mod memory_graph_store;
 
 /// Platform-aware runtime directory for sockets and ephemeral state.
@@ -376,5 +378,7 @@ pub fn append_json_line_fast<T: Serialize + ?Sized>(path: &Path, value: &T) -> R
     Ok(())
 }
 
+#[cfg(all(test, feature = "duckdb-storage"))]
+mod duckdb_broker_store_tests;
 #[cfg(test)]
 mod memory_graph_store_tests;
