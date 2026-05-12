@@ -1,5 +1,28 @@
 use super::*;
 use chrono::Duration;
+use std::ffi::OsString;
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => crate::env::set_var(self.key, value),
+            None => crate::env::remove_var(self.key),
+        }
+    }
+}
 
 #[test]
 fn test_ambient_status_default() {
@@ -277,6 +300,97 @@ fn garden_report_surfaces_read_only_duckdb_vault_work_items() {
         item.kind == "duplicate_entity_candidate"
             && item.count == 2
             && item.summary.contains("Shared Ambient Topic")
+    }));
+}
+
+#[test]
+#[cfg(feature = "duckdb-storage")]
+fn garden_report_surfaces_stale_fact_verification_candidates() {
+    use jcode_storage::duckdb_broker_store::{
+        DuckDbBrokerStoreService, VaultFileRecord, VaultRecordBatch, VaultSummaryRecord,
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join("broker.duckdb");
+    let service = DuckDbBrokerStoreService::start(&db_path).expect("start broker store");
+    service
+        .replace_vault_records(VaultRecordBatch {
+            files: vec![VaultFileRecord {
+                id: "file-alpha".to_string(),
+                path: "Notes/Alpha.md".to_string(),
+                title: "Alpha".to_string(),
+                checksum: "current-source-checksum".to_string(),
+                size_bytes: 42,
+                mtime_ns: 123,
+                frontmatter_json: "{}".to_string(),
+                deleted_at: None,
+            }],
+            summaries: vec![VaultSummaryRecord {
+                id: "summary-alpha".to_string(),
+                file_id: "file-alpha".to_string(),
+                path: "Notes/Alpha.md".to_string(),
+                summary: "Alpha still uses the old storage plan.".to_string(),
+                checksum: "summary-checksum".to_string(),
+                source_checksum: "old-source-checksum".to_string(),
+                deleted_at: None,
+            }],
+            ..Default::default()
+        })
+        .expect("seed stale summary");
+    drop(service);
+
+    let report = gather_ambient_garden_report(Some(db_path), "test-model", 10)
+        .expect("ambient garden report");
+
+    assert_eq!(report.counts.stale_vault_summary_facts, 1);
+    assert!(report.work_items.iter().any(|item| {
+        item.kind == "stale_fact_verification"
+            && item.count == 1
+            && item.summary.contains("outdated Vault source")
+            && item.paths == vec!["Notes/Alpha.md".to_string()]
+    }));
+}
+
+#[test]
+#[cfg(feature = "duckdb-storage")]
+fn garden_report_surfaces_retroactive_extraction_candidates_for_crashed_sessions() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut session = crate::session::Session::create_with_id(
+        "session_ambient_missed_1772405007295".to_string(),
+        None,
+        Some("Missed extraction proof".to_string()),
+    );
+    session.set_debug(false);
+    session.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "Remember this crashed session needs retroactive extraction.".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.mark_crashed(Some("test crash".to_string()));
+    session.save().expect("save crashed session");
+
+    let db_path = temp.path().join("broker.duckdb");
+    let service = jcode_storage::duckdb_broker_store::DuckDbBrokerStoreService::start(&db_path)
+        .expect("start broker store");
+    drop(service);
+
+    let report = gather_ambient_garden_report(Some(db_path), "test-model", 10)
+        .expect("ambient garden report");
+
+    assert_eq!(report.counts.missed_extraction_sessions, 1);
+    assert!(report.work_items.iter().any(|item| {
+        item.kind == "retroactive_extraction_candidate"
+            && item.count == 1
+            && item.summary.contains("crashed/error session")
+            && item
+                .paths
+                .iter()
+                .any(|path| path.ends_with("session_ambient_missed_1772405007295.json"))
     }));
 }
 

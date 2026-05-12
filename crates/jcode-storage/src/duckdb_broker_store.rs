@@ -213,6 +213,12 @@ pub struct VaultDuplicateEntityCandidate {
     pub paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultStaleSummaryCandidate {
+    pub path: String,
+    pub active_summary_count: i64,
+}
+
 pub struct DuckDbBrokerStore {
     db_path: PathBuf,
     connection: duckdb::Connection,
@@ -576,6 +582,55 @@ impl DuckDbBrokerStore {
                     .filter(|path| !path.is_empty())
                     .map(ToOwned::to_owned)
                     .collect(),
+            });
+        }
+        Ok(candidates)
+    }
+
+    pub fn count_stale_vault_summaries(&self) -> Result<i64> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT count(*)
+            FROM vault_summary s
+            JOIN vault_file f ON f.id = s.file_id
+            WHERE s.deleted_at IS NULL
+              AND f.deleted_at IS NULL
+              AND s.source_checksum <> f.checksum
+            "#,
+        )?;
+        let mut rows = statement.query([])?;
+        let Some(row) = rows.next()? else {
+            return Err(anyhow!("stale summary count query returned no rows"));
+        };
+        row.get(0).map_err(Into::into)
+    }
+
+    pub fn list_stale_vault_summaries(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<VaultStaleSummaryCandidate>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT s.path, count(*) AS active_summary_count
+            FROM vault_summary s
+            JOIN vault_file f ON f.id = s.file_id
+            WHERE s.deleted_at IS NULL
+              AND f.deleted_at IS NULL
+              AND s.source_checksum <> f.checksum
+            GROUP BY s.path
+            ORDER BY active_summary_count DESC, s.path
+            LIMIT ?
+            "#,
+        )?;
+        let mut rows = statement.query(duckdb::params![limit as i64])?;
+        let mut candidates = Vec::new();
+        while let Some(row) = rows.next()? {
+            candidates.push(VaultStaleSummaryCandidate {
+                path: row.get(0)?,
+                active_summary_count: row.get(1)?,
             });
         }
         Ok(candidates)
@@ -1402,6 +1457,12 @@ impl DuckDbBrokerStoreService {
                     BrokerStoreRequest::ListDuplicateVaultEntities { limit, response } => {
                         let _ = response.send(store.list_duplicate_vault_entities(limit));
                     }
+                    BrokerStoreRequest::CountStaleVaultSummaries { response } => {
+                        let _ = response.send(store.count_stale_vault_summaries());
+                    }
+                    BrokerStoreRequest::ListStaleVaultSummaries { limit, response } => {
+                        let _ = response.send(store.list_stale_vault_summaries(limit));
+                    }
                     BrokerStoreRequest::QueryVaultChunksByEmbedding {
                         embedding_model,
                         query_embedding,
@@ -1504,6 +1565,17 @@ impl DuckDbBrokerStoreService {
         limit: usize,
     ) -> Result<Vec<VaultDuplicateEntityCandidate>> {
         self.client.list_duplicate_vault_entities(limit)
+    }
+
+    pub fn count_stale_vault_summaries(&self) -> Result<i64> {
+        self.client.count_stale_vault_summaries()
+    }
+
+    pub fn list_stale_vault_summaries(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<VaultStaleSummaryCandidate>> {
+        self.client.list_stale_vault_summaries(limit)
     }
 
     pub fn query_vault_chunks_by_embedding(
@@ -1649,6 +1721,17 @@ impl DuckDbBrokerStoreClient {
         self.request(|response| BrokerStoreRequest::ListDuplicateVaultEntities { limit, response })
     }
 
+    pub fn count_stale_vault_summaries(&self) -> Result<i64> {
+        self.request(|response| BrokerStoreRequest::CountStaleVaultSummaries { response })
+    }
+
+    pub fn list_stale_vault_summaries(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<VaultStaleSummaryCandidate>> {
+        self.request(|response| BrokerStoreRequest::ListStaleVaultSummaries { limit, response })
+    }
+
     pub fn query_vault_chunks_by_embedding(
         &self,
         embedding_model: &str,
@@ -1731,6 +1814,13 @@ enum BrokerStoreRequest {
     ListDuplicateVaultEntities {
         limit: usize,
         response: mpsc::Sender<Result<Vec<VaultDuplicateEntityCandidate>>>,
+    },
+    CountStaleVaultSummaries {
+        response: mpsc::Sender<Result<i64>>,
+    },
+    ListStaleVaultSummaries {
+        limit: usize,
+        response: mpsc::Sender<Result<Vec<VaultStaleSummaryCandidate>>>,
     },
     QueryVaultChunksByEmbedding {
         embedding_model: String,

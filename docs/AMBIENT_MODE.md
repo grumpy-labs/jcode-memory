@@ -464,7 +464,7 @@ Runs after every turn, only on memories already retrieved for relevance checking
 
 Deep consolidation that runs during ambient cycles. Has access to the full memory graph and codebase.
 
-**Current §8.3 slice:** jcode now exposes a read-only broker-index garden report through `ambient:garden`. It inspects the DuckDB broker store configured by `JCODE_BROKER_DUCKDB_PATH`, reports active Vault/index counts, surfaces missing chunk-embedding backfill work, duplicate entity candidates, and stale tombstone review candidates. It does not merge, prune, verify, write files, create PRs, or send external messages.
+**Current §8.3 slice:** jcode now exposes a read-only broker-index garden report through `ambient:garden`. It inspects the DuckDB broker store configured by `JCODE_BROKER_DUCKDB_PATH`, reports active Vault/index counts, surfaces missing chunk-embedding backfill work, duplicate entity candidates, stale tombstone review candidates, stale Vault summary/fact verification candidates, and recent crashed/error sessions that may need retroactive extraction. It does not merge, prune, verify facts, extract sessions, write files, create PRs, or send external messages.
 
 **Operations:**
 
@@ -926,6 +926,7 @@ This is a distributed systems problem that will be addressed once ambient is sta
 ### Phase 1: Foundation
 - [x] Garden-only broker-index report (`ambient:garden`)
 - [x] Proactive work defaults to disabled
+- [x] Read-only stale fact and missed-session extraction candidate reporting
 - [ ] Ambient agent loop (spawn, run, sleep)
 - [ ] Single-instance guard
 - [ ] Basic scheduling (fixed interval with max ceiling)
