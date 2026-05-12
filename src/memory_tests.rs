@@ -528,6 +528,42 @@ fn scoped_retrieval_respects_project_vs_global() {
     });
 }
 
+#[cfg(feature = "duckdb-storage")]
+#[test]
+fn duckdb_graph_backend_writes_through_to_json_fallback() {
+    with_temp_home(|home| {
+        let db_path = home.join("memory").join("broker.duckdb");
+        let manager = MemoryManager::new_test().with_duckdb_graph_store(&db_path);
+
+        manager
+            .remember_project(MemoryEntry::new(
+                MemoryCategory::Fact,
+                "duckdb rust storage boundary memory",
+            ))
+            .expect("remember via duckdb backend");
+
+        let reloaded_duckdb = MemoryManager::new_test().with_duckdb_graph_store(&db_path);
+        let duckdb_memories = reloaded_duckdb
+            .list_all_scoped(MemoryScope::Project)
+            .expect("list duckdb memories");
+        assert_eq!(duckdb_memories.len(), 1);
+        assert_eq!(
+            duckdb_memories[0].content,
+            "duckdb rust storage boundary memory"
+        );
+
+        let json_fallback = MemoryManager::new_test();
+        let fallback_memories = json_fallback
+            .list_all_scoped(MemoryScope::Project)
+            .expect("list json fallback memories");
+        assert_eq!(fallback_memories.len(), 1);
+        assert_eq!(
+            fallback_memories[0].content,
+            "duckdb rust storage boundary memory"
+        );
+    });
+}
+
 #[test]
 fn retrieval_candidates_include_local_skills() {
     with_temp_home(|home| {

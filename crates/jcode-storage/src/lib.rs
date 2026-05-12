@@ -4,6 +4,8 @@ use serde::de::DeserializeOwned;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub mod memory_graph_store;
+
 /// Platform-aware runtime directory for sockets and ephemeral state.
 ///
 /// - Linux: `$XDG_RUNTIME_DIR` (typically `/run/user/<uid>`)
@@ -373,3 +375,6 @@ pub fn append_json_line_fast<T: Serialize + ?Sized>(path: &Path, value: &T) -> R
     file.flush()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod memory_graph_store_tests;

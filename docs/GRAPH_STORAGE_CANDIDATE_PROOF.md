@@ -74,6 +74,17 @@ Unit test:
   tests/storage_candidate/test_duckdb_operational_store.py
 ```
 
+Rust storage-boundary checks:
+
+```bash
+cargo test -q -p jcode-storage memory_graph_store --no-default-features
+DUCKDB_DOWNLOAD_LIB=1 cargo test -q -p jcode-storage \
+  --features duckdb-storage memory_graph_store
+DUCKDB_DOWNLOAD_LIB=1 cargo test -q \
+  duckdb_graph_backend_writes_through_to_json_fallback \
+  --features duckdb-storage
+```
+
 The probe uses a tiny corpus that models the broker/Vault records this project
 actually needs:
 
@@ -125,6 +136,14 @@ Durable single-writer proof on a temporary DuckDB file using `/Users/rob/Vault`:
 | Embedding backfill | Pass | 4,889 deterministic local `vault_embedding` records were written and ranked by vector distance. |
 | Reconciliation unit proof | Pass | Updated notes refresh active chunk context, while deleted notes are tombstoned with `deleted_at`. |
 
+Rust storage-boundary proof:
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Default JSON boundary | Pass | `jcode-storage` round-trips opaque memory graph records through the existing JSON path without enabling DuckDB. |
+| Optional DuckDB boundary | Pass | `jcode-storage` stores and reloads opaque graph records in a real DuckDB file behind the opt-in `duckdb-storage` feature. |
+| MemoryManager write-through | Pass | `MemoryManager::with_duckdb_graph_store` can remember through DuckDB, reopen from DuckDB, and read the same graph through JSON fallback. |
+
 ## What This Means
 
 DuckDB can represent the broker graph core today using normal relational tables
@@ -153,24 +172,29 @@ DuckDB is not yet fully proven as the operational broker store:
 - Persistent VSS/HNSW indexes still carry experimental persistence caveats.
 - DuckPGQ is not available in this local DuckDB/osx_arm64 proof, so graph
   extension ergonomics remain unproven here.
-- The durable proof is still a Python proof harness, not yet the Rust broker
-  storage boundary.
+- The durable whole-Vault table proof is still a Python proof harness.
+- The first Rust storage boundary now exists, but it persists opaque
+  `MemoryGraph` JSON records in DuckDB; normalized Rust DuckDB tables for Vault
+  chunks, links, tasks, embeddings, and graph edges are still pending.
 - The current embedding backfill is deterministic/local for storage and query
   shape proof; real model embeddings still need integration.
-- Incremental file watching, rename reconciliation, and Rust `broker_context`
-  integration are still pending.
+- A Rust single-writer broker service, incremental file watching, rename
+  reconciliation, and Rust `broker_context` Vault-item integration are still
+  pending.
 
 ## Recommendation
 
 Keep DuckDB in first position. The no-DuckPGQ path plus durable-file service
-proof is strong enough to start the Rust storage boundary work. Do not make it
-the canonical operational DB until the broker itself can read/write through that
-boundary, but stop treating either DuckPGQ availability or lack of a separate
-graph server as a blocker.
+proof was strong enough to start the Rust storage boundary work, and the first
+opt-in Rust boundary now exists. Do not make DuckDB the canonical operational DB
+until the broker uses a Rust single-writer service with normalized Vault/context
+tables, but stop treating either DuckPGQ availability or lack of a separate graph
+server as a blocker.
 
 Next DuckDB proof requirements:
 
-- Rust durable single-writer broker service module/API, not only this proof harness
+- Rust durable single-writer broker service module/API, beyond the current
+  opaque-record adapter
 - repeated small writes under broker-like concurrency on a larger corpus
 - incremental filesystem watch/reconciliation for Vault chunks
 - index refresh timing for FTS/vector

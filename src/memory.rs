@@ -14,10 +14,16 @@ use crate::memory_types::{
 };
 use crate::sidecar::Sidecar;
 use crate::storage;
+#[cfg(feature = "duckdb-storage")]
+use crate::storage::memory_graph_store::DuckDbMemoryGraphStore;
+#[cfg(feature = "duckdb-storage")]
+use crate::storage::memory_graph_store::{
+    MemoryGraphRecord, MemoryGraphScope as StoredMemoryGraphScope, MemoryGraphStore,
+};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -75,6 +81,14 @@ struct LegacyNoteEntry {
 
 pub type MemoryEventSink = Arc<dyn Fn(crate::protocol::ServerEvent) + Send + Sync>;
 
+#[derive(Debug, Clone, Default)]
+enum MemoryGraphStorageBackend {
+    #[default]
+    Json,
+    #[cfg(feature = "duckdb-storage")]
+    DuckDb { db_path: PathBuf },
+}
+
 pub fn memory_sidecar_enabled() -> bool {
     crate::config::config().agents.memory_sidecar_enabled
 }
@@ -117,6 +131,7 @@ pub struct MemoryManager {
     /// When true, use isolated test storage instead of real memory
     test_mode: bool,
     include_skills: bool,
+    graph_storage: MemoryGraphStorageBackend,
 }
 
 impl MemoryManager {
@@ -125,6 +140,7 @@ impl MemoryManager {
             project_dir: None,
             test_mode: false,
             include_skills: true,
+            graph_storage: MemoryGraphStorageBackend::Json,
         }
     }
 
@@ -138,12 +154,21 @@ impl MemoryManager {
         self
     }
 
+    #[cfg(feature = "duckdb-storage")]
+    pub fn with_duckdb_graph_store(mut self, db_path: impl Into<PathBuf>) -> Self {
+        self.graph_storage = MemoryGraphStorageBackend::DuckDb {
+            db_path: db_path.into(),
+        };
+        self
+    }
+
     /// Create a memory manager in test mode (isolated storage)
     pub fn new_test() -> Self {
         Self {
             project_dir: None,
             test_mode: true,
             include_skills: true,
+            graph_storage: MemoryGraphStorageBackend::Json,
         }
     }
 
@@ -1488,6 +1513,20 @@ impl MemoryManager {
             return Ok(MemoryGraph::new());
         };
 
+        match &self.graph_storage {
+            MemoryGraphStorageBackend::Json => self.load_project_graph_json(&path),
+            #[cfg(feature = "duckdb-storage")]
+            MemoryGraphStorageBackend::DuckDb { db_path } => self.load_duckdb_or_json_graph(
+                db_path,
+                &path,
+                StoredMemoryGraphScope::Project,
+                |manager, path| manager.load_project_graph_json(path),
+            ),
+        }
+    }
+
+    fn load_project_graph_json(&self, path: &Path) -> Result<MemoryGraph> {
+        let path = path.to_path_buf();
         if !self.test_mode
             && let Some(mut graph) = cached_graph(&path)
         {
@@ -1550,6 +1589,20 @@ impl MemoryManager {
     /// Load global memories as a MemoryGraph with automatic migration
     pub fn load_global_graph(&self) -> Result<MemoryGraph> {
         let path = self.global_memory_path()?;
+        match &self.graph_storage {
+            MemoryGraphStorageBackend::Json => self.load_global_graph_json(&path),
+            #[cfg(feature = "duckdb-storage")]
+            MemoryGraphStorageBackend::DuckDb { db_path } => self.load_duckdb_or_json_graph(
+                db_path,
+                &path,
+                StoredMemoryGraphScope::Global,
+                |manager, path| manager.load_global_graph_json(path),
+            ),
+        }
+    }
+
+    fn load_global_graph_json(&self, path: &Path) -> Result<MemoryGraph> {
+        let path = path.to_path_buf();
         if !self.test_mode
             && let Some(mut graph) = cached_graph(&path)
         {
@@ -1602,13 +1655,65 @@ impl MemoryManager {
         }
     }
 
+    #[cfg(feature = "duckdb-storage")]
+    fn load_duckdb_or_json_graph<F>(
+        &self,
+        db_path: &Path,
+        storage_path: &Path,
+        scope: StoredMemoryGraphScope,
+        load_json: F,
+    ) -> Result<MemoryGraph>
+    where
+        F: FnOnce(&Self, &Path) -> Result<MemoryGraph>,
+    {
+        let store = DuckDbMemoryGraphStore::open(db_path)?;
+        if let Some(record) = store.load_record(storage_path)? {
+            return Ok(serde_json::from_str(&record.graph_json)?);
+        }
+
+        let graph = load_json(self, storage_path)?;
+        self.save_duckdb_graph_record(db_path, storage_path, scope, &graph)?;
+        Ok(graph)
+    }
+
+    #[cfg(feature = "duckdb-storage")]
+    fn save_duckdb_graph_record(
+        &self,
+        db_path: &Path,
+        storage_path: &Path,
+        scope: StoredMemoryGraphScope,
+        graph: &MemoryGraph,
+    ) -> Result<()> {
+        let store = DuckDbMemoryGraphStore::open(db_path)?;
+        let record = MemoryGraphRecord {
+            id: format!("{}:{}", scope.as_str(), storage_path.display()),
+            scope,
+            graph_json: serde_json::to_string(graph)?,
+        };
+        store.save_record(storage_path, &record)
+    }
+
     /// Save project memories as a MemoryGraph
     pub fn save_project_graph(&self, graph: &MemoryGraph) -> Result<()> {
         if let Some(path) = self.project_memory_path()? {
-            storage::write_json(&path, graph)?;
-            if !self.test_mode {
-                cache_graph(path, graph);
+            self.save_project_graph_json(&path, graph)?;
+            #[cfg(feature = "duckdb-storage")]
+            if let MemoryGraphStorageBackend::DuckDb { db_path } = &self.graph_storage {
+                self.save_duckdb_graph_record(
+                    db_path,
+                    &path,
+                    StoredMemoryGraphScope::Project,
+                    graph,
+                )?;
             }
+        }
+        Ok(())
+    }
+
+    fn save_project_graph_json(&self, path: &Path, graph: &MemoryGraph) -> Result<()> {
+        storage::write_json(path, graph)?;
+        if !self.test_mode {
+            cache_graph(path.to_path_buf(), graph);
         }
         Ok(())
     }
@@ -1616,9 +1721,18 @@ impl MemoryManager {
     /// Save global memories as a MemoryGraph
     pub fn save_global_graph(&self, graph: &MemoryGraph) -> Result<()> {
         let path = self.global_memory_path()?;
-        storage::write_json(&path, graph)?;
+        self.save_global_graph_json(&path, graph)?;
+        #[cfg(feature = "duckdb-storage")]
+        if let MemoryGraphStorageBackend::DuckDb { db_path } = &self.graph_storage {
+            self.save_duckdb_graph_record(db_path, &path, StoredMemoryGraphScope::Global, graph)?;
+        }
+        Ok(())
+    }
+
+    fn save_global_graph_json(&self, path: &Path, graph: &MemoryGraph) -> Result<()> {
+        storage::write_json(path, graph)?;
         if !self.test_mode {
-            cache_graph(path, graph);
+            cache_graph(path.to_path_buf(), graph);
         }
         Ok(())
     }
