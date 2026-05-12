@@ -88,6 +88,7 @@ fn duckdb_broker_store_replaces_vault_records_and_queries_context() {
             weight: 1.0,
             deleted_at: None,
         }],
+        ..VaultRecordBatch::default()
     };
 
     service

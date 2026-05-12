@@ -35,11 +35,42 @@ fn vault_ingestion_collects_markdown_records_for_broker_store() {
     assert_eq!(records.links[0].target, "Beta");
     assert_eq!(records.tasks.len(), 1);
     assert_eq!(records.tasks[0].content, "Track ingestion writer");
+    assert_eq!(records.summaries.len(), 1);
+    assert_eq!(records.summaries[0].file_id, records.files[0].id);
+    assert!(
+        records.summaries[0]
+            .summary
+            .contains("DuckDB ingestion context")
+    );
+    assert!(
+        records
+            .entities
+            .iter()
+            .any(|entity| entity.name == "Alpha" && entity.kind == "title")
+    );
+    assert!(
+        records
+            .entities
+            .iter()
+            .any(|entity| entity.name == "Beta" && entity.kind == "link_target")
+    );
     assert!(
         records
             .edges
             .iter()
             .any(|edge| edge.kind == "ChunkOf" && edge.target_id == records.files[0].id)
+    );
+    assert!(
+        records
+            .edges
+            .iter()
+            .any(|edge| edge.kind == "SummaryOf" && edge.target_id == records.files[0].id)
+    );
+    assert!(
+        records
+            .edges
+            .iter()
+            .any(|edge| edge.kind == "EntityOf" && edge.target_id == records.files[0].id)
     );
 }
 

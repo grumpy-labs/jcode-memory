@@ -125,6 +125,44 @@ fn broker_embed_vault_subcommand_parses() {
 }
 
 #[test]
+fn broker_query_vault_subcommand_parses() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "broker",
+        "query-vault",
+        "--db",
+        "/tmp/broker.duckdb",
+        "--query",
+        "semantic broker evidence",
+        "--limit",
+        "3",
+        "--semantic",
+        "--model",
+        "test-model",
+        "--json",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::Broker(BrokerCommand::QueryVault {
+            db,
+            query,
+            limit,
+            semantic,
+            model,
+            json,
+        })) => {
+            assert_eq!(db.as_deref(), Some("/tmp/broker.duckdb"));
+            assert_eq!(query, "semantic broker evidence");
+            assert_eq!(limit, 3);
+            assert!(semantic);
+            assert_eq!(model, "test-model");
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
 fn session_rename_subcommand_parses() {
     let args = Args::try_parse_from([
         "jcode",

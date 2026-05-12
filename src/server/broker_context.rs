@@ -20,8 +20,8 @@ use tokio::sync::mpsc;
 
 #[cfg(feature = "duckdb-storage")]
 use jcode_storage::duckdb_broker_store::{
-    DuckDbBrokerStoreClient, DuckDbBrokerStoreService, VaultChunkContextRow, VaultLinkContextRow,
-    VaultTaskContextRow,
+    DuckDbBrokerStoreClient, DuckDbBrokerStoreService, VaultChunkContextRow,
+    VaultChunkEmbeddingHit, VaultLinkContextRow, VaultTaskContextRow,
 };
 
 type TranscriptExtractionFuture<'a> =
@@ -32,6 +32,10 @@ const BROKER_SEARCH_HIT_LIMIT: usize = 3;
 const BROKER_SKILL_SUMMARY_LIMIT: usize = 8;
 #[cfg(feature = "duckdb-storage")]
 const BROKER_DUCKDB_PATH_ENV: &str = "JCODE_BROKER_DUCKDB_PATH";
+#[cfg(feature = "duckdb-storage")]
+const BROKER_VAULT_EMBEDDING_MODEL_ENV: &str = "JCODE_BROKER_VAULT_EMBEDDING_MODEL";
+#[cfg(feature = "duckdb-storage")]
+const DEFAULT_BROKER_VAULT_EMBEDDING_MODEL: &str = "jcode-local-embedding";
 
 trait TranscriptMemoryExtractor {
     fn extract<'a>(
@@ -977,11 +981,43 @@ fn collect_vault_context_items(
     };
 
     let client = broker_duckdb_store_client(db_path)?;
+    let query_embedding = crate::embedding::embed(query).ok();
+    collect_vault_context_items_with_client(
+        &client,
+        working_dir,
+        query,
+        query_embedding.as_deref(),
+        limit,
+    )
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn collect_vault_context_items_with_client(
+    client: &DuckDbBrokerStoreClient,
+    working_dir: Option<&str>,
+    query: &str,
+    query_embedding: Option<&[f32]>,
+    limit: usize,
+) -> Result<Vec<BrokerContextItem>> {
     let mut hits = Vec::new();
+    let mut seen_chunks = HashSet::new();
+    if let Some(query_embedding) = query_embedding {
+        let embedding_model = broker_vault_embedding_model();
+        for hit in
+            client.query_vault_chunks_by_embedding(&embedding_model, query_embedding, limit)?
+        {
+            if hit.score < f64::from(BROKER_SEMANTIC_THRESHOLD) {
+                continue;
+            }
+            seen_chunks.insert(hit.id.clone());
+            hits.push(VaultContextHit::SemanticChunk(hit));
+        }
+    }
     hits.extend(
         client
             .query_vault_chunks(query, limit)?
             .into_iter()
+            .filter(|row| !seen_chunks.contains(&row.id))
             .map(VaultContextHit::Chunk),
     );
     hits.extend(
@@ -997,10 +1033,14 @@ fn collect_vault_context_items(
             .map(VaultContextHit::Link),
     );
     hits.sort_by(|left, right| {
-        right
-            .score()
-            .partial_cmp(&left.score())
-            .unwrap_or(std::cmp::Ordering::Equal)
+        left.priority()
+            .cmp(&right.priority())
+            .then_with(|| {
+                right
+                    .score()
+                    .partial_cmp(&left.score())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| left.tie_breaker().cmp(&right.tie_breaker()))
     });
     hits.truncate(limit);
@@ -1009,6 +1049,15 @@ fn collect_vault_context_items(
         .enumerate()
         .map(|(idx, hit)| hit.to_broker_item(query, idx + 1, working_dir))
         .collect())
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn broker_vault_embedding_model() -> String {
+    std::env::var(BROKER_VAULT_EMBEDDING_MODEL_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_BROKER_VAULT_EMBEDDING_MODEL.to_string())
 }
 
 #[cfg(not(feature = "duckdb-storage"))]
@@ -1051,6 +1100,7 @@ fn broker_duckdb_store_client(db_path: PathBuf) -> Result<DuckDbBrokerStoreClien
 
 #[cfg(feature = "duckdb-storage")]
 enum VaultContextHit {
+    SemanticChunk(VaultChunkEmbeddingHit),
     Chunk(VaultChunkContextRow),
     Task(VaultTaskContextRow),
     Link(VaultLinkContextRow),
@@ -1060,14 +1110,27 @@ enum VaultContextHit {
 impl VaultContextHit {
     fn score(&self) -> f64 {
         match self {
+            Self::SemanticChunk(row) => row.score,
             Self::Chunk(row) => row.score,
             Self::Task(row) => row.score,
             Self::Link(row) => row.score,
         }
     }
 
+    fn priority(&self) -> usize {
+        match self {
+            Self::SemanticChunk(_) => 0,
+            Self::Chunk(_) => 1,
+            Self::Task(_) => 2,
+            Self::Link(_) => 3,
+        }
+    }
+
     fn tie_breaker(&self) -> String {
         match self {
+            Self::SemanticChunk(row) => {
+                format!("semantic_chunk:{}:{:012}", row.path, row.start_line)
+            }
             Self::Chunk(row) => format!("chunk:{}:{:012}", row.path, row.start_line),
             Self::Task(row) => format!("task:{}:{:012}", row.path, row.line),
             Self::Link(row) => format!("link:{}:{}", row.source_path, row.target),
@@ -1081,6 +1144,9 @@ impl VaultContextHit {
         working_dir: Option<&str>,
     ) -> BrokerContextItem {
         match self {
+            Self::SemanticChunk(row) => {
+                vault_semantic_chunk_broker_item(row, query, rank, working_dir)
+            }
             Self::Chunk(row) => vault_chunk_broker_item(row, query, rank, working_dir),
             Self::Task(row) => vault_task_broker_item(row, query, rank, working_dir),
             Self::Link(row) => vault_link_broker_item(row, query, rank, working_dir),
@@ -1148,6 +1214,75 @@ fn vault_chunk_broker_item(
             "start_line": row.start_line,
             "end_line": row.end_line,
             "uri": uri,
+        }),
+    }
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_semantic_chunk_broker_item(
+    row: &VaultChunkEmbeddingHit,
+    query: &str,
+    rank: usize,
+    working_dir: Option<&str>,
+) -> BrokerContextItem {
+    let uri = vault_chunk_uri(&row.path, &row.heading);
+    let score = Some(row.score as f32);
+    BrokerContextItem {
+        id: format!("vault_chunk:{}", row.id),
+        kind: "vault_chunk".to_string(),
+        scope: "vault".to_string(),
+        content_format: "markdown".to_string(),
+        title: Some(if row.heading.trim().is_empty() {
+            row.title.clone()
+        } else {
+            format!("{} / {}", row.title, row.heading)
+        }),
+        summary: Some(summarize_content(&row.content)),
+        content: Some(row.content.clone()),
+        tags: vec![
+            "vault".to_string(),
+            "vault_chunk".to_string(),
+            "semantic".to_string(),
+        ],
+        source: Some(uri.clone()),
+        score,
+        origin: BrokerContextOrigin {
+            tool: Some("duckdb_broker_store".to_string()),
+            source: Some("vault".to_string()),
+            working_dir: working_dir.map(str::to_string),
+            path: Some(row.path.clone()),
+            uri: Some(uri.clone()),
+            ..Default::default()
+        },
+        relevance: Some(BrokerContextRelevance {
+            query: Some(query.to_string()),
+            retrieval_mode: Some("duckdb_broker_store_semantic".to_string()),
+            score,
+            rank: Some(rank),
+            matched_terms: Vec::new(),
+            exact_match: Some(row.content.to_lowercase().contains(&query.to_lowercase())),
+        }),
+        fragments: vec![BrokerContextFragment {
+            relation: "source_span".to_string(),
+            content: row.content.clone(),
+            content_format: "markdown".to_string(),
+            role: None,
+            message_index: None,
+            message_id: None,
+            timestamp: None,
+        }],
+        metadata: json!({
+            "durable_memory": false,
+            "source_kind": "vault_chunk",
+            "file_id": row.file_id,
+            "chunk_id": row.id,
+            "checksum": row.checksum,
+            "source_checksum": row.source_checksum,
+            "mtime_ns": row.mtime_ns,
+            "start_line": row.start_line,
+            "end_line": row.end_line,
+            "uri": uri,
+            "embedding_model": row.embedding_model,
         }),
     }
 }
@@ -1829,8 +1964,8 @@ mod tests {
 
     #[cfg(feature = "duckdb-storage")]
     use jcode_storage::duckdb_broker_store::{
-        DuckDbBrokerStoreService, VaultChunkRecord, VaultFileRecord, VaultLinkRecord,
-        VaultRecordBatch, VaultTaskRecord,
+        DuckDbBrokerStoreService, VaultChunkRecord, VaultEmbeddingRecord, VaultFileRecord,
+        VaultLinkRecord, VaultRecordBatch, VaultTaskRecord,
     };
 
     struct TestHome {
@@ -2549,5 +2684,84 @@ mod tests {
         assert_eq!(link_item.origin.path.as_deref(), Some("Alpha.md"));
         assert_eq!(link_item.metadata["target"], "Beta");
         assert_eq!(link_item.content.as_deref(), Some("[[Beta]]"));
+    }
+
+    #[cfg(feature = "duckdb-storage")]
+    #[test]
+    fn broker_context_prefers_semantic_vault_chunks_when_embeddings_are_available() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let db_path = _env.path().join("broker.duckdb");
+        let service = DuckDbBrokerStoreService::start(&db_path).expect("start broker store");
+        service
+            .replace_vault_records(VaultRecordBatch {
+                files: vec![VaultFileRecord {
+                    id: "file_semantic".to_string(),
+                    path: "Semantic.md".to_string(),
+                    title: "Semantic".to_string(),
+                    checksum: "sha256:file-semantic".to_string(),
+                    size_bytes: 64,
+                    mtime_ns: 456,
+                    frontmatter_json: "{}".to_string(),
+                    deleted_at: None,
+                }],
+                chunks: vec![VaultChunkRecord {
+                    id: "chunk_semantic".to_string(),
+                    file_id: "file_semantic".to_string(),
+                    path: "Semantic.md".to_string(),
+                    heading: "Broker embeddings".to_string(),
+                    content: "Stored vectors should retrieve this note without lexical overlap."
+                        .to_string(),
+                    start_line: 1,
+                    end_line: 2,
+                    checksum: "sha256:chunk-semantic".to_string(),
+                    deleted_at: None,
+                }],
+                ..VaultRecordBatch::default()
+            })
+            .expect("seed broker store");
+        let client = service.client();
+        client
+            .upsert_vault_embeddings(vec![VaultEmbeddingRecord {
+                id: "embedding:test-model:chunk_semantic".to_string(),
+                record_id: "chunk_semantic".to_string(),
+                record_kind: "vault_chunk".to_string(),
+                embedding_model: "test-model".to_string(),
+                embedding: vec![0.0, 1.0, 0.0],
+                content_checksum: "sha256:chunk-semantic".to_string(),
+                source_checksum: "sha256:file-semantic".to_string(),
+                updated_at: "2026-05-11T22:15:00Z".to_string(),
+                deleted_at: None,
+            }])
+            .expect("upsert semantic embedding");
+        let _model_env = TestEnvVar::set("JCODE_BROKER_VAULT_EMBEDDING_MODEL", "test-model");
+
+        let items = collect_vault_context_items_with_client(
+            &client,
+            Some("/tmp/project"),
+            "unmatched-query-token",
+            Some(&[0.0, 1.0, 0.0]),
+            5,
+        )
+        .expect("collect semantic vault context");
+
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.kind, "vault_chunk");
+        assert_eq!(item.metadata["embedding_model"], "test-model");
+        assert_eq!(
+            item.relevance
+                .as_ref()
+                .and_then(|relevance| relevance.retrieval_mode.as_deref()),
+            Some("duckdb_broker_store_semantic")
+        );
+        assert!(
+            item.score.unwrap_or_default() > 0.99,
+            "semantic score should carry through: {item:?}"
+        );
+        assert_eq!(
+            item.content.as_deref(),
+            Some("Stored vectors should retrieve this note without lexical overlap.")
+        );
     }
 }

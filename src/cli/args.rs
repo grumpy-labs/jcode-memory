@@ -436,6 +436,33 @@ pub(crate) enum BrokerCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Query ingested Vault chunks from the DuckDB broker store
+    QueryVault {
+        /// DuckDB broker-store path. Defaults to JCODE_BROKER_DUCKDB_PATH or the runtime broker DB.
+        #[arg(long)]
+        db: Option<String>,
+
+        /// Query text to search for
+        #[arg(long)]
+        query: String,
+
+        /// Maximum hits to return
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+
+        /// Use stored chunk embeddings instead of lexical chunk search
+        #[arg(long)]
+        semantic: bool,
+
+        /// Embedding model label to query
+        #[arg(long, default_value = "jcode-local-embedding")]
+        model: String,
+
+        /// Emit JSON report
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

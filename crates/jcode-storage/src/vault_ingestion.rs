@@ -1,6 +1,7 @@
 use crate::duckdb_broker_store::{
     BrokerStoreCounts, DuckDbBrokerStoreClient, DuckDbBrokerStoreService, GraphEdgeRecord,
-    VaultChunkRecord, VaultFileRecord, VaultLinkRecord, VaultRecordBatch, VaultTaskRecord,
+    VaultChunkRecord, VaultEntityRecord, VaultFileRecord, VaultLinkRecord, VaultRecordBatch,
+    VaultSummaryRecord, VaultTaskRecord,
 };
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -174,6 +175,8 @@ fn append_markdown_file_records(
     let chunks = chunk_body(&file_id, &rel_path, body);
     let links = parse_links(&file_id, &rel_path, body);
     let tasks = parse_tasks(&file_id, &rel_path, body);
+    let summaries = summarize_file(&file, &chunks);
+    let entities = extract_entities(&file, &links);
 
     batch.edges.extend(
         chunks
@@ -190,10 +193,22 @@ fn append_markdown_file_records(
             .iter()
             .map(|link| graph_edge(&link.id, &file_id, "LinkFrom")),
     );
+    batch.edges.extend(
+        summaries
+            .iter()
+            .map(|summary| graph_edge(&summary.id, &file_id, "SummaryOf")),
+    );
+    batch.edges.extend(
+        entities
+            .iter()
+            .map(|entity| graph_edge(&entity.id, &file_id, "EntityOf")),
+    );
     batch.files.push(file);
     batch.chunks.extend(chunks);
     batch.links.extend(links);
     batch.tasks.extend(tasks);
+    batch.summaries.extend(summaries);
+    batch.entities.extend(entities);
     Ok(())
 }
 
@@ -223,6 +238,18 @@ fn records_for_file(batch: &VaultRecordBatch, file_id: &str) -> VaultRecordBatch
             .filter(|record| record.file_id == file_id)
             .cloned()
             .collect(),
+        summaries: batch
+            .summaries
+            .iter()
+            .filter(|record| record.file_id == file_id)
+            .cloned()
+            .collect(),
+        entities: batch
+            .entities
+            .iter()
+            .filter(|record| record.file_id == file_id)
+            .cloned()
+            .collect(),
         edges: batch
             .edges
             .iter()
@@ -237,6 +264,14 @@ fn records_for_file(batch: &VaultRecordBatch, file_id: &str) -> VaultRecordBatch
                         .tasks
                         .iter()
                         .any(|task| task.file_id == file_id && task.id == record.source_id)
+                    || batch
+                        .summaries
+                        .iter()
+                        .any(|summary| summary.file_id == file_id && summary.id == record.source_id)
+                    || batch
+                        .entities
+                        .iter()
+                        .any(|entity| entity.file_id == file_id && entity.id == record.source_id)
                     || batch
                         .links
                         .iter()
@@ -326,6 +361,25 @@ fn retarget_file_id(batch: &mut VaultRecordBatch, old_file_id: &str, new_file_id
                 &[new_file_id, &link.kind, &link.target, &link.raw],
             );
             id_map.insert(old_id, link.id.clone());
+        }
+    }
+    for summary in &mut batch.summaries {
+        if summary.file_id == old_file_id {
+            let old_id = summary.id.clone();
+            summary.file_id = new_file_id.to_string();
+            summary.id = stable_id("vault_summary", &[new_file_id, &summary.source_checksum]);
+            id_map.insert(old_id, summary.id.clone());
+        }
+    }
+    for entity in &mut batch.entities {
+        if entity.file_id == old_file_id {
+            let old_id = entity.id.clone();
+            entity.file_id = new_file_id.to_string();
+            entity.id = stable_id(
+                "vault_entity",
+                &[new_file_id, &entity.kind, &entity.name, &entity.source],
+            );
+            id_map.insert(old_id, entity.id.clone());
         }
     }
     for edge in &mut batch.edges {
@@ -448,6 +502,91 @@ fn parse_tasks(file_id: &str, rel_path: &str, body: &str) -> Vec<VaultTaskRecord
             })
         })
         .collect()
+}
+
+fn summarize_file(file: &VaultFileRecord, chunks: &[VaultChunkRecord]) -> Vec<VaultSummaryRecord> {
+    let Some(summary) = chunks
+        .iter()
+        .map(|chunk| compact_summary_text(&chunk.content))
+        .find(|summary| !summary.is_empty())
+    else {
+        return Vec::new();
+    };
+    let summary = summary.chars().take(600).collect::<String>();
+    vec![VaultSummaryRecord {
+        id: stable_id("vault_summary", &[&file.id, &file.checksum]),
+        file_id: file.id.clone(),
+        path: file.path.clone(),
+        checksum: sha256_text(&summary),
+        source_checksum: file.checksum.clone(),
+        summary,
+        deleted_at: None,
+    }]
+}
+
+fn compact_summary_text(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| line.trim_start_matches('#').trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn extract_entities(file: &VaultFileRecord, links: &[VaultLinkRecord]) -> Vec<VaultEntityRecord> {
+    let mut entities = Vec::new();
+    let mut seen = HashSet::new();
+    push_entity(
+        &mut entities,
+        &mut seen,
+        &file.id,
+        &file.path,
+        "title",
+        &file.title,
+        "title",
+    );
+    for link in links {
+        push_entity(
+            &mut entities,
+            &mut seen,
+            &file.id,
+            &file.path,
+            "link_target",
+            &link.target,
+            "vault_link",
+        );
+    }
+    entities
+}
+
+fn push_entity(
+    entities: &mut Vec<VaultEntityRecord>,
+    seen: &mut HashSet<String>,
+    file_id: &str,
+    path: &str,
+    kind: &str,
+    name: &str,
+    source: &str,
+) {
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    let dedupe_key = format!("{kind}\u{1f}{name}\u{1f}{source}");
+    if !seen.insert(dedupe_key) {
+        return;
+    }
+    entities.push(VaultEntityRecord {
+        id: stable_id("vault_entity", &[file_id, kind, name, source]),
+        file_id: file_id.to_string(),
+        path: path.to_string(),
+        name: name.to_string(),
+        kind: kind.to_string(),
+        source: source.to_string(),
+        deleted_at: None,
+    });
 }
 
 fn parse_links(file_id: &str, rel_path: &str, body: &str) -> Vec<VaultLinkRecord> {

@@ -50,6 +50,28 @@ pub struct VaultTaskRecord {
     pub deleted_at: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultSummaryRecord {
+    pub id: String,
+    pub file_id: String,
+    pub path: String,
+    pub summary: String,
+    pub checksum: String,
+    pub source_checksum: String,
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultEntityRecord {
+    pub id: String,
+    pub file_id: String,
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub source: String,
+    pub deleted_at: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphEdgeRecord {
     pub id: String,
@@ -79,6 +101,8 @@ pub struct VaultRecordBatch {
     pub chunks: Vec<VaultChunkRecord>,
     pub links: Vec<VaultLinkRecord>,
     pub tasks: Vec<VaultTaskRecord>,
+    pub summaries: Vec<VaultSummaryRecord>,
+    pub entities: Vec<VaultEntityRecord>,
     pub edges: Vec<GraphEdgeRecord>,
 }
 
@@ -92,6 +116,10 @@ pub struct BrokerStoreCounts {
     pub active_vault_link: i64,
     pub vault_task: i64,
     pub active_vault_task: i64,
+    pub vault_summary: i64,
+    pub active_vault_summary: i64,
+    pub vault_entity: i64,
+    pub active_vault_entity: i64,
     pub vault_embedding: i64,
     pub active_vault_embedding: i64,
     pub graph_edge: i64,
@@ -206,6 +234,8 @@ impl DuckDbBrokerStore {
             r#"
             DELETE FROM vault_embedding;
             DELETE FROM graph_edge;
+            DELETE FROM vault_entity;
+            DELETE FROM vault_summary;
             DELETE FROM vault_task;
             DELETE FROM vault_link;
             DELETE FROM vault_chunk;
@@ -227,6 +257,12 @@ impl DuckDbBrokerStore {
         }
         for record in batch.tasks {
             self.upsert_vault_task(&record)?;
+        }
+        for record in batch.summaries {
+            self.upsert_vault_summary(&record)?;
+        }
+        for record in batch.entities {
+            self.upsert_vault_entity(&record)?;
         }
         for record in batch.edges {
             self.upsert_graph_edge(&record)?;
@@ -294,14 +330,27 @@ impl DuckDbBrokerStore {
                 OR target_id IN (SELECT id FROM vault_chunk WHERE file_id = ?)
                 OR source_id IN (SELECT id FROM vault_task WHERE file_id = ?)
                 OR target_id IN (SELECT id FROM vault_task WHERE file_id = ?)
+                OR source_id IN (SELECT id FROM vault_summary WHERE file_id = ?)
+                OR target_id IN (SELECT id FROM vault_summary WHERE file_id = ?)
+                OR source_id IN (SELECT id FROM vault_entity WHERE file_id = ?)
+                OR target_id IN (SELECT id FROM vault_entity WHERE file_id = ?)
               )
             "#,
             duckdb::params![
-                deleted_at, file_id, file_id, file_id, file_id, file_id, file_id
+                deleted_at, file_id, file_id, file_id, file_id, file_id, file_id, file_id, file_id,
+                file_id, file_id
             ],
         )?;
         self.connection.execute(
             "UPDATE vault_task SET deleted_at = ? WHERE file_id = ? AND deleted_at IS NULL",
+            duckdb::params![deleted_at, file_id],
+        )?;
+        self.connection.execute(
+            "UPDATE vault_summary SET deleted_at = ? WHERE file_id = ? AND deleted_at IS NULL",
+            duckdb::params![deleted_at, file_id],
+        )?;
+        self.connection.execute(
+            "UPDATE vault_entity SET deleted_at = ? WHERE file_id = ? AND deleted_at IS NULL",
             duckdb::params![deleted_at, file_id],
         )?;
         self.connection.execute(
@@ -339,13 +388,26 @@ impl DuckDbBrokerStore {
                OR target_id IN (SELECT id FROM vault_task WHERE file_id = ?)
                OR source_id IN (SELECT id FROM vault_link WHERE source_file_id = ?)
                OR target_id IN (SELECT id FROM vault_link WHERE source_file_id = ?)
+               OR source_id IN (SELECT id FROM vault_summary WHERE file_id = ?)
+               OR target_id IN (SELECT id FROM vault_summary WHERE file_id = ?)
+               OR source_id IN (SELECT id FROM vault_entity WHERE file_id = ?)
+               OR target_id IN (SELECT id FROM vault_entity WHERE file_id = ?)
             "#,
             duckdb::params![
-                file_id, file_id, file_id, file_id, file_id, file_id, file_id, file_id
+                file_id, file_id, file_id, file_id, file_id, file_id, file_id, file_id, file_id,
+                file_id, file_id, file_id
             ],
         )?;
         self.connection.execute(
             "DELETE FROM vault_task WHERE file_id = ?",
+            duckdb::params![file_id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM vault_summary WHERE file_id = ?",
+            duckdb::params![file_id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM vault_entity WHERE file_id = ?",
             duckdb::params![file_id],
         )?;
         self.connection.execute(
@@ -373,6 +435,10 @@ impl DuckDbBrokerStore {
             active_vault_link: self.count_table("vault_link", "WHERE deleted_at IS NULL")?,
             vault_task: self.count_table("vault_task", "")?,
             active_vault_task: self.count_table("vault_task", "WHERE deleted_at IS NULL")?,
+            vault_summary: self.count_table("vault_summary", "")?,
+            active_vault_summary: self.count_table("vault_summary", "WHERE deleted_at IS NULL")?,
+            vault_entity: self.count_table("vault_entity", "")?,
+            active_vault_entity: self.count_table("vault_entity", "WHERE deleted_at IS NULL")?,
             vault_embedding: self.count_table("vault_embedding", "")?,
             active_vault_embedding: self
                 .count_table("vault_embedding", "WHERE deleted_at IS NULL")?,
@@ -779,6 +845,26 @@ impl DuckDbBrokerStore {
                 deleted_at VARCHAR
             );
 
+            CREATE TABLE IF NOT EXISTS vault_summary (
+                id VARCHAR PRIMARY KEY,
+                file_id VARCHAR NOT NULL,
+                path VARCHAR NOT NULL,
+                summary VARCHAR NOT NULL,
+                checksum VARCHAR NOT NULL,
+                source_checksum VARCHAR NOT NULL,
+                deleted_at VARCHAR
+            );
+
+            CREATE TABLE IF NOT EXISTS vault_entity (
+                id VARCHAR PRIMARY KEY,
+                file_id VARCHAR NOT NULL,
+                path VARCHAR NOT NULL,
+                name VARCHAR NOT NULL,
+                kind VARCHAR NOT NULL,
+                source VARCHAR NOT NULL,
+                deleted_at VARCHAR
+            );
+
             CREATE TABLE IF NOT EXISTS vault_embedding (
                 id VARCHAR PRIMARY KEY,
                 record_id VARCHAR NOT NULL,
@@ -939,6 +1025,60 @@ impl DuckDbBrokerStore {
                 record.checked,
                 record.content,
                 record.line,
+                record.deleted_at.as_deref()
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn upsert_vault_summary(&self, record: &VaultSummaryRecord) -> Result<()> {
+        self.connection.execute(
+            r#"
+            INSERT INTO vault_summary
+                (id, file_id, path, summary, checksum, source_checksum, deleted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                file_id = excluded.file_id,
+                path = excluded.path,
+                summary = excluded.summary,
+                checksum = excluded.checksum,
+                source_checksum = excluded.source_checksum,
+                deleted_at = excluded.deleted_at
+            "#,
+            duckdb::params![
+                record.id,
+                record.file_id,
+                record.path,
+                record.summary,
+                record.checksum,
+                record.source_checksum,
+                record.deleted_at.as_deref()
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn upsert_vault_entity(&self, record: &VaultEntityRecord) -> Result<()> {
+        self.connection.execute(
+            r#"
+            INSERT INTO vault_entity
+                (id, file_id, path, name, kind, source, deleted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                file_id = excluded.file_id,
+                path = excluded.path,
+                name = excluded.name,
+                kind = excluded.kind,
+                source = excluded.source,
+                deleted_at = excluded.deleted_at
+            "#,
+            duckdb::params![
+                record.id,
+                record.file_id,
+                record.path,
+                record.name,
+                record.kind,
+                record.source,
                 record.deleted_at.as_deref()
             ],
         )?;

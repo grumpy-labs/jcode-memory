@@ -2,7 +2,7 @@
 
 Status date: 2026-05-11
 
-This note records the first Phase 5 storage proof for the jcode nervous-system
+This note records the Phase 5 storage proof for the jcode nervous-system
 broker. It is intentionally evidence-oriented: the winner should be chosen by
 broker-shaped access patterns, not by generic database enthusiasm.
 
@@ -13,9 +13,10 @@ SQL, Parquet, data science tooling, visualization integrations, and a large
 extension surface. SurrealDB remains the validated operational baseline until a
 jcode-shaped proof displaces it.
 
-The likely architecture is still hybrid:
+The selected §8.1-§8.2 architecture is hybrid:
 
-- Operational graph/search store behind the jcode broker storage boundary.
+- DuckDB-first operational graph/search/index store behind the jcode broker
+  storage boundary and single-writer service.
 - DuckDB/Parquet analytical mirror for data science, reporting, evaluation, and
   bulk graph/corpus analysis.
 - Source-of-truth raw Vault files on the gateway Vault, with graph/index records
@@ -89,6 +90,23 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -q \
   --features duckdb-storage
 cargo test -q --no-default-features --features duckdb-storage-bundled \
   broker_ingest_vault_writes_normalized_duckdb_store
+cargo test -q --no-default-features --features duckdb-storage-bundled \
+  broker_context_prefers_semantic_vault_chunks_when_embeddings_are_available
+```
+
+Live isolated whole-Vault model smoke shape:
+
+```bash
+tmpdir=$(mktemp -d /tmp/jcode-vault-smoke.XXXXXX)
+JCODE_HOME="$tmpdir/jcode-home" target/debug/jcode broker ingest-vault \
+  --vault /Users/rob/Vault --db "$tmpdir/broker.duckdb" --json
+JCODE_HOME="$tmpdir/jcode-home" target/debug/jcode broker embed-vault \
+  --db "$tmpdir/broker.duckdb" --limit 100000 --json
+JCODE_HOME="$tmpdir/jcode-home" target/debug/jcode broker query-vault \
+  --db "$tmpdir/broker.duckdb" \
+  --query "DuckDB graph memory provider Vault ingestion" \
+  --semantic --limit 3 --json
+rm -rf "$tmpdir"
 ```
 
 The probe uses a tiny corpus that models the broker/Vault records this project
@@ -154,8 +172,10 @@ Rust storage-boundary proof:
 | Rust context/tombstone boundary | Pass | `query_vault_chunks` returns chunk context metadata from normalized tables and hides tombstoned file records from active context. |
 | Broker context integration | Pass | With `duckdb-storage` and `JCODE_BROKER_DUCKDB_PATH`, `broker_context.items` can include `vault_chunk`, `vault_task`, and `vault_link` items from normalized DuckDB rows. |
 | Rust backup/restore proof | Pass | The normalized broker service checkpoints and copies a DuckDB file, then reopens a restored copy with context rows intact. |
-| Rust Vault ingestion/reconciliation writer | Pass | `jcode broker ingest-vault` reconciles a Vault into the normalized DuckDB broker store, with update/delete tombstones and checksum-based rename identity preservation covered by focused tests. A whole-Vault command smoke imported `/Users/rob/Vault` into a temp DuckDB file with 450 files, 4,976 chunks, 1,091 links, 1,648 tasks, and 7,715 graph edges. |
-| Rust Vault embedding boundary | Pass | The normalized broker service stores `vault_embedding` records, lists chunks missing current embeddings by model label/checksum, ranks stored vectors by cosine similarity, and deletes stale vectors when file records are replaced. `jcode broker embed-vault` now backfills missing chunks through the jcode embedding facade; a live model-enabled whole-Vault run is still pending. |
+| Rust Vault ingestion/reconciliation writer | Pass | `jcode broker ingest-vault` reconciles a Vault into the normalized DuckDB broker store, with update/delete tombstones and checksum-based rename identity preservation covered by focused tests. A whole-Vault command smoke imported `/Users/rob/Vault` into a temp DuckDB file with 450 files, 4,976 chunks, 1,091 links, 1,695 tasks, 415 summaries, 1,431 entities, and 9,608 graph edges. |
+| Rust Vault summaries/entities | Pass | Ingestion now writes `vault_summary` and `vault_entity` records plus `SummaryOf` and `EntityOf` graph edges so Vault notes have lightweight derived context records before ambient mode. |
+| Rust Vault embedding boundary | Pass | The normalized broker service stores `vault_embedding` records, lists chunks missing current embeddings by model label/checksum, ranks stored vectors by cosine similarity, and deletes stale vectors when file records are replaced. `jcode broker embed-vault` backfilled all 4,976 chunks from the isolated whole-Vault DuckDB store using the local `jcode-local-embedding` model. |
+| Semantic Vault query smoke | Pass | `jcode broker query-vault --semantic --query "DuckDB graph memory provider Vault ingestion"` returned scored note hits from the isolated whole-Vault store, including `SurrealDB-MCP-Evaluation.md` and `Knowledge-Graph-Architecture.md`. |
 
 ## What This Means
 
@@ -175,7 +195,8 @@ operational path. We can keep graph records in plain DuckDB tables and use
 recursive SQL path queries for core broker traversal while DuckPGQ remains a
 future ergonomics/performance enhancement.
 
-DuckDB is not yet fully proven as the operational broker store:
+DuckDB is now proven enough to be the first §8.1-§8.2 operational broker
+store for Vault ingestion and retrieval:
 
 - Native DuckDB writes are single-writer-process oriented.
 - DuckDB is optimized for analytical and bulk workloads, not many tiny
@@ -186,8 +207,9 @@ DuckDB is not yet fully proven as the operational broker store:
 - DuckPGQ is not available in this local DuckDB/osx_arm64 proof, so graph
   extension ergonomics remain unproven here.
 - The first normalized Rust DuckDB broker store now exists for Vault files,
-  chunks, links, tasks, and graph edges. The live broker can read `vault_chunk`,
-  `vault_task`, and `vault_link` context from it when `duckdb-storage` is enabled and
+  chunks, links, tasks, summaries, entities, embeddings, and graph edges. The
+  live broker can read `vault_chunk`, `vault_task`, `vault_link`, and semantic
+  chunk context from it when `duckdb-storage` is enabled and
   `JCODE_BROKER_DUCKDB_PATH` points at the broker database.
 - The Rust CLI production writer can reconcile a Vault into that normalized
   store with `jcode broker ingest-vault --vault ... --db ...`, and `--watch`
@@ -195,30 +217,26 @@ DuckDB is not yet fully proven as the operational broker store:
 - The Rust store now has checksum-aware `vault_embedding` records, semantic
   query over stored vectors, and a `jcode broker embed-vault` backfill command
   that uses the jcode embedding facade when the embedding stack is available.
-- A live model-enabled whole-Vault embedding smoke, native filesystem-event
-  watching, real FTS/vector index acceleration, summaries/entities, and JSON
-  graph migration are still pending.
+- Native filesystem-event watching, real FTS/vector index acceleration, and
+  conversational JSON graph migration are still pending hardening/migration work,
+  not blockers for the §8.2 review gate.
 
 ## Recommendation
 
-Keep DuckDB in first position. The no-DuckPGQ path plus durable-file service
-proof was strong enough to start the Rust storage boundary work, and the first
-opt-in Rust boundary now exists. The broker now uses a Rust single-writer service
-with normalized Vault/context tables for the proof path; do not make DuckDB the
-canonical operational DB until the remaining live-service concerns below are
-closed, but stop treating either DuckPGQ availability or lack of a separate graph
-server as a blocker.
+Keep DuckDB in first position and treat it as the selected §8.1-§8.2 foundation
+for the jcode broker's Vault index. The no-DuckPGQ path, durable-file service,
+Rust storage boundary, normalized Vault tables, model-backed embedding backfill,
+and semantic query smoke are now strong enough for Rob review before §8.3.
 
-Next DuckDB proof requirements:
+Next DuckDB hardening requirements:
 
 - repeated small writes under broker-like concurrency on a larger corpus
 - native filesystem-event watch/reconciliation, if polling is not enough
 - index refresh timing for FTS/vector
 - rebuild-from-source behavior from the source Vault
-- live model-enabled embedding backfill for whole-Vault chunks
 - DB-native vector-index acceleration only if benchmarks justify it
 - migration of JSON memory graph reads behind the same storage boundary
 
-Keep SurrealDB as the current operational baseline until DuckDB passes those
-Rust integration tests. Even if DuckDB does not become the operational graph
-store, keep DuckDB/Parquet as a first-class analytical mirror.
+Keep SurrealDB as the fallback if DuckDB fails a later operational requirement.
+Even if another graph store is introduced later, keep DuckDB/Parquet as a
+first-class analytical mirror.

@@ -165,6 +165,31 @@ fn run_broker_embed_vault(
     Ok(())
 }
 
+#[cfg(feature = "duckdb-storage")]
+fn run_broker_query_vault(
+    db: Option<String>,
+    query: String,
+    limit: usize,
+    semantic: bool,
+    model: String,
+    json: bool,
+) -> Result<()> {
+    let db_path = broker_vault_db_path(db.as_deref())?;
+    let service = jcode_storage::duckdb_broker_store::DuckDbBrokerStoreService::start(&db_path)?;
+
+    if semantic {
+        let query_embedding = crate::embedding::embed(&query)
+            .with_context(|| format!("failed to embed Vault query {query:?}"))?;
+        let hits = service.query_vault_chunks_by_embedding(&model, &query_embedding, limit)?;
+        return print_broker_vault_semantic_query_report(
+            &db_path, &query, &model, limit, &hits, json,
+        );
+    }
+
+    let hits = service.query_vault_chunks(&query, limit)?;
+    print_broker_vault_lexical_query_report(&db_path, &query, limit, &hits, json)
+}
+
 #[cfg(not(feature = "duckdb-storage"))]
 fn run_broker_embed_vault(
     _db: Option<String>,
@@ -174,6 +199,20 @@ fn run_broker_embed_vault(
 ) -> Result<()> {
     Err(anyhow::anyhow!(
         "broker embed-vault requires the duckdb-storage feature"
+    ))
+}
+
+#[cfg(not(feature = "duckdb-storage"))]
+fn run_broker_query_vault(
+    _db: Option<String>,
+    _query: String,
+    _limit: usize,
+    _semantic: bool,
+    _model: String,
+    _json: bool,
+) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "broker query-vault requires the duckdb-storage feature"
     ))
 }
 
@@ -244,6 +283,10 @@ fn print_broker_vault_ingestion_report(
                     "active_vault_link": report.counts.active_vault_link,
                     "vault_task": report.counts.vault_task,
                     "active_vault_task": report.counts.active_vault_task,
+                    "vault_summary": report.counts.vault_summary,
+                    "active_vault_summary": report.counts.active_vault_summary,
+                    "vault_entity": report.counts.vault_entity,
+                    "active_vault_entity": report.counts.active_vault_entity,
                     "vault_embedding": report.counts.vault_embedding,
                     "active_vault_embedding": report.counts.active_vault_embedding,
                     "graph_edge": report.counts.graph_edge,
@@ -255,7 +298,7 @@ fn print_broker_vault_ingestion_report(
     }
 
     output::stderr_info(format!(
-        "Vault ingest reconciled {} into {}: new={}, updated={}, unchanged={}, tombstoned={}, renamed={}, active_files={}, active_chunks={}, active_links={}, active_tasks={}",
+        "Vault ingest reconciled {} into {}: new={}, updated={}, unchanged={}, tombstoned={}, renamed={}, active_files={}, active_chunks={}, active_links={}, active_tasks={}, active_summaries={}, active_entities={}",
         vault_path.display(),
         db_path.display(),
         report.new_files,
@@ -267,7 +310,101 @@ fn print_broker_vault_ingestion_report(
         report.counts.active_vault_chunk,
         report.counts.active_vault_link,
         report.counts.active_vault_task,
+        report.counts.active_vault_summary,
+        report.counts.active_vault_entity,
     ));
+    Ok(())
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn print_broker_vault_semantic_query_report(
+    db_path: &std::path::Path,
+    query: &str,
+    model: &str,
+    limit: usize,
+    hits: &[jcode_storage::duckdb_broker_store::VaultChunkEmbeddingHit],
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "db": db_path.display().to_string(),
+                "query": query,
+                "model": model,
+                "limit": limit,
+                "retrieval_mode": "semantic",
+                "hits": hits.iter().map(|hit| {
+                    serde_json::json!({
+                        "id": hit.id,
+                        "file_id": hit.file_id,
+                        "path": hit.path,
+                        "title": hit.title,
+                        "heading": hit.heading,
+                        "start_line": hit.start_line,
+                        "end_line": hit.end_line,
+                        "score": hit.score,
+                        "embedding_model": hit.embedding_model,
+                        "source_checksum": hit.source_checksum,
+                        "content": hit.content,
+                    })
+                }).collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(());
+    }
+
+    for hit in hits {
+        println!(
+            "{:.4}\t{}\t{}:{}\t{}",
+            hit.score, hit.path, hit.start_line, hit.end_line, hit.heading
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn print_broker_vault_lexical_query_report(
+    db_path: &std::path::Path,
+    query: &str,
+    limit: usize,
+    hits: &[jcode_storage::duckdb_broker_store::VaultChunkContextRow],
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "db": db_path.display().to_string(),
+                "query": query,
+                "limit": limit,
+                "retrieval_mode": "lexical",
+                "hits": hits.iter().map(|hit| {
+                    serde_json::json!({
+                        "id": hit.id,
+                        "file_id": hit.file_id,
+                        "path": hit.path,
+                        "title": hit.title,
+                        "heading": hit.heading,
+                        "start_line": hit.start_line,
+                        "end_line": hit.end_line,
+                        "score": hit.score,
+                        "matched_terms": hit.matched_terms,
+                        "source_checksum": hit.source_checksum,
+                        "content": hit.content,
+                    })
+                }).collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(());
+    }
+
+    for hit in hits {
+        println!(
+            "{:.4}\t{}\t{}:{}\t{}",
+            hit.score, hit.path, hit.start_line, hit.end_line, hit.heading
+        );
+    }
     Ok(())
 }
 
@@ -369,6 +506,16 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             json,
         })) => {
             run_broker_embed_vault(db, model, limit, json)?;
+        }
+        Some(Command::Broker(BrokerCommand::QueryVault {
+            db,
+            query,
+            limit,
+            semantic,
+            model,
+            json,
+        })) => {
+            run_broker_query_vault(db, query, limit, semantic, model, json)?;
         }
         Some(Command::Connect) => {
             tui_launch::run_client().await?;
