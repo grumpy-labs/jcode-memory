@@ -61,8 +61,11 @@ mod tests {
         assert!(help.contains("TESTER COMMANDS"));
         assert!(help.contains("message_async:<text>"));
         assert!(help.contains("client:frame"));
+        assert!(help.contains("interrupts"));
+        assert!(help.contains("clear_interrupts"));
         assert!(help.contains("ambient:garden"));
         assert!(help.contains("ambient:safety:classify"));
+        assert!(help.contains("ambient:permission:inbox"));
     }
 
     #[test]

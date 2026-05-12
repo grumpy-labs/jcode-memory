@@ -27,6 +27,10 @@ SERVER COMMANDS (server: prefix or no prefix):
   swarm_message:<text>     - Plan and run subtasks via swarm workers, then integrate
   swarm_message_async:<text> - Async swarm message (returns job id)
   tool:<name> <json>       - Execute tool directly
+  queue_interrupt:<text>   - Queue a non-urgent soft interrupt
+  queue_interrupt_urgent:<text> - Queue an urgent soft interrupt
+  interrupts               - Show pending soft-interrupt status for the target session
+  clear_interrupts         - Clear pending soft interrupts for the target session
   cancel                   - Cancel in-flight generation (urgent interrupt)
   clear                    - Clear conversation history
   agent:info               - Get comprehensive agent internal state
@@ -91,6 +95,7 @@ AMBIENT COMMANDS (ambient: prefix):
   ambient:garden              - Read-only broker index garden report
   ambient:garden:apply[:kind] - Explicit garden apply actions: all, embeddings, duplicates, tombstones, facts, retroactive
   ambient:safety:classify:<a> - Show safety tier/category for an action
+  ambient:permission:inbox   - Show the next pending permission as one review card
   ambient:permissions         - List pending permission requests
   ambient:approve:<id>        - Approve a permission request
   ambient:deny:<id> [reason]  - Deny a permission request (optional reason)

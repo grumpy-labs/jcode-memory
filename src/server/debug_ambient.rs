@@ -1,6 +1,8 @@
 use crate::ambient_runner::AmbientRunnerHandle;
 use crate::provider::Provider;
+use crate::safety::{PermissionRequest, Urgency};
 use anyhow::Result;
+use chrono::Utc;
 use std::sync::Arc;
 
 pub(super) async fn maybe_handle_ambient_command(
@@ -144,6 +146,26 @@ pub(super) async fn maybe_handle_ambient_command(
         return Ok(Some(output));
     }
 
+    if cmd == "ambient:permission:inbox" || cmd == "ambient:inbox" {
+        let output = if let Some(runner) = ambient_runner {
+            let _ = runner
+                .safety()
+                .expire_dead_session_requests("debug_socket_gc");
+            let pending = runner.safety().pending_requests();
+            serde_json::to_string_pretty(&permission_inbox_payload(&pending))
+                .unwrap_or_else(|_| "{}".to_string())
+        } else {
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "disabled",
+                "pending_count": 0,
+                "card": null,
+                "message": "Ambient mode is not enabled"
+            }))
+            .unwrap_or_else(|_| "{}".to_string())
+        };
+        return Ok(Some(output));
+    }
+
     if cmd.starts_with("ambient:approve:") {
         let request_id = cmd.strip_prefix("ambient:approve:").unwrap_or("").trim();
         if request_id.is_empty() {
@@ -215,6 +237,7 @@ pub(super) async fn maybe_handle_ambient_command(
   ambient:garden              - Read-only broker index garden report
   ambient:garden:apply[:kind] - Explicitly apply garden actions: all, embeddings, duplicates, tombstones, facts, retroactive
   ambient:safety:classify:<a> - Show safety tier/category for an action
+  ambient:permission:inbox   - Show the next pending permission as one review card
   ambient:permissions         - List pending permission requests
   ambient:approve:<id>        - Approve a permission request
   ambient:deny:<id> [reason]  - Deny a permission request (optional reason)
@@ -225,4 +248,141 @@ pub(super) async fn maybe_handle_ambient_command(
     }
 
     Ok(None)
+}
+
+fn permission_inbox_payload(pending: &[PermissionRequest]) -> serde_json::Value {
+    let now = Utc::now();
+    let first = pending.first().map(|request| {
+        let review = request.context.as_ref().and_then(|ctx| ctx.get("review"));
+        let summary = review
+            .and_then(|review| review.get("summary"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&request.description);
+        let why_permission_needed = review
+            .and_then(|review| review.get("why_permission_needed"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&request.rationale);
+        let safety = review
+            .and_then(|review| review.get("safety"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let age_seconds = now
+            .signed_duration_since(request.created_at)
+            .num_seconds()
+            .max(0);
+
+        serde_json::json!({
+            "id": request.id,
+            "action": request.action,
+            "summary": summary,
+            "why_permission_needed": why_permission_needed,
+            "urgency": urgency_label(request.urgency),
+            "age_seconds": age_seconds,
+            "safety": safety,
+            "approve_command": format!("ambient:approve:{}", request.id),
+            "deny_command": format!("ambient:deny:{} <reason>", request.id),
+        })
+    });
+
+    serde_json::json!({
+        "status": if pending.is_empty() { "empty" } else { "pending" },
+        "pending_count": pending.len(),
+        "card": first,
+    })
+}
+
+fn urgency_label(urgency: Urgency) -> &'static str {
+    match urgency {
+        Urgency::Low => "low",
+        Urgency::Normal => "normal",
+        Urgency::High => "high",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::safety::{PermissionRequest, Urgency};
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn permission_inbox_payload_reports_empty_state() {
+        let payload = permission_inbox_payload(&[]);
+        assert_eq!(
+            payload.get("status").and_then(|v| v.as_str()),
+            Some("empty")
+        );
+        assert_eq!(
+            payload.get("pending_count").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert!(payload.get("card").is_some_and(|v| v.is_null()));
+    }
+
+    #[test]
+    fn permission_inbox_payload_formats_single_review_card() {
+        let request = PermissionRequest {
+            id: "req_permission_card".to_string(),
+            action: "send_message".to_string(),
+            description: "Send a status note".to_string(),
+            rationale: "External communication".to_string(),
+            urgency: Urgency::High,
+            wait: false,
+            created_at: Utc::now() - Duration::seconds(12),
+            context: Some(serde_json::json!({
+                "review": {
+                    "summary": "Tell Rob the import finished",
+                    "why_permission_needed": "This sends a human-facing Telegram message",
+                    "safety": {
+                        "tier": "requires_permission",
+                        "category": "external_communication",
+                        "requires_permission": true
+                    }
+                }
+            })),
+        };
+
+        let payload = permission_inbox_payload(&[request]);
+        assert_eq!(
+            payload.get("status").and_then(|v| v.as_str()),
+            Some("pending")
+        );
+        assert_eq!(
+            payload.get("pending_count").and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        let card = payload.get("card").expect("card present");
+        assert_eq!(
+            card.get("id").and_then(|v| v.as_str()),
+            Some("req_permission_card")
+        );
+        assert_eq!(
+            card.get("action").and_then(|v| v.as_str()),
+            Some("send_message")
+        );
+        assert_eq!(
+            card.get("summary").and_then(|v| v.as_str()),
+            Some("Tell Rob the import finished")
+        );
+        assert_eq!(card.get("urgency").and_then(|v| v.as_str()), Some("high"));
+        assert_eq!(
+            card.get("approve_command").and_then(|v| v.as_str()),
+            Some("ambient:approve:req_permission_card")
+        );
+        assert_eq!(
+            card.get("deny_command").and_then(|v| v.as_str()),
+            Some("ambient:deny:req_permission_card <reason>")
+        );
+        assert_eq!(
+            card.get("safety")
+                .and_then(|v| v.get("category"))
+                .and_then(|v| v.as_str()),
+            Some("external_communication")
+        );
+        assert!(
+            card.get("age_seconds")
+                .and_then(|v| v.as_i64())
+                .is_some_and(|age| age >= 0)
+        );
+    }
 }

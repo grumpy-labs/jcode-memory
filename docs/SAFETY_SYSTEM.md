@@ -95,6 +95,8 @@ The v1 classifier exposes:
 
 The debug socket also supports `ambient:safety:classify:<action>` so operators can inspect the current tier/category without starting a cycle.
 
+The minimal review UX is `ambient:permission:inbox`: it returns either an empty state or a single review card for the next pending permission request. The card includes request id, action, summary, why permission is needed, urgency, safety metadata, age, and exact `ambient:approve:<id>` / `ambient:deny:<id> <reason>` commands.
+
 ### Tier 1: Auto-Allowed (no permission needed)
 
 Actions that are local, reversible, and don't affect anything outside the project sandbox.
@@ -518,7 +520,7 @@ pub enum Urgency {
 
 ### Phase 3: Review Interfaces
 - [ ] TUI review panel
-- [x] Debug socket commands (`ambient:permissions`, `ambient:approve:<id>`, `ambient:deny:<id>`, `ambient:safety:classify:<action>`)
+- [x] Debug socket commands (`ambient:permission:inbox`, `ambient:permissions`, `ambient:approve:<id>`, `ambient:deny:<id>`, `ambient:safety:classify:<action>`)
 - [ ] CLI commands (`jcode safety review/list/approve/deny/log`)
 - [ ] Email approve/deny links (relay service)
 

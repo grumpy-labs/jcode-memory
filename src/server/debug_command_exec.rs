@@ -5,6 +5,7 @@ use super::{ServerIdentity, SessionControlHandle, SessionInterruptQueues};
 use crate::agent::Agent;
 use crate::build;
 use crate::mcp::McpConfig;
+use crate::server::state::enqueue_soft_interrupt;
 use anyhow::Result;
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
 use std::collections::{BTreeMap, HashMap};
@@ -41,6 +42,72 @@ impl DebugInterruptContext {
             signal,
         ))
     }
+
+    async fn queue_soft_interrupt(
+        &self,
+        content: String,
+        urgent: bool,
+        source: SoftInterruptSource,
+    ) -> Option<bool> {
+        let queue = self
+            .soft_interrupt_queues
+            .read()
+            .await
+            .get(&self.session_id)
+            .cloned()?;
+        Some(enqueue_soft_interrupt(&queue, content, urgent, source))
+    }
+
+    async fn soft_interrupts_snapshot(&self) -> Option<(usize, bool, Vec<(String, bool)>)> {
+        let queue = self
+            .soft_interrupt_queues
+            .read()
+            .await
+            .get(&self.session_id)
+            .cloned()?;
+        let pending = queue.lock().ok()?;
+        let pending_count = pending.len();
+        let has_urgent = pending.iter().any(|message| message.urgent);
+        let preview = pending
+            .iter()
+            .take(10)
+            .map(|message| {
+                let preview = if message.content.len() > 100 {
+                    format!("{}...", crate::util::truncate_str(&message.content, 100))
+                } else {
+                    message.content.clone()
+                };
+                (preview, message.urgent)
+            })
+            .collect();
+        Some((pending_count, has_urgent, preview))
+    }
+
+    async fn clear_soft_interrupts(&self) -> Option<()> {
+        let queue = self
+            .soft_interrupt_queues
+            .read()
+            .await
+            .get(&self.session_id)
+            .cloned()?;
+        queue.lock().ok()?.clear();
+        Some(())
+    }
+}
+
+fn soft_interrupt_status_payload(
+    session_id: &str,
+    pending_count: usize,
+    has_urgent: bool,
+    preview: Vec<(String, bool)>,
+) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "session_id": session_id,
+        "pending_count": pending_count,
+        "has_urgent": has_urgent,
+        "soft_interrupts": preview,
+    }))
+    .unwrap_or_else(|_| "{}".to_string())
 }
 
 pub(super) async fn resolve_debug_session(
@@ -157,6 +224,14 @@ pub(super) async fn execute_debug_command(
         if content.is_empty() {
             return Err(anyhow::anyhow!("queue_interrupt: requires content"));
         }
+        if let Some(ctx) = &interrupt_context
+            && ctx
+                .queue_soft_interrupt(content.to_string(), false, SoftInterruptSource::User)
+                .await
+                .unwrap_or(false)
+        {
+            return Ok("queued".to_string());
+        }
         let agent = agent.lock().await;
         agent.queue_soft_interrupt(content.to_string(), false, SoftInterruptSource::User);
         return Ok("queued".to_string());
@@ -170,9 +245,62 @@ pub(super) async fn execute_debug_command(
         if content.is_empty() {
             return Err(anyhow::anyhow!("queue_interrupt_urgent: requires content"));
         }
+        if let Some(ctx) = &interrupt_context
+            && ctx
+                .queue_soft_interrupt(content.to_string(), true, SoftInterruptSource::User)
+                .await
+                .unwrap_or(false)
+        {
+            return Ok("queued (urgent)".to_string());
+        }
         let agent = agent.lock().await;
         agent.queue_soft_interrupt(content.to_string(), true, SoftInterruptSource::User);
         return Ok("queued (urgent)".to_string());
+    }
+
+    if trimmed == "interrupts" || trimmed == "soft_interrupts" {
+        if let Some(ctx) = &interrupt_context
+            && let Some((pending_count, has_urgent, preview)) = ctx.soft_interrupts_snapshot().await
+        {
+            return Ok(soft_interrupt_status_payload(
+                &ctx.session_id,
+                pending_count,
+                has_urgent,
+                preview,
+            ));
+        }
+        let agent = agent.lock().await;
+        let preview = agent.soft_interrupts_preview();
+        return Ok(soft_interrupt_status_payload(
+            agent.session_id(),
+            agent.soft_interrupt_count(),
+            agent.has_urgent_interrupt(),
+            preview,
+        ));
+    }
+
+    if trimmed == "clear_interrupts" || trimmed == "clear_soft_interrupts" {
+        if let Some(ctx) = &interrupt_context
+            && ctx.clear_soft_interrupts().await.is_some()
+        {
+            let _ = crate::soft_interrupt_store::clear(&ctx.session_id);
+            return Ok(serde_json::json!({
+                "status": "cleared",
+                "session_id": ctx.session_id,
+            })
+            .to_string());
+        }
+        let agent = agent.lock().await;
+        let queue = agent.soft_interrupt_queue();
+        if let Ok(mut pending) = queue.lock() {
+            pending.clear();
+        }
+        let _ = crate::soft_interrupt_store::clear(agent.session_id());
+        return Ok(serde_json::json!({
+            "status": "cleared",
+            "session_id": agent.session_id(),
+        })
+        .to_string());
     }
 
     if trimmed.starts_with("tool:") {
@@ -502,7 +630,7 @@ pub(super) async fn execute_debug_command(
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, usage, history, tools, tools:full, mcp:servers, mcp:tools, mcp:connect:<server> <json>, mcp:disconnect:<server>, mcp:reload, mcp:call:<server>:<tool> <json>, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, agent:info, agent:memory, allocator, allocator:profile:on, allocator:profile:off, allocator:profile:prefix:<prefix>, allocator:profile:dump [path], jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, create_session:selfdev:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
+            "debug commands: state, usage, history, tools, tools:full, mcp:servers, mcp:tools, mcp:connect:<server> <json>, mcp:disconnect:<server>, mcp:reload, mcp:call:<server>:<tool> <json>, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, interrupts, clear_interrupts, agent:info, agent:memory, allocator, allocator:profile:on, allocator:profile:off, allocator:profile:prefix:<prefix>, allocator:profile:dump [path], jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, create_session:selfdev:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
         );
     }
 
@@ -624,7 +752,7 @@ mod tests {
     use crate::tool::Registry;
     use anyhow::Result;
     use async_trait::async_trait;
-    use jcode_agent_runtime::InterruptSignal;
+    use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -786,5 +914,112 @@ mod tests {
         let pending = queue.lock().expect("queue lock should not be poisoned");
         assert_eq!(pending.len(), 1);
         assert!(pending[0].urgent);
+    }
+
+    #[tokio::test]
+    async fn debug_queue_interrupt_does_not_wait_for_busy_agent_lock() {
+        let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(AsyncMutex::new(Agent::new(provider, registry)));
+        let session_id = agent.lock().await.session_id().to_string();
+
+        let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let signal = InterruptSignal::new();
+        let shutdown_signals = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), signal)])));
+        let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::from([(
+            session_id.clone(),
+            queue.clone(),
+        )])));
+
+        let _busy_agent_lock = agent.lock().await;
+        let output = tokio::time::timeout(
+            Duration::from_millis(200),
+            execute_debug_command(
+                Arc::clone(&agent),
+                "queue_interrupt:please adjust course",
+                Arc::new(RwLock::new(HashMap::new())),
+                None,
+                Some(DebugInterruptContext {
+                    session_id,
+                    shutdown_signals,
+                    soft_interrupt_queues,
+                }),
+            ),
+        )
+        .await
+        .expect("debug queue_interrupt should not block on the busy agent lock")
+        .expect("debug queue_interrupt should succeed");
+
+        assert!(output.contains("queued"));
+        let pending = queue.lock().expect("queue lock should not be poisoned");
+        assert_eq!(pending.len(), 1);
+        assert!(!pending[0].urgent);
+        assert_eq!(pending[0].content, "please adjust course");
+    }
+
+    #[tokio::test]
+    async fn debug_interrupts_status_and_clear_use_control_queue() {
+        let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(AsyncMutex::new(Agent::new(provider, registry)));
+        let session_id = agent.lock().await.session_id().to_string();
+
+        let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+        {
+            let mut pending = queue.lock().expect("queue lock");
+            pending.push(jcode_agent_runtime::SoftInterruptMessage {
+                content: "first".to_string(),
+                urgent: false,
+                source: SoftInterruptSource::User,
+            });
+            pending.push(jcode_agent_runtime::SoftInterruptMessage {
+                content: "urgent".to_string(),
+                urgent: true,
+                source: SoftInterruptSource::User,
+            });
+        }
+        let signal = InterruptSignal::new();
+        let shutdown_signals = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), signal)])));
+        let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::from([(
+            session_id.clone(),
+            queue.clone(),
+        )])));
+        let context = DebugInterruptContext {
+            session_id: session_id.clone(),
+            shutdown_signals,
+            soft_interrupt_queues,
+        };
+
+        let output = execute_debug_command(
+            Arc::clone(&agent),
+            "interrupts",
+            Arc::new(RwLock::new(HashMap::new())),
+            None,
+            Some(context.clone()),
+        )
+        .await
+        .expect("interrupts should succeed");
+        let payload: serde_json::Value =
+            serde_json::from_str(&output).expect("interrupts output should be json");
+        assert_eq!(
+            payload.get("pending_count").and_then(|v| v.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            payload.get("has_urgent").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        let output = execute_debug_command(
+            agent,
+            "clear_interrupts",
+            Arc::new(RwLock::new(HashMap::new())),
+            None,
+            Some(context),
+        )
+        .await
+        .expect("clear_interrupts should succeed");
+        assert!(output.contains("cleared"));
+        assert!(queue.lock().expect("queue lock").is_empty());
     }
 }

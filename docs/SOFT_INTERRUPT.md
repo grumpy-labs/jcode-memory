@@ -1,10 +1,13 @@
 # Soft Interrupt: Seamless Message Injection
 
+> **Status:** Implemented for the standalone jcode harness/operator path.
+> **Updated:** 2026-05-12
+
 ## Overview
 
 Soft interrupt allows users to inject messages into an ongoing AI conversation without cancelling the current generation. Instead of the disruptive cancel-and-restart flow, messages are queued and naturally incorporated at safe points where the model provider connection is idle.
 
-## Current Behavior (Hard Interrupt)
+## Current Behavior (Hard Interrupt Fallback)
 
 ```
 User types message during AI processing
@@ -13,7 +16,7 @@ User types message during AI processing
     ToolDone event
          │
          ▼
-    remote.cancel()  ← Cancels current generation
+    remote.cancel()  <-- Cancels current generation
          │
          ▼
     Wait for Done event
@@ -31,7 +34,7 @@ User types message during AI processing
 - Full context re-send on new API call
 - Jarring user experience
 
-## New Behavior (Soft Interrupt)
+## Implemented Behavior (Soft Interrupt)
 
 ```
 User types message during AI processing
@@ -78,7 +81,7 @@ loop {
     // 4. Check if tool calls exist
     if tool_calls.is_empty() {
         // ═══════════════════════════════════════════════
-        // ✅ INJECTION POINT B: No tools, turn complete
+        // INJECTION POINT B: No tools, turn complete
         // ═══════════════════════════════════════════════
         break;
     }
@@ -89,13 +92,13 @@ loop {
         // Add result to history...
 
         // ═══════════════════════════════════════════════
-        // ✅ INJECTION POINT C: Between tool executions
+        // INJECTION POINT C: Between tool executions
         // (only for urgent aborts - must add skipped tool_results first)
         // ═══════════════════════════════════════════════
     }
 
     // ═══════════════════════════════════════════════
-    // ✅ INJECTION POINT D: All tools done, before next API call
+    // INJECTION POINT D: All tools done, before next API call
     // ═══════════════════════════════════════════════
 
     // Loop continues → next provider.stream() call
@@ -129,7 +132,7 @@ injection is deferred to Point D.
 ```
 Timeline:
   Provider: TextDelta... [stream ends, no tool calls]
-  Agent: ──► INJECT HERE ◄──
+  Agent: ---> INJECT HERE <---
   Agent: Would exit loop, but instead continues with user message
 
 AI sees: "I finished my response, user has follow-up"
@@ -157,8 +160,8 @@ AI sees: "Tool 1 result, user interjection, tool 2 result (or skip message)"
 
 ```
 Timeline:
-  Agent: Execute all tools → all results collected
-  Agent: ──► INJECT HERE ◄──
+  Agent: Execute all tools -> all results collected
+  Agent: ---> INJECT HERE <---
   Agent: Next API call includes: [all tool results] + [user message]
 
 AI sees: "All my tools completed, and user added context"
@@ -168,12 +171,23 @@ AI sees: "All my tools completed, and user added context"
 
 ## Implementation
 
+The current implementation is split across:
+
+- Protocol request/event contract: `crates/jcode-protocol/src/lib.rs`
+- Runtime queue/signal primitives: `crates/jcode-agent-runtime/src/lib.rs`
+- Agent queue/injection logic: `src/agent/interrupts.rs`
+- Streaming injection points: `src/agent/turn_streaming_mpsc.rs` and `src/agent/turn_streaming_broadcast.rs`
+- Headless loop injection: `src/agent/turn_loops.rs`
+- Server request handling: `src/server/client_lifecycle.rs`
+- Debug/operator controls: `src/server/debug_command_exec.rs`
+- TUI pending preview cleanup: `src/tui/app/remote/queue_recovery.rs`
+
 ### Protocol Changes
 
 Add new request type for soft interrupt:
 
 ```rust
-// src/protocol.rs
+// crates/jcode-protocol/src/lib.rs
 #[serde(rename = "soft_interrupt")]
 SoftInterrupt {
     id: u64,
@@ -188,47 +202,30 @@ SoftInterrupt {
 Add soft interrupt queue and check at each injection point:
 
 ```rust
-// src/agent.rs
-pub struct Agent {
-    // ... existing fields
-    soft_interrupt_queue: Vec<SoftInterruptMessage>,
-}
-
-struct SoftInterruptMessage {
-    content: String,
-    urgent: bool,
-}
-
-impl Agent {
-    /// Check and inject any pending soft interrupt messages
-    fn inject_soft_interrupts(&mut self) -> Option<String> {
-        if self.soft_interrupt_queue.is_empty() {
-            return None;
-        }
-
-        let messages: Vec<String> = self.soft_interrupt_queue
-            .drain(..)
-            .map(|m| m.content)
-            .collect();
-
-        let combined = messages.join("\n\n");
-
-        // Add as user message to conversation
-        self.add_message(Role::User, vec![ContentBlock::Text {
-            text: combined.clone(),
-            cache_control: None,
-        }]);
-        self.session.save().ok();
-
-        Some(combined)
-    }
-
-    /// Check for urgent interrupt that should abort remaining tools
-    fn has_urgent_interrupt(&self) -> bool {
-        self.soft_interrupt_queue.iter().any(|m| m.urgent)
-    }
-}
+// src/agent/interrupts.rs
+queue_soft_interrupt(content, urgent, source)
+inject_soft_interrupts()
+has_urgent_interrupt()
+soft_interrupts_preview()
 ```
+
+### Operator Commands
+
+Debug socket commands:
+
+| Command | Purpose |
+|---------|---------|
+| `queue_interrupt:<text>` | Queue a non-urgent soft interrupt without cancelling the turn. |
+| `queue_interrupt_urgent:<text>` | Queue an urgent interrupt that may skip remaining tools at point C. |
+| `interrupts` | Show pending interrupt count, urgency, and previews. |
+| `clear_interrupts` | Clear pending soft interrupts for the target session. |
+| `cancel` | Hard-stop fallback: queues an urgent cancel notice and requests graceful shutdown. |
+
+`queue_interrupt:*` uses the lock-free session-control queue when available, so a debug/operator message can be queued while the agent lock is held by an active turn.
+
+### Hermes Provider Boundary
+
+Soft interrupt remains a standalone jcode harness/operator feature for now. The Hermes `jcode_graph` memory provider does not depend on soft interrupt for memory sync, Vault retrieval, safety, or ambient garden work. If Hermes later exposes a safe mid-turn injection seam, the provider can map that seam to the same protocol/request model without changing broker memory contracts.
 
 ### Injection Point Implementation
 
