@@ -508,7 +508,7 @@ fn test_ambient_config_defaults() {
     assert_eq!(config.min_interval_minutes, 5);
     assert_eq!(config.max_interval_minutes, 120);
     assert!(config.pause_on_active_session);
-    assert!(config.proactive_work);
+    assert!(!config.proactive_work);
     assert_eq!(config.work_branch_prefix, "ambient/");
     assert!(config.provider.is_none());
     assert!(config.model.is_none());

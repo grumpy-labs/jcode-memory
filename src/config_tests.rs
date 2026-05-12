@@ -40,6 +40,11 @@ fn test_ambient_visible_defaults_to_true() {
 }
 
 #[test]
+fn test_ambient_proactive_work_defaults_to_garden_only() {
+    assert!(!AmbientConfig::default().proactive_work);
+}
+
+#[test]
 fn test_display_auto_server_reload_defaults_to_true() {
     assert!(DisplayConfig::default().auto_server_reload);
 }

@@ -88,6 +88,7 @@ AMBIENT COMMANDS (ambient: prefix):
   ambient:queue               - Scheduled queue contents with target/session metadata
   ambient:trigger             - Manually trigger an ambient cycle
   ambient:log                 - Recent transcript summaries
+  ambient:garden              - Read-only broker index garden report
   ambient:permissions         - List pending permission requests
   ambient:approve:<id>        - Approve a permission request
   ambient:deny:<id> [reason]  - Deny a permission request (optional reason)

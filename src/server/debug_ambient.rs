@@ -50,6 +50,12 @@ pub(super) async fn maybe_handle_ambient_command(
         return Ok(Some(output));
     }
 
+    if cmd == "ambient:garden" {
+        let report = crate::ambient::gather_ambient_garden_report_from_env()?;
+        let output = serde_json::to_string_pretty(&report)?;
+        return Ok(Some(output));
+    }
+
     if cmd == "ambient:permissions" {
         let output = if let Some(runner) = ambient_runner {
             let _ = runner
@@ -162,6 +168,7 @@ pub(super) async fn maybe_handle_ambient_command(
   ambient:queue               - Scheduled queue contents with target/session metadata
   ambient:trigger             - Manually trigger an ambient cycle
   ambient:log                 - Recent transcript summaries
+  ambient:garden              - Read-only broker index garden report
   ambient:permissions         - List pending permission requests
   ambient:approve:<id>        - Approve a permission request
   ambient:deny:<id> [reason]  - Deny a permission request (optional reason)

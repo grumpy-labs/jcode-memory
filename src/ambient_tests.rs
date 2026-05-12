@@ -234,6 +234,53 @@ fn test_ambient_state_record_cycle_with_schedule() {
 }
 
 #[test]
+#[cfg(feature = "duckdb-storage")]
+fn garden_report_surfaces_read_only_duckdb_vault_work_items() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let vault = temp.path().join("Vault");
+    std::fs::create_dir_all(&vault).expect("create vault");
+    std::fs::write(
+        vault.join("Alpha.md"),
+        "# Alpha\nShared garden context.\n[[Shared Ambient Topic]]\n",
+    )
+    .expect("write Alpha");
+    std::fs::write(
+        vault.join("Beta.md"),
+        "# Beta\nAnother note for garden context.\n[[Shared Ambient Topic]]\n",
+    )
+    .expect("write Beta");
+
+    let db_path = temp.path().join("broker.duckdb");
+    let service = jcode_storage::duckdb_broker_store::DuckDbBrokerStoreService::start(&db_path)
+        .expect("start broker store");
+    service.reconcile_vault_path(&vault).expect("ingest vault");
+    drop(service);
+
+    let report = gather_ambient_garden_report(Some(db_path), "test-model", 10)
+        .expect("ambient garden report");
+
+    assert_eq!(report.mode, "garden_only");
+    assert!(report.read_only);
+    assert!(!report.autonomous_actions_allowed);
+    assert!(!report.system_changes_allowed);
+    assert_eq!(report.counts.active_vault_file, 2);
+    assert_eq!(report.counts.missing_vault_chunk_embeddings, 2);
+    assert!(report.work_items.iter().any(|item| {
+        item.kind == "embedding_backfill"
+            && item.count == 2
+            && item
+                .command
+                .as_deref()
+                .is_some_and(|command| command.contains("jcode broker embed-vault"))
+    }));
+    assert!(report.work_items.iter().any(|item| {
+        item.kind == "duplicate_entity_candidate"
+            && item.count == 2
+            && item.summary.contains("Shared Ambient Topic")
+    }));
+}
+
+#[test]
 fn test_ambient_lock_release() {
     // Use a temp dir so we don't conflict with real state
     let tmp_dir = tempfile::tempdir().unwrap();

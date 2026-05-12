@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 mod directives;
+mod garden;
 mod manager;
 mod paths;
 mod persistence;
@@ -13,6 +14,10 @@ pub mod scheduler;
 
 pub use directives::{
     UserDirective, add_directive, has_pending_directives, load_directives, take_pending_directives,
+};
+pub use garden::{
+    AmbientGardenCounts, AmbientGardenReport, AmbientGardenWorkItem, gather_ambient_garden_report,
+    gather_ambient_garden_report_from_env,
 };
 pub use manager::AmbientManager;
 pub use persistence::{AmbientLock, ScheduledQueue};

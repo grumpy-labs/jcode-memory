@@ -205,6 +205,14 @@ pub struct VaultChunkEmbeddingHit {
     pub score: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultDuplicateEntityCandidate {
+    pub kind: String,
+    pub name: String,
+    pub active_file_count: i64,
+    pub paths: Vec<String>,
+}
+
 pub struct DuckDbBrokerStore {
     db_path: PathBuf,
     connection: duckdb::Connection,
@@ -500,6 +508,74 @@ impl DuckDbBrokerStore {
                 checksum: row.get(8)?,
                 source_checksum: row.get(9)?,
                 mtime_ns: row.get(10)?,
+            });
+        }
+        Ok(candidates)
+    }
+
+    pub fn count_missing_vault_chunk_embeddings(&self, embedding_model: &str) -> Result<i64> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT count(*)
+            FROM vault_chunk c
+            JOIN vault_file f ON f.id = c.file_id
+            LEFT JOIN vault_embedding e
+                ON e.record_id = c.id
+               AND e.record_kind = 'vault_chunk'
+               AND e.embedding_model = ?
+               AND e.content_checksum = c.checksum
+               AND e.source_checksum = f.checksum
+               AND e.deleted_at IS NULL
+            WHERE c.deleted_at IS NULL
+              AND f.deleted_at IS NULL
+              AND e.id IS NULL
+            "#,
+        )?;
+        let mut rows = statement.query(duckdb::params![embedding_model])?;
+        let Some(row) = rows.next()? else {
+            return Err(anyhow!("missing embedding count query returned no rows"));
+        };
+        row.get(0).map_err(Into::into)
+    }
+
+    pub fn list_duplicate_vault_entities(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<VaultDuplicateEntityCandidate>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT
+                e.kind,
+                e.name,
+                count(DISTINCT e.file_id) AS active_file_count,
+                string_agg(DISTINCT e.path, '\n' ORDER BY e.path) AS paths
+            FROM vault_entity e
+            JOIN vault_file f ON f.id = e.file_id
+            WHERE e.deleted_at IS NULL
+              AND f.deleted_at IS NULL
+            GROUP BY e.kind, e.name
+            HAVING count(DISTINCT e.file_id) > 1
+            ORDER BY active_file_count DESC, e.kind, e.name
+            LIMIT ?
+            "#,
+        )?;
+        let mut rows = statement.query(duckdb::params![limit as i64])?;
+        let mut candidates = Vec::new();
+        while let Some(row) = rows.next()? {
+            let paths: String = row.get(3)?;
+            candidates.push(VaultDuplicateEntityCandidate {
+                kind: row.get(0)?,
+                name: row.get(1)?,
+                active_file_count: row.get(2)?,
+                paths: paths
+                    .lines()
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect(),
             });
         }
         Ok(candidates)
@@ -1316,6 +1392,16 @@ impl DuckDbBrokerStoreService {
                             store.list_missing_vault_chunk_embeddings(&embedding_model, limit),
                         );
                     }
+                    BrokerStoreRequest::CountMissingVaultChunkEmbeddings {
+                        embedding_model,
+                        response,
+                    } => {
+                        let _ = response
+                            .send(store.count_missing_vault_chunk_embeddings(&embedding_model));
+                    }
+                    BrokerStoreRequest::ListDuplicateVaultEntities { limit, response } => {
+                        let _ = response.send(store.list_duplicate_vault_entities(limit));
+                    }
                     BrokerStoreRequest::QueryVaultChunksByEmbedding {
                         embedding_model,
                         query_embedding,
@@ -1406,6 +1492,18 @@ impl DuckDbBrokerStoreService {
     ) -> Result<Vec<VaultChunkEmbeddingCandidate>> {
         self.client
             .list_missing_vault_chunk_embeddings(embedding_model, limit)
+    }
+
+    pub fn count_missing_vault_chunk_embeddings(&self, embedding_model: &str) -> Result<i64> {
+        self.client
+            .count_missing_vault_chunk_embeddings(embedding_model)
+    }
+
+    pub fn list_duplicate_vault_entities(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<VaultDuplicateEntityCandidate>> {
+        self.client.list_duplicate_vault_entities(limit)
     }
 
     pub fn query_vault_chunks_by_embedding(
@@ -1535,6 +1633,22 @@ impl DuckDbBrokerStoreClient {
         )
     }
 
+    pub fn count_missing_vault_chunk_embeddings(&self, embedding_model: &str) -> Result<i64> {
+        self.request(
+            |response| BrokerStoreRequest::CountMissingVaultChunkEmbeddings {
+                embedding_model: embedding_model.to_string(),
+                response,
+            },
+        )
+    }
+
+    pub fn list_duplicate_vault_entities(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<VaultDuplicateEntityCandidate>> {
+        self.request(|response| BrokerStoreRequest::ListDuplicateVaultEntities { limit, response })
+    }
+
     pub fn query_vault_chunks_by_embedding(
         &self,
         embedding_model: &str,
@@ -1609,6 +1723,14 @@ enum BrokerStoreRequest {
         embedding_model: String,
         limit: usize,
         response: mpsc::Sender<Result<Vec<VaultChunkEmbeddingCandidate>>>,
+    },
+    CountMissingVaultChunkEmbeddings {
+        embedding_model: String,
+        response: mpsc::Sender<Result<i64>>,
+    },
+    ListDuplicateVaultEntities {
+        limit: usize,
+        response: mpsc::Sender<Result<Vec<VaultDuplicateEntityCandidate>>>,
     },
     QueryVaultChunksByEmbedding {
         embedding_model: String,

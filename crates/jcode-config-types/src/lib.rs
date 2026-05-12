@@ -626,7 +626,7 @@ pub struct AmbientConfig {
     pub max_interval_minutes: u32,
     /// Pause ambient when user has active session (default: true)
     pub pause_on_active_session: bool,
-    /// Enable proactive work vs garden-only (default: true)
+    /// Enable proactive work vs garden-only (default: false)
     pub proactive_work: bool,
     /// Proactive work branch prefix (default: "ambient/")
     pub work_branch_prefix: String,
@@ -645,7 +645,7 @@ impl Default for AmbientConfig {
             min_interval_minutes: 5,
             max_interval_minutes: 120,
             pause_on_active_session: true,
-            proactive_work: true,
+            proactive_work: false,
             work_branch_prefix: "ambient/".to_string(),
             visible: true,
         }

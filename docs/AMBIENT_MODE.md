@@ -1,7 +1,7 @@
 # Ambient Mode
 
-> **Status:** Design
-> **Updated:** 2026-02-08
+> **Status:** Design + initial garden-only broker-index report
+> **Updated:** 2026-05-11
 
 A proactive, always-on agent mode that works autonomously without user prompting. Like a brain consolidating memories during sleep, ambient mode tends to the memory graph, identifies useful work, and acts on the user's behalf — all while staying within resource limits.
 
@@ -464,6 +464,8 @@ Runs after every turn, only on memories already retrieved for relevance checking
 
 Deep consolidation that runs during ambient cycles. Has access to the full memory graph and codebase.
 
+**Current §8.3 slice:** jcode now exposes a read-only broker-index garden report through `ambient:garden`. It inspects the DuckDB broker store configured by `JCODE_BROKER_DUCKDB_PATH`, reports active Vault/index counts, surfaces missing chunk-embedding backfill work, duplicate entity candidates, and stale tombstone review candidates. It does not merge, prune, verify, write files, create PRs, or send external messages.
+
 **Operations:**
 
 | Operation | Description | Trigger |
@@ -796,8 +798,8 @@ max_interval_minutes = 120
 # Pause ambient when user has active session (default: true)
 pause_on_active_session = true
 
-# Enable proactive work (vs garden-only mode) (default: true)
-proactive_work = true
+# Enable proactive work (vs garden-only mode) (default: false)
+proactive_work = false
 
 # Proactive work branch prefix (default: "ambient/")
 work_branch_prefix = "ambient/"
@@ -922,6 +924,8 @@ This is a distributed systems problem that will be addressed once ambient is sta
 ## Implementation Phases
 
 ### Phase 1: Foundation
+- [x] Garden-only broker-index report (`ambient:garden`)
+- [x] Proactive work defaults to disabled
 - [ ] Ambient agent loop (spawn, run, sleep)
 - [ ] Single-instance guard
 - [ ] Basic scheduling (fixed interval with max ceiling)

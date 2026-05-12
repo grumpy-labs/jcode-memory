@@ -188,8 +188,8 @@ min_interval_minutes = 5
 max_interval_minutes = 120
 # Pause ambient when user has active session
 pause_on_active_session = true
-# Enable proactive work (new features, refactoring) vs garden-only (lint, format, deps)
-proactive_work = true
+# Enable proactive work (new features, refactoring) vs garden-only maintenance
+proactive_work = false
 # Branch prefix for proactive work
 work_branch_prefix = "ambient/"
 # Show ambient cycle in a terminal window (default: true)
