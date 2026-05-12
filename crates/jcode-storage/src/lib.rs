@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "duckdb-storage")]
 pub mod duckdb_broker_store;
 pub mod memory_graph_store;
+#[cfg(feature = "duckdb-storage")]
+pub mod vault_ingestion;
 
 /// Platform-aware runtime directory for sockets and ephemeral state.
 ///
@@ -382,3 +384,5 @@ pub fn append_json_line_fast<T: Serialize + ?Sized>(path: &Path, value: &T) -> R
 mod duckdb_broker_store_tests;
 #[cfg(test)]
 mod memory_graph_store_tests;
+#[cfg(all(test, feature = "duckdb-storage"))]
+mod vault_ingestion_tests;

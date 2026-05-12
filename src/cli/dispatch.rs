@@ -9,6 +9,8 @@ use super::args::{
     AmbientCommand, Args, AuthCommand, BrokerCommand, Command, MemoryCommand, ModelCommand,
     ProviderCommand, RestartCommand, SessionCommand, TranscriptModeArg,
 };
+#[cfg(feature = "duckdb-storage")]
+use crate::storage;
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
     tui,
@@ -98,6 +100,110 @@ async fn run_server_command(
     Ok(())
 }
 
+#[cfg(feature = "duckdb-storage")]
+fn run_broker_ingest_vault(
+    vault: String,
+    db: Option<String>,
+    watch: bool,
+    interval_secs: u64,
+    json: bool,
+) -> Result<()> {
+    let vault_path = std::path::PathBuf::from(vault);
+    let db_path = broker_vault_db_path(db.as_deref())?;
+    let service = jcode_storage::duckdb_broker_store::DuckDbBrokerStoreService::start(&db_path)?;
+    loop {
+        let report = service.reconcile_vault_path(&vault_path)?;
+        print_broker_vault_ingestion_report(&vault_path, &db_path, &report, json)?;
+        if !watch {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(interval_secs.max(1)));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "duckdb-storage"))]
+fn run_broker_ingest_vault(
+    _vault: String,
+    _db: Option<String>,
+    _watch: bool,
+    _interval_secs: u64,
+    _json: bool,
+) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "broker ingest-vault requires the duckdb-storage feature"
+    ))
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn broker_vault_db_path(db: Option<&str>) -> Result<std::path::PathBuf> {
+    if let Some(db) = db.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(std::path::PathBuf::from(db));
+    }
+    if let Some(db) = std::env::var_os("JCODE_BROKER_DUCKDB_PATH") {
+        return Ok(std::path::PathBuf::from(db));
+    }
+    Ok(storage::runtime_dir().join("jcode-broker.duckdb"))
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn print_broker_vault_ingestion_report(
+    vault_path: &std::path::Path,
+    db_path: &std::path::Path,
+    report: &jcode_storage::vault_ingestion::VaultIngestionReport,
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "vault": vault_path.display().to_string(),
+                "db": db_path.display().to_string(),
+                "new_files": report.new_files,
+                "updated_files": report.updated_files,
+                "unchanged_files": report.unchanged_files,
+                "tombstoned_files": report.tombstoned_files,
+                "renamed_files": report.renamed_files.iter().map(|rename| {
+                    serde_json::json!({
+                        "file_id": rename.file_id,
+                        "from_path": rename.from_path,
+                        "to_path": rename.to_path,
+                    })
+                }).collect::<Vec<_>>(),
+                "counts": {
+                    "vault_file": report.counts.vault_file,
+                    "active_vault_file": report.counts.active_vault_file,
+                    "vault_chunk": report.counts.vault_chunk,
+                    "active_vault_chunk": report.counts.active_vault_chunk,
+                    "vault_link": report.counts.vault_link,
+                    "active_vault_link": report.counts.active_vault_link,
+                    "vault_task": report.counts.vault_task,
+                    "active_vault_task": report.counts.active_vault_task,
+                    "graph_edge": report.counts.graph_edge,
+                    "active_graph_edge": report.counts.active_graph_edge,
+                },
+            }))?
+        );
+        return Ok(());
+    }
+
+    output::stderr_info(format!(
+        "Vault ingest reconciled {} into {}: new={}, updated={}, unchanged={}, tombstoned={}, renamed={}, active_files={}, active_chunks={}, active_links={}, active_tasks={}",
+        vault_path.display(),
+        db_path.display(),
+        report.new_files,
+        report.updated_files,
+        report.unchanged_files,
+        report.tombstoned_files,
+        report.renamed_files.len(),
+        report.counts.active_vault_file,
+        report.counts.active_vault_chunk,
+        report.counts.active_vault_link,
+        report.counts.active_vault_task,
+    ));
+    Ok(())
+}
+
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     resolve_resume_arg(&mut args)?;
 
@@ -141,6 +247,15 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 temp_idle_timeout_secs,
             )
             .await?;
+        }
+        Some(Command::Broker(BrokerCommand::IngestVault {
+            vault,
+            db,
+            watch,
+            interval_secs,
+            json,
+        })) => {
+            run_broker_ingest_vault(vault, db, watch, interval_secs, json)?;
         }
         Some(Command::Connect) => {
             tui_launch::run_client().await?;

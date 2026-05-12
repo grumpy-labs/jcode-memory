@@ -20,7 +20,8 @@ use tokio::sync::mpsc;
 
 #[cfg(feature = "duckdb-storage")]
 use jcode_storage::duckdb_broker_store::{
-    DuckDbBrokerStoreClient, DuckDbBrokerStoreService, VaultChunkContextRow,
+    DuckDbBrokerStoreClient, DuckDbBrokerStoreService, VaultChunkContextRow, VaultLinkContextRow,
+    VaultTaskContextRow,
 };
 
 type TranscriptExtractionFuture<'a> =
@@ -976,11 +977,37 @@ fn collect_vault_context_items(
     };
 
     let client = broker_duckdb_store_client(db_path)?;
-    let rows = client.query_vault_chunks(query, limit)?;
-    Ok(rows
+    let mut hits = Vec::new();
+    hits.extend(
+        client
+            .query_vault_chunks(query, limit)?
+            .into_iter()
+            .map(VaultContextHit::Chunk),
+    );
+    hits.extend(
+        client
+            .query_vault_tasks(query, limit)?
+            .into_iter()
+            .map(VaultContextHit::Task),
+    );
+    hits.extend(
+        client
+            .query_vault_links(query, limit)?
+            .into_iter()
+            .map(VaultContextHit::Link),
+    );
+    hits.sort_by(|left, right| {
+        right
+            .score()
+            .partial_cmp(&left.score())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.tie_breaker().cmp(&right.tie_breaker()))
+    });
+    hits.truncate(limit);
+    Ok(hits
         .iter()
         .enumerate()
-        .map(|(idx, row)| vault_chunk_broker_item(row, query, idx + 1, working_dir))
+        .map(|(idx, hit)| hit.to_broker_item(query, idx + 1, working_dir))
         .collect())
 }
 
@@ -1020,6 +1047,45 @@ fn broker_duckdb_store_client(db_path: PathBuf) -> Result<DuckDbBrokerStoreClien
         .as_ref()
         .map(|state| state.service.client())
         .context("DuckDB broker store service did not initialize")
+}
+
+#[cfg(feature = "duckdb-storage")]
+enum VaultContextHit {
+    Chunk(VaultChunkContextRow),
+    Task(VaultTaskContextRow),
+    Link(VaultLinkContextRow),
+}
+
+#[cfg(feature = "duckdb-storage")]
+impl VaultContextHit {
+    fn score(&self) -> f64 {
+        match self {
+            Self::Chunk(row) => row.score,
+            Self::Task(row) => row.score,
+            Self::Link(row) => row.score,
+        }
+    }
+
+    fn tie_breaker(&self) -> String {
+        match self {
+            Self::Chunk(row) => format!("chunk:{}:{:012}", row.path, row.start_line),
+            Self::Task(row) => format!("task:{}:{:012}", row.path, row.line),
+            Self::Link(row) => format!("link:{}:{}", row.source_path, row.target),
+        }
+    }
+
+    fn to_broker_item(
+        &self,
+        query: &str,
+        rank: usize,
+        working_dir: Option<&str>,
+    ) -> BrokerContextItem {
+        match self {
+            Self::Chunk(row) => vault_chunk_broker_item(row, query, rank, working_dir),
+            Self::Task(row) => vault_task_broker_item(row, query, rank, working_dir),
+            Self::Link(row) => vault_link_broker_item(row, query, rank, working_dir),
+        }
+    }
 }
 
 #[cfg(feature = "duckdb-storage")]
@@ -1087,11 +1153,152 @@ fn vault_chunk_broker_item(
 }
 
 #[cfg(feature = "duckdb-storage")]
+fn vault_task_broker_item(
+    row: &VaultTaskContextRow,
+    query: &str,
+    rank: usize,
+    working_dir: Option<&str>,
+) -> BrokerContextItem {
+    let uri = vault_line_uri(&row.path, row.line);
+    let score = Some(row.score as f32);
+    let task_state = if row.checked { "completed" } else { "open" };
+    BrokerContextItem {
+        id: format!("vault_task:{}", row.id),
+        kind: "vault_task".to_string(),
+        scope: "vault".to_string(),
+        content_format: "plain_text".to_string(),
+        title: Some(format!("{} / task", row.title)),
+        summary: Some(format!("{task_state} task")),
+        content: Some(row.content.clone()),
+        tags: vec![
+            "vault".to_string(),
+            "vault_task".to_string(),
+            task_state.to_string(),
+        ],
+        source: Some(uri.clone()),
+        score,
+        origin: BrokerContextOrigin {
+            tool: Some("duckdb_broker_store".to_string()),
+            source: Some("vault".to_string()),
+            working_dir: working_dir.map(str::to_string),
+            path: Some(row.path.clone()),
+            uri: Some(uri.clone()),
+            ..Default::default()
+        },
+        relevance: Some(BrokerContextRelevance {
+            query: Some(query.to_string()),
+            retrieval_mode: Some("duckdb_broker_store".to_string()),
+            score,
+            rank: Some(rank),
+            matched_terms: row.matched_terms.clone(),
+            exact_match: Some(row.content.to_lowercase().contains(&query.to_lowercase())),
+        }),
+        fragments: vec![BrokerContextFragment {
+            relation: "source_span".to_string(),
+            content: row.content.clone(),
+            content_format: "plain_text".to_string(),
+            role: None,
+            message_index: None,
+            message_id: None,
+            timestamp: None,
+        }],
+        metadata: json!({
+            "durable_memory": false,
+            "source_kind": "vault_task",
+            "file_id": row.file_id,
+            "task_id": row.id,
+            "checked": row.checked,
+            "source_checksum": row.source_checksum,
+            "mtime_ns": row.mtime_ns,
+            "line": row.line,
+            "uri": uri,
+        }),
+    }
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_link_broker_item(
+    row: &VaultLinkContextRow,
+    query: &str,
+    rank: usize,
+    working_dir: Option<&str>,
+) -> BrokerContextItem {
+    let uri = vault_link_uri(&row.source_path, &row.target);
+    let score = Some(row.score as f32);
+    BrokerContextItem {
+        id: format!("vault_link:{}", row.id),
+        kind: "vault_link".to_string(),
+        scope: "vault".to_string(),
+        content_format: "plain_text".to_string(),
+        title: Some(format!("{} -> {}", row.title, row.target)),
+        summary: Some(format!("{} link", row.kind)),
+        content: Some(row.raw.clone()),
+        tags: vec![
+            "vault".to_string(),
+            "vault_link".to_string(),
+            row.kind.clone(),
+        ],
+        source: Some(uri.clone()),
+        score,
+        origin: BrokerContextOrigin {
+            tool: Some("duckdb_broker_store".to_string()),
+            source: Some("vault".to_string()),
+            working_dir: working_dir.map(str::to_string),
+            path: Some(row.source_path.clone()),
+            uri: Some(uri.clone()),
+            ..Default::default()
+        },
+        relevance: Some(BrokerContextRelevance {
+            query: Some(query.to_string()),
+            retrieval_mode: Some("duckdb_broker_store".to_string()),
+            score,
+            rank: Some(rank),
+            matched_terms: row.matched_terms.clone(),
+            exact_match: Some(row.raw.to_lowercase().contains(&query.to_lowercase())),
+        }),
+        fragments: vec![BrokerContextFragment {
+            relation: "source_link".to_string(),
+            content: row.raw.clone(),
+            content_format: "plain_text".to_string(),
+            role: None,
+            message_index: None,
+            message_id: None,
+            timestamp: None,
+        }],
+        metadata: json!({
+            "durable_memory": false,
+            "source_kind": "vault_link",
+            "source_file_id": row.source_file_id,
+            "link_id": row.id,
+            "target": row.target,
+            "link_kind": row.kind,
+            "source_checksum": row.source_checksum,
+            "mtime_ns": row.mtime_ns,
+            "uri": uri,
+        }),
+    }
+}
+
+#[cfg(feature = "duckdb-storage")]
 fn vault_chunk_uri(path: &str, heading: &str) -> String {
     if heading.trim().is_empty() {
         format!("vault://{path}")
     } else {
         format!("vault://{path}#{heading}")
+    }
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_line_uri(path: &str, line: i64) -> String {
+    format!("vault://{path}#L{line}")
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_link_uri(path: &str, target: &str) -> String {
+    if target.trim().is_empty() {
+        format!("vault://{path}")
+    } else {
+        format!("vault://{path}#link-{}", target.replace(' ', "-"))
     }
 }
 
@@ -1622,7 +1829,8 @@ mod tests {
 
     #[cfg(feature = "duckdb-storage")]
     use jcode_storage::duckdb_broker_store::{
-        DuckDbBrokerStoreService, VaultChunkRecord, VaultFileRecord, VaultRecordBatch,
+        DuckDbBrokerStoreService, VaultChunkRecord, VaultFileRecord, VaultLinkRecord,
+        VaultRecordBatch, VaultTaskRecord,
     };
 
     struct TestHome {
@@ -2270,11 +2478,30 @@ mod tests {
                     file_id: "file_alpha".to_string(),
                     path: "Alpha.md".to_string(),
                     heading: "DuckDB broker".to_string(),
-                    content: "DuckDB vault context should route through broker_context items."
-                        .to_string(),
+                    content:
+                        "DuckDB vault context should route through broker_context chunk items."
+                            .to_string(),
                     start_line: 2,
                     end_line: 4,
                     checksum: "sha256:chunk".to_string(),
+                    deleted_at: None,
+                }],
+                links: vec![VaultLinkRecord {
+                    id: "link_alpha_beta".to_string(),
+                    source_file_id: "file_alpha".to_string(),
+                    source_path: "Alpha.md".to_string(),
+                    target: "Beta".to_string(),
+                    kind: "wikilink".to_string(),
+                    raw: "[[Beta]]".to_string(),
+                    deleted_at: None,
+                }],
+                tasks: vec![VaultTaskRecord {
+                    id: "task_alpha".to_string(),
+                    file_id: "file_alpha".to_string(),
+                    path: "Alpha.md".to_string(),
+                    checked: false,
+                    content: "Track ingestion writer".to_string(),
+                    line: 5,
                     deleted_at: None,
                 }],
                 ..VaultRecordBatch::default()
@@ -2282,12 +2509,17 @@ mod tests {
             .expect("seed broker store");
         drop(service);
 
-        let items =
-            collect_vault_context_items(Some("/tmp/project"), Some("DuckDB vault context"), 8)
-                .expect("collect vault context items");
+        let items = collect_vault_context_items(
+            Some("/tmp/project"),
+            Some("DuckDB vault context Beta ingestion writer"),
+            8,
+        )
+        .expect("collect vault context items");
 
-        assert_eq!(items.len(), 1);
-        let item = &items[0];
+        let item = items
+            .iter()
+            .find(|item| item.kind == "vault_chunk")
+            .expect("vault chunk item");
         assert_eq!(item.kind, "vault_chunk");
         assert_eq!(item.scope, "vault");
         assert_eq!(item.content_format, "markdown");
@@ -2302,5 +2534,20 @@ mod tests {
                 .matched_terms
                 .contains(&"duckdb".to_string())
         );
+        let task_item = items
+            .iter()
+            .find(|item| item.kind == "vault_task")
+            .expect("vault task item");
+        assert_eq!(task_item.origin.path.as_deref(), Some("Alpha.md"));
+        assert_eq!(task_item.metadata["checked"], false);
+        assert_eq!(task_item.content.as_deref(), Some("Track ingestion writer"));
+
+        let link_item = items
+            .iter()
+            .find(|item| item.kind == "vault_link")
+            .expect("vault link item");
+        assert_eq!(link_item.origin.path.as_deref(), Some("Alpha.md"));
+        assert_eq!(link_item.metadata["target"], "Beta");
+        assert_eq!(link_item.content.as_deref(), Some("[[Beta]]"));
     }
 }

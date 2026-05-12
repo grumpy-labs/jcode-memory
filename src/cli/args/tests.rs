@@ -60,6 +60,40 @@ fn broker_serve_subcommand_parses() {
 }
 
 #[test]
+fn broker_ingest_vault_subcommand_parses() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "broker",
+        "ingest-vault",
+        "--vault",
+        "/tmp/Vault",
+        "--db",
+        "/tmp/broker.duckdb",
+        "--watch",
+        "--interval-secs",
+        "30",
+        "--json",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::Broker(BrokerCommand::IngestVault {
+            vault,
+            db,
+            watch,
+            interval_secs,
+            json,
+        })) => {
+            assert_eq!(vault, "/tmp/Vault");
+            assert_eq!(db.as_deref(), Some("/tmp/broker.duckdb"));
+            assert!(watch);
+            assert_eq!(interval_secs, 30);
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
 fn session_rename_subcommand_parses() {
     let args = Args::try_parse_from([
         "jcode",

@@ -394,6 +394,29 @@ pub(crate) enum BrokerCommand {
         #[arg(long, hide = true)]
         temp_idle_timeout_secs: Option<u64>,
     },
+
+    /// Ingest and reconcile an Obsidian Vault into the DuckDB broker store
+    IngestVault {
+        /// Vault root directory to ingest
+        #[arg(long)]
+        vault: String,
+
+        /// DuckDB broker-store path. Defaults to JCODE_BROKER_DUCKDB_PATH or the runtime broker DB.
+        #[arg(long)]
+        db: Option<String>,
+
+        /// Keep reconciling the Vault on a polling interval
+        #[arg(long)]
+        watch: bool,
+
+        /// Poll interval for --watch
+        #[arg(long, default_value_t = 10)]
+        interval_secs: u64,
+
+        /// Emit JSON reports
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

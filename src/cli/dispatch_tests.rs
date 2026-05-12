@@ -119,6 +119,48 @@ fn broker_server_mode_respects_explicit_socket() {
     assert_eq!(crate::server::socket_path(), custom_socket);
 }
 
+#[cfg(feature = "duckdb-storage")]
+#[test]
+fn broker_ingest_vault_writes_normalized_duckdb_store() {
+    let _guard = crate::storage::lock_test_env();
+    let _broker_db_env = EnvVarGuard::remove("JCODE_BROKER_DUCKDB_PATH");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let vault = temp.path().join("Vault");
+    std::fs::create_dir_all(&vault).expect("create vault");
+    std::fs::write(
+        vault.join("Alpha.md"),
+        "# Alpha\n\nDuckDB broker ingest writer evidence.\n\n- [ ] Track production ingestion\n\n[[Beta]]\n",
+    )
+    .expect("write note");
+    let db_path = temp.path().join("broker.duckdb");
+
+    run_broker_ingest_vault(
+        vault.to_string_lossy().to_string(),
+        Some(db_path.to_string_lossy().to_string()),
+        false,
+        1,
+        true,
+    )
+    .expect("ingest vault");
+
+    let service = jcode_storage::duckdb_broker_store::DuckDbBrokerStoreService::start(&db_path)
+        .expect("open broker store");
+    let counts = service.table_counts().expect("table counts");
+    assert_eq!(counts.active_vault_file, 1);
+    assert_eq!(counts.active_vault_task, 1);
+    assert_eq!(counts.active_vault_link, 1);
+    let chunks = service
+        .query_vault_chunks("ingest writer evidence", 5)
+        .expect("query chunks");
+    assert_eq!(chunks.len(), 1);
+    let tasks = service
+        .query_vault_tasks("production ingestion", 5)
+        .expect("query tasks");
+    assert_eq!(tasks.len(), 1);
+    let links = service.query_vault_links("Beta", 5).expect("query links");
+    assert_eq!(links.len(), 1);
+}
+
 #[test]
 fn broker_server_mode_uses_no_model_provider_by_default() {
     let default_args =

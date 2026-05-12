@@ -91,6 +91,18 @@ fn duckdb_broker_store_replaces_vault_records_and_queries_context() {
     assert_eq!(hits[0].source_checksum, "sha256:file");
     assert!(hits[0].score > 0.0);
     assert!(hits[0].matched_terms.contains(&"duckdb".to_string()));
+
+    let task_hits = service
+        .query_vault_tasks("vault context formatting", 5)
+        .expect("query tasks");
+    assert_eq!(task_hits.len(), 1);
+    assert_eq!(task_hits[0].id, "task_alpha");
+    assert_eq!(task_hits[0].source_checksum, "sha256:file");
+
+    let link_hits = service.query_vault_links("Beta", 5).expect("query links");
+    assert_eq!(link_hits.len(), 1);
+    assert_eq!(link_hits[0].id, "link_alpha_beta");
+    assert_eq!(link_hits[0].target, "Beta");
 }
 
 #[test]

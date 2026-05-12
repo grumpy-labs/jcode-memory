@@ -148,8 +148,9 @@ Rust storage-boundary proof:
 | Normalized Rust broker tables | Pass | `jcode-storage` creates normalized `vault_file`, `vault_chunk`, `vault_link`, `vault_task`, and `graph_edge` tables behind the opt-in `duckdb-storage` feature. |
 | Rust single-writer service | Pass | Concurrent Rust clients serialize writes through one DuckDB-owning worker service. |
 | Rust context/tombstone boundary | Pass | `query_vault_chunks` returns chunk context metadata from normalized tables and hides tombstoned file records from active context. |
-| Broker context integration | Pass | With `duckdb-storage` and `JCODE_BROKER_DUCKDB_PATH`, `broker_context.items` can include `vault_chunk` items from normalized DuckDB rows. |
+| Broker context integration | Pass | With `duckdb-storage` and `JCODE_BROKER_DUCKDB_PATH`, `broker_context.items` can include `vault_chunk`, `vault_task`, and `vault_link` items from normalized DuckDB rows. |
 | Rust backup/restore proof | Pass | The normalized broker service checkpoints and copies a DuckDB file, then reopens a restored copy with context rows intact. |
+| Rust Vault ingestion/reconciliation writer | Pass | `jcode broker ingest-vault` reconciles a Vault into the normalized DuckDB broker store, with update/delete tombstones and checksum-based rename identity preservation covered by focused tests. A whole-Vault command smoke imported `/Users/rob/Vault` into a temp DuckDB file with 450 files, 4,976 chunks, 1,091 links, 1,648 tasks, and 7,715 graph edges. |
 
 ## What This Means
 
@@ -179,35 +180,36 @@ DuckDB is not yet fully proven as the operational broker store:
 - Persistent VSS/HNSW indexes still carry experimental persistence caveats.
 - DuckPGQ is not available in this local DuckDB/osx_arm64 proof, so graph
   extension ergonomics remain unproven here.
-- Whole-Vault collection is still a Python proof harness.
 - The first normalized Rust DuckDB broker store now exists for Vault files,
-  chunks, links, tasks, and graph edges. The live broker can read `vault_chunk`
-  context from it when `duckdb-storage` is enabled and
+  chunks, links, tasks, and graph edges. The live broker can read `vault_chunk`,
+  `vault_task`, and `vault_link` context from it when `duckdb-storage` is enabled and
   `JCODE_BROKER_DUCKDB_PATH` points at the broker database.
+- The Rust CLI production writer can reconcile a Vault into that normalized
+  store with `jcode broker ingest-vault --vault ... --db ...`, and `--watch`
+  enables polling reconciliation for a long-running broker-side process.
 - The current embedding backfill is deterministic/local for storage and query
   shape proof; real model embeddings still need integration.
-- Incremental file watching, rename reconciliation, real FTS/vector index
-  refresh, and a production ingestion writer are still pending.
+- Native filesystem-event watching, real FTS/vector index refresh, real model
+  embeddings, and JSON graph migration are still pending.
 
 ## Recommendation
 
 Keep DuckDB in first position. The no-DuckPGQ path plus durable-file service
 proof was strong enough to start the Rust storage boundary work, and the first
-opt-in Rust boundary now exists. Do not make DuckDB the canonical operational DB
-until the broker uses a Rust single-writer service with normalized Vault/context
-tables, but stop treating either DuckPGQ availability or lack of a separate graph
+opt-in Rust boundary now exists. The broker now uses a Rust single-writer service
+with normalized Vault/context tables for the proof path; do not make DuckDB the
+canonical operational DB until the remaining live-service concerns below are
+closed, but stop treating either DuckPGQ availability or lack of a separate graph
 server as a blocker.
 
 Next DuckDB proof requirements:
 
-- Production ingestion writer wired to the normalized DuckDB broker store
 - repeated small writes under broker-like concurrency on a larger corpus
-- incremental filesystem watch/reconciliation for Vault chunks
+- native filesystem-event watch/reconciliation, if polling is not enough
 - index refresh timing for FTS/vector
 - rebuild-from-source behavior from the source Vault
 - real vector embedding backfill for whole-Vault chunks
-- Rust broker context formatting from `vault_link` and `vault_task` records
-  without prompt bloat
+- migration of JSON memory graph reads behind the same storage boundary
 
 Keep SurrealDB as the current operational baseline until DuckDB passes those
 Rust integration tests. Even if DuckDB does not become the operational graph

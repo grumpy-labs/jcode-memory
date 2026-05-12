@@ -100,6 +100,36 @@ pub struct VaultChunkContextRow {
     pub matched_terms: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct VaultTaskContextRow {
+    pub id: String,
+    pub file_id: String,
+    pub path: String,
+    pub title: String,
+    pub checked: bool,
+    pub content: String,
+    pub line: i64,
+    pub source_checksum: String,
+    pub mtime_ns: i64,
+    pub score: f64,
+    pub matched_terms: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VaultLinkContextRow {
+    pub id: String,
+    pub source_file_id: String,
+    pub source_path: String,
+    pub title: String,
+    pub target: String,
+    pub kind: String,
+    pub raw: String,
+    pub source_checksum: String,
+    pub mtime_ns: i64,
+    pub score: f64,
+    pub matched_terms: Vec<String>,
+}
+
 pub struct DuckDbBrokerStore {
     db_path: PathBuf,
     connection: duckdb::Connection,
@@ -156,6 +186,36 @@ impl DuckDbBrokerStore {
         Ok(())
     }
 
+    pub fn replace_file_records(&mut self, file_id: &str, batch: VaultRecordBatch) -> Result<()> {
+        self.delete_file_records(file_id)?;
+        self.upsert_vault_records(batch)
+    }
+
+    pub fn list_vault_files(&self) -> Result<Vec<VaultFileRecord>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, path, title, checksum, size_bytes, mtime_ns, frontmatter_json, deleted_at
+            FROM vault_file
+            ORDER BY path
+            "#,
+        )?;
+        let mut rows = statement.query([])?;
+        let mut files = Vec::new();
+        while let Some(row) = rows.next()? {
+            files.push(VaultFileRecord {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                title: row.get(2)?,
+                checksum: row.get(3)?,
+                size_bytes: row.get(4)?,
+                mtime_ns: row.get(5)?,
+                frontmatter_json: row.get(6)?,
+                deleted_at: row.get(7)?,
+            });
+        }
+        Ok(files)
+    }
+
     pub fn tombstone_file_records(&mut self, file_id: &str, deleted_at: &str) -> Result<()> {
         self.connection.execute(
             r#"
@@ -190,6 +250,42 @@ impl DuckDbBrokerStore {
         self.connection.execute(
             "UPDATE vault_file SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
             duckdb::params![deleted_at, file_id],
+        )?;
+        Ok(())
+    }
+
+    fn delete_file_records(&mut self, file_id: &str) -> Result<()> {
+        self.connection.execute(
+            r#"
+            DELETE FROM graph_edge
+            WHERE source_id = ?
+               OR target_id = ?
+               OR source_id IN (SELECT id FROM vault_chunk WHERE file_id = ?)
+               OR target_id IN (SELECT id FROM vault_chunk WHERE file_id = ?)
+               OR source_id IN (SELECT id FROM vault_task WHERE file_id = ?)
+               OR target_id IN (SELECT id FROM vault_task WHERE file_id = ?)
+               OR source_id IN (SELECT id FROM vault_link WHERE source_file_id = ?)
+               OR target_id IN (SELECT id FROM vault_link WHERE source_file_id = ?)
+            "#,
+            duckdb::params![
+                file_id, file_id, file_id, file_id, file_id, file_id, file_id, file_id
+            ],
+        )?;
+        self.connection.execute(
+            "DELETE FROM vault_task WHERE file_id = ?",
+            duckdb::params![file_id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM vault_link WHERE source_file_id = ?",
+            duckdb::params![file_id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM vault_chunk WHERE file_id = ?",
+            duckdb::params![file_id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM vault_file WHERE id = ?",
+            duckdb::params![file_id],
         )?;
         Ok(())
     }
@@ -249,19 +345,10 @@ impl DuckDbBrokerStore {
             let heading: String = row.get(4)?;
             let content: String = row.get(5)?;
             let path: String = row.get(2)?;
-            let haystack = format!("{path}\n{title}\n{heading}\n{content}").to_lowercase();
-            let matched_terms: Vec<String> = terms
-                .iter()
-                .filter(|term| haystack.contains(term.as_str()))
-                .cloned()
-                .collect();
-            if matched_terms.is_empty() {
+            let haystack = format!("{path}\n{title}\n{heading}\n{content}");
+            let Some((score, matched_terms)) = score_query_hit(query, &terms, &haystack) else {
                 continue;
-            }
-            let mut score = matched_terms.len() as f64;
-            if haystack.contains(&query.to_lowercase()) {
-                score += terms.len() as f64;
-            }
+            };
             hits.push(VaultChunkContextRow {
                 id: row.get(0)?,
                 file_id: row.get(1)?,
@@ -285,6 +372,134 @@ impl DuckDbBrokerStore {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| left.path.cmp(&right.path))
                 .then_with(|| left.start_line.cmp(&right.start_line))
+        });
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
+    pub fn query_vault_tasks(&self, query: &str, limit: usize) -> Result<Vec<VaultTaskContextRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let terms = query_terms(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT
+                t.id,
+                t.file_id,
+                t.path,
+                f.title,
+                t.checked,
+                t.content,
+                t.line,
+                f.checksum,
+                f.mtime_ns
+            FROM vault_task t
+            JOIN vault_file f ON f.id = t.file_id
+            WHERE t.deleted_at IS NULL
+              AND f.deleted_at IS NULL
+            ORDER BY t.path, t.line
+            "#,
+        )?;
+        let mut rows = statement.query([])?;
+        let mut hits = Vec::new();
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(2)?;
+            let title: String = row.get(3)?;
+            let content: String = row.get(5)?;
+            let haystack = format!("{path}\n{title}\n{content}");
+            let Some((score, matched_terms)) = score_query_hit(query, &terms, &haystack) else {
+                continue;
+            };
+            hits.push(VaultTaskContextRow {
+                id: row.get(0)?,
+                file_id: row.get(1)?,
+                path,
+                title,
+                checked: row.get(4)?,
+                content,
+                line: row.get(6)?,
+                source_checksum: row.get(7)?,
+                mtime_ns: row.get(8)?,
+                score,
+                matched_terms,
+            });
+        }
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| left.line.cmp(&right.line))
+        });
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
+    pub fn query_vault_links(&self, query: &str, limit: usize) -> Result<Vec<VaultLinkContextRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let terms = query_terms(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT
+                l.id,
+                l.source_file_id,
+                l.source_path,
+                f.title,
+                l.target,
+                l.kind,
+                l.raw,
+                f.checksum,
+                f.mtime_ns
+            FROM vault_link l
+            JOIN vault_file f ON f.id = l.source_file_id
+            WHERE l.deleted_at IS NULL
+              AND f.deleted_at IS NULL
+            ORDER BY l.source_path, l.target, l.kind
+            "#,
+        )?;
+        let mut rows = statement.query([])?;
+        let mut hits = Vec::new();
+        while let Some(row) = rows.next()? {
+            let source_path: String = row.get(2)?;
+            let title: String = row.get(3)?;
+            let target: String = row.get(4)?;
+            let kind: String = row.get(5)?;
+            let raw: String = row.get(6)?;
+            let haystack = format!("{source_path}\n{title}\n{target}\n{kind}\n{raw}");
+            let Some((score, matched_terms)) = score_query_hit(query, &terms, &haystack) else {
+                continue;
+            };
+            hits.push(VaultLinkContextRow {
+                id: row.get(0)?,
+                source_file_id: row.get(1)?,
+                source_path,
+                title,
+                target,
+                kind,
+                raw,
+                source_checksum: row.get(7)?,
+                mtime_ns: row.get(8)?,
+                score,
+                matched_terms,
+            });
+        }
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.source_path.cmp(&right.source_path))
+                .then_with(|| left.target.cmp(&right.target))
         });
         hits.truncate(limit);
         Ok(hits)
@@ -547,6 +762,16 @@ impl DuckDbBrokerStoreService {
                     BrokerStoreRequest::UpsertVaultRecords(batch, response) => {
                         let _ = response.send(store.upsert_vault_records(batch));
                     }
+                    BrokerStoreRequest::ReplaceFileRecords {
+                        file_id,
+                        batch,
+                        response,
+                    } => {
+                        let _ = response.send(store.replace_file_records(&file_id, batch));
+                    }
+                    BrokerStoreRequest::ListVaultFiles(response) => {
+                        let _ = response.send(store.list_vault_files());
+                    }
                     BrokerStoreRequest::TombstoneFileRecords {
                         file_id,
                         deleted_at,
@@ -563,6 +788,20 @@ impl DuckDbBrokerStoreService {
                         response,
                     } => {
                         let _ = response.send(store.query_vault_chunks(&query, limit));
+                    }
+                    BrokerStoreRequest::QueryVaultTasks {
+                        query,
+                        limit,
+                        response,
+                    } => {
+                        let _ = response.send(store.query_vault_tasks(&query, limit));
+                    }
+                    BrokerStoreRequest::QueryVaultLinks {
+                        query,
+                        limit,
+                        response,
+                    } => {
+                        let _ = response.send(store.query_vault_links(&query, limit));
                     }
                     BrokerStoreRequest::BackupTo {
                         backup_path,
@@ -603,6 +842,14 @@ impl DuckDbBrokerStoreService {
         self.client.tombstone_file_records(file_id, deleted_at)
     }
 
+    pub fn replace_file_records(&self, file_id: &str, batch: VaultRecordBatch) -> Result<()> {
+        self.client.replace_file_records(file_id, batch)
+    }
+
+    pub fn list_vault_files(&self) -> Result<Vec<VaultFileRecord>> {
+        self.client.list_vault_files()
+    }
+
     pub fn table_counts(&self) -> Result<BrokerStoreCounts> {
         self.client.table_counts()
     }
@@ -613,6 +860,14 @@ impl DuckDbBrokerStoreService {
         limit: usize,
     ) -> Result<Vec<VaultChunkContextRow>> {
         self.client.query_vault_chunks(query, limit)
+    }
+
+    pub fn query_vault_tasks(&self, query: &str, limit: usize) -> Result<Vec<VaultTaskContextRow>> {
+        self.client.query_vault_tasks(query, limit)
+    }
+
+    pub fn query_vault_links(&self, query: &str, limit: usize) -> Result<Vec<VaultLinkContextRow>> {
+        self.client.query_vault_links(query, limit)
     }
 
     pub fn backup_to(&self, backup_path: impl AsRef<Path>) -> Result<PathBuf> {
@@ -670,6 +925,18 @@ impl DuckDbBrokerStoreClient {
         })
     }
 
+    pub fn replace_file_records(&self, file_id: &str, batch: VaultRecordBatch) -> Result<()> {
+        self.request(|response| BrokerStoreRequest::ReplaceFileRecords {
+            file_id: file_id.to_string(),
+            batch,
+            response,
+        })
+    }
+
+    pub fn list_vault_files(&self) -> Result<Vec<VaultFileRecord>> {
+        self.request(BrokerStoreRequest::ListVaultFiles)
+    }
+
     pub fn table_counts(&self) -> Result<BrokerStoreCounts> {
         self.request(BrokerStoreRequest::TableCounts)
     }
@@ -680,6 +947,22 @@ impl DuckDbBrokerStoreClient {
         limit: usize,
     ) -> Result<Vec<VaultChunkContextRow>> {
         self.request(|response| BrokerStoreRequest::QueryVaultChunks {
+            query: query.to_string(),
+            limit,
+            response,
+        })
+    }
+
+    pub fn query_vault_tasks(&self, query: &str, limit: usize) -> Result<Vec<VaultTaskContextRow>> {
+        self.request(|response| BrokerStoreRequest::QueryVaultTasks {
+            query: query.to_string(),
+            limit,
+            response,
+        })
+    }
+
+    pub fn query_vault_links(&self, query: &str, limit: usize) -> Result<Vec<VaultLinkContextRow>> {
+        self.request(|response| BrokerStoreRequest::QueryVaultLinks {
             query: query.to_string(),
             limit,
             response,
@@ -714,6 +997,12 @@ impl DuckDbBrokerStoreClient {
 enum BrokerStoreRequest {
     ReplaceVaultRecords(VaultRecordBatch, mpsc::Sender<Result<()>>),
     UpsertVaultRecords(VaultRecordBatch, mpsc::Sender<Result<()>>),
+    ReplaceFileRecords {
+        file_id: String,
+        batch: VaultRecordBatch,
+        response: mpsc::Sender<Result<()>>,
+    },
+    ListVaultFiles(mpsc::Sender<Result<Vec<VaultFileRecord>>>),
     TombstoneFileRecords {
         file_id: String,
         deleted_at: String,
@@ -724,6 +1013,16 @@ enum BrokerStoreRequest {
         query: String,
         limit: usize,
         response: mpsc::Sender<Result<Vec<VaultChunkContextRow>>>,
+    },
+    QueryVaultTasks {
+        query: String,
+        limit: usize,
+        response: mpsc::Sender<Result<Vec<VaultTaskContextRow>>>,
+    },
+    QueryVaultLinks {
+        query: String,
+        limit: usize,
+        response: mpsc::Sender<Result<Vec<VaultLinkContextRow>>>,
     },
     BackupTo {
         backup_path: PathBuf,
@@ -740,6 +1039,23 @@ fn query_terms(query: &str) -> Vec<String> {
             if term.is_empty() { None } else { Some(term) }
         })
         .collect()
+}
+
+fn score_query_hit(query: &str, terms: &[String], haystack: &str) -> Option<(f64, Vec<String>)> {
+    let haystack = haystack.to_lowercase();
+    let matched_terms: Vec<String> = terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .cloned()
+        .collect();
+    if matched_terms.is_empty() {
+        return None;
+    }
+    let mut score = matched_terms.len() as f64;
+    if haystack.contains(&query.to_lowercase()) {
+        score += terms.len() as f64;
+    }
+    Some((score, matched_terms))
 }
 
 trait ExpandHomeish {
