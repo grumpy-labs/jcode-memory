@@ -320,6 +320,11 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             self._config.get("tool_inventory_limit", DEFAULT_TOOL_INVENTORY_LIMIT)
         )
         self._socket_path = str(self._config.get("socket_path") or _default_socket_path())
+        self._duckdb_path = self._config.get("duckdb_path") or self._config.get(
+            "broker_duckdb_path"
+        )
+        self._jcode_home = self._config.get("jcode_home")
+        self._disable_telemetry = _config_bool(self._config, "disable_telemetry", False)
         self._auto_start = _config_bool(self._config, "auto_start", True)
         self._sync_turns = _config_bool(self._config, "sync_turns", True)
         self._sync_transcripts = _config_bool(self._config, "sync_transcripts", True)
@@ -471,6 +476,21 @@ class JcodeGraphMemoryProvider(MemoryProvider):
                 "key": "working_dir",
                 "description": "Project directory for broker-scoped memory",
                 "default": os.getcwd(),
+            },
+            {
+                "key": "duckdb_path",
+                "description": "DuckDB broker-store path exported as JCODE_BROKER_DUCKDB_PATH",
+                "default": "",
+            },
+            {
+                "key": "jcode_home",
+                "description": "Dedicated JCODE_HOME used by the auto-started broker",
+                "default": "",
+            },
+            {
+                "key": "disable_telemetry",
+                "description": "Export JCODE_NO_TELEMETRY=1 for the auto-started broker",
+                "default": "false",
             },
             {
                 "key": "source",
@@ -687,6 +707,12 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         socket_path.parent.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
         env.setdefault("JCODE_RUNTIME_DIR", str(socket_path.parent))
+        if self._duckdb_path:
+            env["JCODE_BROKER_DUCKDB_PATH"] = str(self._duckdb_path)
+        if self._jcode_home:
+            env["JCODE_HOME"] = str(self._jcode_home)
+        if self._disable_telemetry:
+            env["JCODE_NO_TELEMETRY"] = "1"
         env["JCODE_NON_INTERACTIVE"] = "1"
         command = [
             binary,

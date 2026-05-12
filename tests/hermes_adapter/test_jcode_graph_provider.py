@@ -592,6 +592,80 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
             )
             self.assertTrue(fake_process.terminated)
 
+    def test_provider_auto_start_passes_configured_duckdb_path(self) -> None:
+        class FakeProcess:
+            def poll(self):
+                return None
+
+            def terminate(self) -> None:
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_binary = Path(tmp) / "jcode"
+            fake_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_binary.chmod(0o755)
+            duckdb_path = str(Path(tmp) / "broker.duckdb")
+
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": str(Path(tmp) / "broker.sock"),
+                    "jcode_binary": str(fake_binary),
+                    "duckdb_path": duckdb_path,
+                    "startup_timeout_seconds": 0,
+                }
+            )
+
+            with unittest.mock.patch.object(
+                jcode_graph.subprocess, "Popen", return_value=FakeProcess()
+            ) as popen:
+                provider.initialize("hermes_session", working_dir="/tmp/project")
+                provider.shutdown()
+
+            self.assertEqual(
+                popen.call_args.kwargs["env"]["JCODE_BROKER_DUCKDB_PATH"],
+                duckdb_path,
+            )
+
+    def test_provider_auto_start_passes_isolated_jcode_home(self) -> None:
+        class FakeProcess:
+            def poll(self):
+                return None
+
+            def terminate(self) -> None:
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_binary = Path(tmp) / "jcode"
+            fake_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_binary.chmod(0o755)
+            jcode_home = str(Path(tmp) / "jcode-home")
+
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": str(Path(tmp) / "broker.sock"),
+                    "jcode_binary": str(fake_binary),
+                    "jcode_home": jcode_home,
+                    "disable_telemetry": True,
+                    "startup_timeout_seconds": 0,
+                }
+            )
+
+            with unittest.mock.patch.object(
+                jcode_graph.subprocess, "Popen", return_value=FakeProcess()
+            ) as popen:
+                provider.initialize("hermes_session", working_dir="/tmp/project")
+                provider.shutdown()
+
+            env = popen.call_args.kwargs["env"]
+            self.assertEqual(env["JCODE_HOME"], jcode_home)
+            self.assertEqual(env["JCODE_NO_TELEMETRY"], "1")
+
 
 if __name__ == "__main__":
     unittest.main()
