@@ -325,6 +325,7 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         )
         self._jcode_home = self._config.get("jcode_home")
         self._disable_telemetry = _config_bool(self._config, "disable_telemetry", False)
+        self._debug_control = _config_bool(self._config, "debug_control", False)
         self._auto_start = _config_bool(self._config, "auto_start", True)
         self._sync_turns = _config_bool(self._config, "sync_turns", True)
         self._sync_transcripts = _config_bool(self._config, "sync_transcripts", True)
@@ -490,6 +491,11 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             {
                 "key": "disable_telemetry",
                 "description": "Export JCODE_NO_TELEMETRY=1 for the auto-started broker",
+                "default": "false",
+            },
+            {
+                "key": "debug_control",
+                "description": "Export JCODE_DEBUG_CONTROL=1 for broker debug command validation",
                 "default": "false",
             },
             {
@@ -713,6 +719,8 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             env["JCODE_HOME"] = str(self._jcode_home)
         if self._disable_telemetry:
             env["JCODE_NO_TELEMETRY"] = "1"
+        if self._debug_control:
+            env["JCODE_DEBUG_CONTROL"] = "1"
         env["JCODE_NON_INTERACTIVE"] = "1"
         command = [
             binary,
