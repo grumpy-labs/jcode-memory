@@ -1,5 +1,7 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+#[cfg(feature = "duckdb-storage")]
+use anyhow::Context;
 use anyhow::Result;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::Arc;
@@ -122,6 +124,59 @@ fn run_broker_ingest_vault(
     Ok(())
 }
 
+#[cfg(feature = "duckdb-storage")]
+fn run_broker_embed_vault(
+    db: Option<String>,
+    model: String,
+    limit: usize,
+    json: bool,
+) -> Result<()> {
+    let db_path = broker_vault_db_path(db.as_deref())?;
+    let service = jcode_storage::duckdb_broker_store::DuckDbBrokerStoreService::start(&db_path)?;
+    let candidates = service.list_missing_vault_chunk_embeddings(&model, limit)?;
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut records = Vec::with_capacity(candidates.len());
+
+    for candidate in &candidates {
+        let embedding_text = vault_chunk_embedding_text(candidate);
+        let embedding = crate::embedding::embed(&embedding_text).with_context(|| {
+            format!(
+                "failed to embed vault chunk {} from {}",
+                candidate.id, candidate.path
+            )
+        })?;
+        records.push(jcode_storage::duckdb_broker_store::VaultEmbeddingRecord {
+            id: format!("vault_embedding:{model}:{}", candidate.id),
+            record_id: candidate.id.clone(),
+            record_kind: "vault_chunk".to_string(),
+            embedding_model: model.clone(),
+            embedding,
+            content_checksum: candidate.checksum.clone(),
+            source_checksum: candidate.source_checksum.clone(),
+            updated_at: now.clone(),
+            deleted_at: None,
+        });
+    }
+
+    let embedded_chunks = records.len();
+    service.upsert_vault_embeddings(records)?;
+    let counts = service.table_counts()?;
+    print_broker_vault_embedding_report(&db_path, &model, limit, embedded_chunks, &counts, json)?;
+    Ok(())
+}
+
+#[cfg(not(feature = "duckdb-storage"))]
+fn run_broker_embed_vault(
+    _db: Option<String>,
+    _model: String,
+    _limit: usize,
+    _json: bool,
+) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "broker embed-vault requires the duckdb-storage feature"
+    ))
+}
+
 #[cfg(not(feature = "duckdb-storage"))]
 fn run_broker_ingest_vault(
     _vault: String,
@@ -144,6 +199,16 @@ fn broker_vault_db_path(db: Option<&str>) -> Result<std::path::PathBuf> {
         return Ok(std::path::PathBuf::from(db));
     }
     Ok(storage::runtime_dir().join("jcode-broker.duckdb"))
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_chunk_embedding_text(
+    candidate: &jcode_storage::duckdb_broker_store::VaultChunkEmbeddingCandidate,
+) -> String {
+    format!(
+        "{}\n{}\n{}",
+        candidate.title, candidate.heading, candidate.content
+    )
 }
 
 #[cfg(feature = "duckdb-storage")]
@@ -179,6 +244,8 @@ fn print_broker_vault_ingestion_report(
                     "active_vault_link": report.counts.active_vault_link,
                     "vault_task": report.counts.vault_task,
                     "active_vault_task": report.counts.active_vault_task,
+                    "vault_embedding": report.counts.vault_embedding,
+                    "active_vault_embedding": report.counts.active_vault_embedding,
                     "graph_edge": report.counts.graph_edge,
                     "active_graph_edge": report.counts.active_graph_edge,
                 },
@@ -200,6 +267,44 @@ fn print_broker_vault_ingestion_report(
         report.counts.active_vault_chunk,
         report.counts.active_vault_link,
         report.counts.active_vault_task,
+    ));
+    Ok(())
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn print_broker_vault_embedding_report(
+    db_path: &std::path::Path,
+    model: &str,
+    limit: usize,
+    embedded_chunks: usize,
+    counts: &jcode_storage::duckdb_broker_store::BrokerStoreCounts,
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "db": db_path.display().to_string(),
+                "model": model,
+                "limit": limit,
+                "embedded_chunks": embedded_chunks,
+                "counts": {
+                    "vault_embedding": counts.vault_embedding,
+                    "active_vault_embedding": counts.active_vault_embedding,
+                    "active_vault_chunk": counts.active_vault_chunk,
+                },
+            }))?
+        );
+        return Ok(());
+    }
+
+    output::stderr_info(format!(
+        "Vault embedding backfill wrote {} chunk vector(s) into {} using model={}, active_embeddings={}, active_chunks={}",
+        embedded_chunks,
+        db_path.display(),
+        model,
+        counts.active_vault_embedding,
+        counts.active_vault_chunk,
     ));
     Ok(())
 }
@@ -256,6 +361,14 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             json,
         })) => {
             run_broker_ingest_vault(vault, db, watch, interval_secs, json)?;
+        }
+        Some(Command::Broker(BrokerCommand::EmbedVault {
+            db,
+            model,
+            limit,
+            json,
+        })) => {
+            run_broker_embed_vault(db, model, limit, json)?;
         }
         Some(Command::Connect) => {
             tui_launch::run_client().await?;

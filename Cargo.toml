@@ -221,7 +221,7 @@ default = ["pdf"]
 dev-bins = []
 product-tools = []
 duckdb-storage = ["jcode-storage/duckdb-storage"]
-duckdb-storage-bundled = ["jcode-storage/duckdb-storage-bundled"]
+duckdb-storage-bundled = ["duckdb-storage", "jcode-storage/duckdb-storage-bundled"]
 jemalloc = [
     "dep:tikv-jemallocator",
     "dep:tikv-jemalloc-ctl",

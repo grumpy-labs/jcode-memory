@@ -82,9 +82,13 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -q -p jcode-storage \
   --features duckdb-storage memory_graph_store
 DUCKDB_DOWNLOAD_LIB=1 cargo test -q -p jcode-storage \
   --features duckdb-storage duckdb_broker_store
+cargo test -q -p jcode-storage \
+  --features duckdb-storage-bundled duckdb_broker_store
 DUCKDB_DOWNLOAD_LIB=1 cargo test -q \
   duckdb_graph_backend_writes_through_to_json_fallback \
   --features duckdb-storage
+cargo test -q --no-default-features --features duckdb-storage-bundled \
+  broker_ingest_vault_writes_normalized_duckdb_store
 ```
 
 The probe uses a tiny corpus that models the broker/Vault records this project
@@ -151,6 +155,7 @@ Rust storage-boundary proof:
 | Broker context integration | Pass | With `duckdb-storage` and `JCODE_BROKER_DUCKDB_PATH`, `broker_context.items` can include `vault_chunk`, `vault_task`, and `vault_link` items from normalized DuckDB rows. |
 | Rust backup/restore proof | Pass | The normalized broker service checkpoints and copies a DuckDB file, then reopens a restored copy with context rows intact. |
 | Rust Vault ingestion/reconciliation writer | Pass | `jcode broker ingest-vault` reconciles a Vault into the normalized DuckDB broker store, with update/delete tombstones and checksum-based rename identity preservation covered by focused tests. A whole-Vault command smoke imported `/Users/rob/Vault` into a temp DuckDB file with 450 files, 4,976 chunks, 1,091 links, 1,648 tasks, and 7,715 graph edges. |
+| Rust Vault embedding boundary | Pass | The normalized broker service stores `vault_embedding` records, lists chunks missing current embeddings by model label/checksum, ranks stored vectors by cosine similarity, and deletes stale vectors when file records are replaced. `jcode broker embed-vault` now backfills missing chunks through the jcode embedding facade; a live model-enabled whole-Vault run is still pending. |
 
 ## What This Means
 
@@ -187,10 +192,12 @@ DuckDB is not yet fully proven as the operational broker store:
 - The Rust CLI production writer can reconcile a Vault into that normalized
   store with `jcode broker ingest-vault --vault ... --db ...`, and `--watch`
   enables polling reconciliation for a long-running broker-side process.
-- The current embedding backfill is deterministic/local for storage and query
-  shape proof; real model embeddings still need integration.
-- Native filesystem-event watching, real FTS/vector index refresh, real model
-  embeddings, and JSON graph migration are still pending.
+- The Rust store now has checksum-aware `vault_embedding` records, semantic
+  query over stored vectors, and a `jcode broker embed-vault` backfill command
+  that uses the jcode embedding facade when the embedding stack is available.
+- A live model-enabled whole-Vault embedding smoke, native filesystem-event
+  watching, real FTS/vector index acceleration, summaries/entities, and JSON
+  graph migration are still pending.
 
 ## Recommendation
 
@@ -208,7 +215,8 @@ Next DuckDB proof requirements:
 - native filesystem-event watch/reconciliation, if polling is not enough
 - index refresh timing for FTS/vector
 - rebuild-from-source behavior from the source Vault
-- real vector embedding backfill for whole-Vault chunks
+- live model-enabled embedding backfill for whole-Vault chunks
+- DB-native vector-index acceleration only if benchmarks justify it
 - migration of JSON memory graph reads behind the same storage boundary
 
 Keep SurrealDB as the current operational baseline until DuckDB passes those

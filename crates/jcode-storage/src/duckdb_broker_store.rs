@@ -60,6 +60,19 @@ pub struct GraphEdgeRecord {
     pub deleted_at: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct VaultEmbeddingRecord {
+    pub id: String,
+    pub record_id: String,
+    pub record_kind: String,
+    pub embedding_model: String,
+    pub embedding: Vec<f32>,
+    pub content_checksum: String,
+    pub source_checksum: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct VaultRecordBatch {
     pub files: Vec<VaultFileRecord>,
@@ -79,6 +92,8 @@ pub struct BrokerStoreCounts {
     pub active_vault_link: i64,
     pub vault_task: i64,
     pub active_vault_task: i64,
+    pub vault_embedding: i64,
+    pub active_vault_embedding: i64,
     pub graph_edge: i64,
     pub active_graph_edge: i64,
 }
@@ -130,6 +145,38 @@ pub struct VaultLinkContextRow {
     pub matched_terms: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct VaultChunkEmbeddingCandidate {
+    pub id: String,
+    pub file_id: String,
+    pub path: String,
+    pub title: String,
+    pub heading: String,
+    pub content: String,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub checksum: String,
+    pub source_checksum: String,
+    pub mtime_ns: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VaultChunkEmbeddingHit {
+    pub id: String,
+    pub file_id: String,
+    pub path: String,
+    pub title: String,
+    pub heading: String,
+    pub content: String,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub checksum: String,
+    pub source_checksum: String,
+    pub mtime_ns: i64,
+    pub embedding_model: String,
+    pub score: f64,
+}
+
 pub struct DuckDbBrokerStore {
     db_path: PathBuf,
     connection: duckdb::Connection,
@@ -157,6 +204,7 @@ impl DuckDbBrokerStore {
     pub fn replace_vault_records(&mut self, batch: VaultRecordBatch) -> Result<()> {
         self.connection.execute_batch(
             r#"
+            DELETE FROM vault_embedding;
             DELETE FROM graph_edge;
             DELETE FROM vault_task;
             DELETE FROM vault_link;
@@ -182,6 +230,13 @@ impl DuckDbBrokerStore {
         }
         for record in batch.edges {
             self.upsert_graph_edge(&record)?;
+        }
+        Ok(())
+    }
+
+    pub fn upsert_vault_embeddings(&mut self, records: Vec<VaultEmbeddingRecord>) -> Result<()> {
+        for record in records {
+            self.upsert_vault_embedding(&record)?;
         }
         Ok(())
     }
@@ -217,6 +272,16 @@ impl DuckDbBrokerStore {
     }
 
     pub fn tombstone_file_records(&mut self, file_id: &str, deleted_at: &str) -> Result<()> {
+        self.connection.execute(
+            r#"
+            UPDATE vault_embedding
+            SET deleted_at = ?
+            WHERE deleted_at IS NULL
+              AND record_kind = 'vault_chunk'
+              AND record_id IN (SELECT id FROM vault_chunk WHERE file_id = ?)
+            "#,
+            duckdb::params![deleted_at, file_id],
+        )?;
         self.connection.execute(
             r#"
             UPDATE graph_edge
@@ -255,6 +320,14 @@ impl DuckDbBrokerStore {
     }
 
     fn delete_file_records(&mut self, file_id: &str) -> Result<()> {
+        self.connection.execute(
+            r#"
+            DELETE FROM vault_embedding
+            WHERE record_kind = 'vault_chunk'
+              AND record_id IN (SELECT id FROM vault_chunk WHERE file_id = ?)
+            "#,
+            duckdb::params![file_id],
+        )?;
         self.connection.execute(
             r#"
             DELETE FROM graph_edge
@@ -300,9 +373,148 @@ impl DuckDbBrokerStore {
             active_vault_link: self.count_table("vault_link", "WHERE deleted_at IS NULL")?,
             vault_task: self.count_table("vault_task", "")?,
             active_vault_task: self.count_table("vault_task", "WHERE deleted_at IS NULL")?,
+            vault_embedding: self.count_table("vault_embedding", "")?,
+            active_vault_embedding: self
+                .count_table("vault_embedding", "WHERE deleted_at IS NULL")?,
             graph_edge: self.count_table("graph_edge", "")?,
             active_graph_edge: self.count_table("graph_edge", "WHERE deleted_at IS NULL")?,
         })
+    }
+
+    pub fn list_missing_vault_chunk_embeddings(
+        &self,
+        embedding_model: &str,
+        limit: usize,
+    ) -> Result<Vec<VaultChunkEmbeddingCandidate>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT
+                c.id,
+                c.file_id,
+                c.path,
+                f.title,
+                c.heading,
+                c.content,
+                c.start_line,
+                c.end_line,
+                c.checksum,
+                f.checksum,
+                f.mtime_ns
+            FROM vault_chunk c
+            JOIN vault_file f ON f.id = c.file_id
+            LEFT JOIN vault_embedding e
+                ON e.record_id = c.id
+               AND e.record_kind = 'vault_chunk'
+               AND e.embedding_model = ?
+               AND e.content_checksum = c.checksum
+               AND e.source_checksum = f.checksum
+               AND e.deleted_at IS NULL
+            WHERE c.deleted_at IS NULL
+              AND f.deleted_at IS NULL
+              AND e.id IS NULL
+            ORDER BY c.path, c.start_line, c.id
+            LIMIT ?
+            "#,
+        )?;
+        let mut rows = statement.query(duckdb::params![embedding_model, limit as i64])?;
+        let mut candidates = Vec::new();
+        while let Some(row) = rows.next()? {
+            candidates.push(VaultChunkEmbeddingCandidate {
+                id: row.get(0)?,
+                file_id: row.get(1)?,
+                path: row.get(2)?,
+                title: row.get(3)?,
+                heading: row.get(4)?,
+                content: row.get(5)?,
+                start_line: row.get(6)?,
+                end_line: row.get(7)?,
+                checksum: row.get(8)?,
+                source_checksum: row.get(9)?,
+                mtime_ns: row.get(10)?,
+            });
+        }
+        Ok(candidates)
+    }
+
+    pub fn query_vault_chunks_by_embedding(
+        &self,
+        embedding_model: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<VaultChunkEmbeddingHit>> {
+        if limit == 0 || query_embedding.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT
+                c.id,
+                c.file_id,
+                c.path,
+                f.title,
+                c.heading,
+                c.content,
+                c.start_line,
+                c.end_line,
+                c.checksum,
+                f.checksum,
+                f.mtime_ns,
+                e.embedding_model,
+                e.embedding_json
+            FROM vault_embedding e
+            JOIN vault_chunk c ON c.id = e.record_id
+            JOIN vault_file f ON f.id = c.file_id
+            WHERE e.record_kind = 'vault_chunk'
+              AND e.embedding_model = ?
+              AND e.embedding_dim = ?
+              AND e.content_checksum = c.checksum
+              AND e.source_checksum = f.checksum
+              AND e.deleted_at IS NULL
+              AND c.deleted_at IS NULL
+              AND f.deleted_at IS NULL
+            ORDER BY c.path, c.start_line, c.id
+            "#,
+        )?;
+        let mut rows = statement.query(duckdb::params![
+            embedding_model,
+            i64::try_from(query_embedding.len()).unwrap_or(i64::MAX)
+        ])?;
+        let mut hits = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let embedding_json: String = row.get(12)?;
+            let embedding = parse_embedding_json(&embedding_json)
+                .with_context(|| format!("invalid stored embedding for row {id}"))?;
+            let score = cosine_similarity(query_embedding, &embedding);
+            hits.push(VaultChunkEmbeddingHit {
+                id,
+                file_id: row.get(1)?,
+                path: row.get(2)?,
+                title: row.get(3)?,
+                heading: row.get(4)?,
+                content: row.get(5)?,
+                start_line: row.get(6)?,
+                end_line: row.get(7)?,
+                checksum: row.get(8)?,
+                source_checksum: row.get(9)?,
+                mtime_ns: row.get(10)?,
+                embedding_model: row.get(11)?,
+                score,
+            });
+        }
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| left.start_line.cmp(&right.start_line))
+        });
+        hits.truncate(limit);
+        Ok(hits)
     }
 
     pub fn query_vault_chunks(
@@ -567,6 +779,19 @@ impl DuckDbBrokerStore {
                 deleted_at VARCHAR
             );
 
+            CREATE TABLE IF NOT EXISTS vault_embedding (
+                id VARCHAR PRIMARY KEY,
+                record_id VARCHAR NOT NULL,
+                record_kind VARCHAR NOT NULL,
+                embedding_model VARCHAR NOT NULL,
+                embedding_dim BIGINT NOT NULL,
+                embedding_json VARCHAR NOT NULL,
+                content_checksum VARCHAR NOT NULL,
+                source_checksum VARCHAR NOT NULL,
+                updated_at VARCHAR NOT NULL,
+                deleted_at VARCHAR
+            );
+
             CREATE TABLE IF NOT EXISTS graph_edge (
                 id VARCHAR PRIMARY KEY,
                 source_id VARCHAR NOT NULL,
@@ -577,6 +802,7 @@ impl DuckDbBrokerStore {
             );
             "#,
         )?;
+        self.ensure_vault_embedding_columns()?;
         Ok(())
     }
 
@@ -605,6 +831,15 @@ impl DuckDbBrokerStore {
                 record.frontmatter_json,
                 record.deleted_at.as_deref()
             ],
+        )?;
+        self.connection.execute(
+            r#"
+            DELETE FROM vault_embedding
+            WHERE record_kind = 'vault_chunk'
+              AND source_checksum <> ?
+              AND record_id IN (SELECT id FROM vault_chunk WHERE file_id = ?)
+            "#,
+            duckdb::params![record.checksum, record.id],
         )?;
         Ok(())
     }
@@ -637,6 +872,22 @@ impl DuckDbBrokerStore {
                 record.deleted_at.as_deref()
             ],
         )?;
+        if record.deleted_at.is_some() {
+            self.connection.execute(
+                "DELETE FROM vault_embedding WHERE record_kind = 'vault_chunk' AND record_id = ?",
+                duckdb::params![record.id],
+            )?;
+        } else {
+            self.connection.execute(
+                r#"
+                DELETE FROM vault_embedding
+                WHERE record_kind = 'vault_chunk'
+                  AND record_id = ?
+                  AND content_checksum <> ?
+                "#,
+                duckdb::params![record.id, record.checksum],
+            )?;
+        }
         Ok(())
     }
 
@@ -719,6 +970,116 @@ impl DuckDbBrokerStore {
         Ok(())
     }
 
+    fn upsert_vault_embedding(&self, record: &VaultEmbeddingRecord) -> Result<()> {
+        if record.embedding.is_empty() {
+            return Err(anyhow!("vault embedding {} cannot be empty", record.id));
+        }
+        let embedding_dim = i64::try_from(record.embedding.len())
+            .map_err(|_| anyhow!("vault embedding {} dimension is too large", record.id))?;
+        let embedding_json = serde_json::to_string(&record.embedding)
+            .with_context(|| format!("failed to serialize vault embedding {}", record.id))?;
+
+        self.connection.execute(
+            r#"
+            DELETE FROM vault_embedding
+            WHERE record_id = ?
+              AND record_kind = ?
+              AND embedding_model = ?
+              AND id <> ?
+            "#,
+            duckdb::params![
+                record.record_id,
+                record.record_kind,
+                record.embedding_model,
+                record.id
+            ],
+        )?;
+
+        self.connection.execute(
+            r#"
+            INSERT INTO vault_embedding
+                (
+                    id,
+                    record_id,
+                    record_kind,
+                    embedding_model,
+                    embedding_dim,
+                    embedding_json,
+                    content_checksum,
+                    source_checksum,
+                    updated_at,
+                    deleted_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                record_id = excluded.record_id,
+                record_kind = excluded.record_kind,
+                embedding_model = excluded.embedding_model,
+                embedding_dim = excluded.embedding_dim,
+                embedding_json = excluded.embedding_json,
+                content_checksum = excluded.content_checksum,
+                source_checksum = excluded.source_checksum,
+                updated_at = excluded.updated_at,
+                deleted_at = excluded.deleted_at
+            "#,
+            duckdb::params![
+                record.id,
+                record.record_id,
+                record.record_kind,
+                record.embedding_model,
+                embedding_dim,
+                embedding_json,
+                record.content_checksum,
+                record.source_checksum,
+                record.updated_at,
+                record.deleted_at.as_deref()
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn ensure_vault_embedding_columns(&self) -> Result<()> {
+        let columns = [
+            ("record_id", "VARCHAR"),
+            ("record_kind", "VARCHAR"),
+            ("embedding_model", "VARCHAR"),
+            ("embedding_dim", "BIGINT"),
+            ("embedding_json", "VARCHAR"),
+            ("content_checksum", "VARCHAR"),
+            ("source_checksum", "VARCHAR"),
+            ("updated_at", "VARCHAR"),
+            ("deleted_at", "VARCHAR"),
+        ];
+        for (column, column_type) in columns {
+            if !self.table_has_column("vault_embedding", column)? {
+                self.connection.execute(
+                    &format!("ALTER TABLE vault_embedding ADD COLUMN {column} {column_type}"),
+                    [],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn table_has_column(&self, table: &str, column: &str) -> Result<bool> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT count(*)
+            FROM information_schema.columns
+            WHERE table_name = ?
+              AND column_name = ?
+            "#,
+        )?;
+        let mut rows = statement.query(duckdb::params![table, column])?;
+        let Some(row) = rows.next()? else {
+            return Err(anyhow!(
+                "information_schema query returned no rows for {table}.{column}"
+            ));
+        };
+        let count: i64 = row.get(0)?;
+        Ok(count > 0)
+    }
+
     fn count_table(&self, table: &str, clause: &str) -> Result<i64> {
         let mut statement = self
             .connection
@@ -762,6 +1123,9 @@ impl DuckDbBrokerStoreService {
                     BrokerStoreRequest::UpsertVaultRecords(batch, response) => {
                         let _ = response.send(store.upsert_vault_records(batch));
                     }
+                    BrokerStoreRequest::UpsertVaultEmbeddings(records, response) => {
+                        let _ = response.send(store.upsert_vault_embeddings(records));
+                    }
                     BrokerStoreRequest::ReplaceFileRecords {
                         file_id,
                         batch,
@@ -803,6 +1167,27 @@ impl DuckDbBrokerStoreService {
                     } => {
                         let _ = response.send(store.query_vault_links(&query, limit));
                     }
+                    BrokerStoreRequest::ListMissingVaultChunkEmbeddings {
+                        embedding_model,
+                        limit,
+                        response,
+                    } => {
+                        let _ = response.send(
+                            store.list_missing_vault_chunk_embeddings(&embedding_model, limit),
+                        );
+                    }
+                    BrokerStoreRequest::QueryVaultChunksByEmbedding {
+                        embedding_model,
+                        query_embedding,
+                        limit,
+                        response,
+                    } => {
+                        let _ = response.send(store.query_vault_chunks_by_embedding(
+                            &embedding_model,
+                            &query_embedding,
+                            limit,
+                        ));
+                    }
                     BrokerStoreRequest::BackupTo {
                         backup_path,
                         response,
@@ -838,6 +1223,10 @@ impl DuckDbBrokerStoreService {
         self.client.upsert_vault_records(batch)
     }
 
+    pub fn upsert_vault_embeddings(&self, records: Vec<VaultEmbeddingRecord>) -> Result<()> {
+        self.client.upsert_vault_embeddings(records)
+    }
+
     pub fn tombstone_file_records(&self, file_id: &str, deleted_at: &str) -> Result<()> {
         self.client.tombstone_file_records(file_id, deleted_at)
     }
@@ -868,6 +1257,25 @@ impl DuckDbBrokerStoreService {
 
     pub fn query_vault_links(&self, query: &str, limit: usize) -> Result<Vec<VaultLinkContextRow>> {
         self.client.query_vault_links(query, limit)
+    }
+
+    pub fn list_missing_vault_chunk_embeddings(
+        &self,
+        embedding_model: &str,
+        limit: usize,
+    ) -> Result<Vec<VaultChunkEmbeddingCandidate>> {
+        self.client
+            .list_missing_vault_chunk_embeddings(embedding_model, limit)
+    }
+
+    pub fn query_vault_chunks_by_embedding(
+        &self,
+        embedding_model: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<VaultChunkEmbeddingHit>> {
+        self.client
+            .query_vault_chunks_by_embedding(embedding_model, query_embedding, limit)
     }
 
     pub fn backup_to(&self, backup_path: impl AsRef<Path>) -> Result<PathBuf> {
@@ -915,6 +1323,10 @@ impl DuckDbBrokerStoreClient {
 
     pub fn upsert_vault_records(&self, batch: VaultRecordBatch) -> Result<()> {
         self.request(|response| BrokerStoreRequest::UpsertVaultRecords(batch, response))
+    }
+
+    pub fn upsert_vault_embeddings(&self, records: Vec<VaultEmbeddingRecord>) -> Result<()> {
+        self.request(|response| BrokerStoreRequest::UpsertVaultEmbeddings(records, response))
     }
 
     pub fn tombstone_file_records(&self, file_id: &str, deleted_at: &str) -> Result<()> {
@@ -969,6 +1381,34 @@ impl DuckDbBrokerStoreClient {
         })
     }
 
+    pub fn list_missing_vault_chunk_embeddings(
+        &self,
+        embedding_model: &str,
+        limit: usize,
+    ) -> Result<Vec<VaultChunkEmbeddingCandidate>> {
+        self.request(
+            |response| BrokerStoreRequest::ListMissingVaultChunkEmbeddings {
+                embedding_model: embedding_model.to_string(),
+                limit,
+                response,
+            },
+        )
+    }
+
+    pub fn query_vault_chunks_by_embedding(
+        &self,
+        embedding_model: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<VaultChunkEmbeddingHit>> {
+        self.request(|response| BrokerStoreRequest::QueryVaultChunksByEmbedding {
+            embedding_model: embedding_model.to_string(),
+            query_embedding: query_embedding.to_vec(),
+            limit,
+            response,
+        })
+    }
+
     pub fn backup_to(&self, backup_path: impl AsRef<Path>) -> Result<PathBuf> {
         let backup_path = backup_path.as_ref().expand_homeish();
         self.request(|response| BrokerStoreRequest::BackupTo {
@@ -997,6 +1437,7 @@ impl DuckDbBrokerStoreClient {
 enum BrokerStoreRequest {
     ReplaceVaultRecords(VaultRecordBatch, mpsc::Sender<Result<()>>),
     UpsertVaultRecords(VaultRecordBatch, mpsc::Sender<Result<()>>),
+    UpsertVaultEmbeddings(Vec<VaultEmbeddingRecord>, mpsc::Sender<Result<()>>),
     ReplaceFileRecords {
         file_id: String,
         batch: VaultRecordBatch,
@@ -1024,6 +1465,17 @@ enum BrokerStoreRequest {
         limit: usize,
         response: mpsc::Sender<Result<Vec<VaultLinkContextRow>>>,
     },
+    ListMissingVaultChunkEmbeddings {
+        embedding_model: String,
+        limit: usize,
+        response: mpsc::Sender<Result<Vec<VaultChunkEmbeddingCandidate>>>,
+    },
+    QueryVaultChunksByEmbedding {
+        embedding_model: String,
+        query_embedding: Vec<f32>,
+        limit: usize,
+        response: mpsc::Sender<Result<Vec<VaultChunkEmbeddingHit>>>,
+    },
     BackupTo {
         backup_path: PathBuf,
         response: mpsc::Sender<Result<PathBuf>>,
@@ -1039,6 +1491,41 @@ fn query_terms(query: &str) -> Vec<String> {
             if term.is_empty() { None } else { Some(term) }
         })
         .collect()
+}
+
+fn parse_embedding_json(value: &str) -> Result<Vec<f32>> {
+    let embedding: Vec<f32> = serde_json::from_str(value)?;
+    if embedding.is_empty() {
+        return Err(anyhow!("stored embedding vector is empty"));
+    }
+    Ok(embedding)
+}
+
+fn cosine_similarity(query: &[f32], candidate: &[f32]) -> f64 {
+    if query.len() != candidate.len() || query.is_empty() {
+        return 0.0;
+    }
+
+    let dot: f64 = query
+        .iter()
+        .zip(candidate.iter())
+        .map(|(left, right)| f64::from(*left) * f64::from(*right))
+        .sum();
+    let query_norm: f64 = query
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+    let candidate_norm: f64 = candidate
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+
+    if query_norm == 0.0 || candidate_norm == 0.0 {
+        return 0.0;
+    }
+    dot / (query_norm * candidate_norm)
 }
 
 fn score_query_hit(query: &str, terms: &[String], haystack: &str) -> Option<(f64, Vec<String>)> {

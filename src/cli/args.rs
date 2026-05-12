@@ -417,6 +417,25 @@ pub(crate) enum BrokerCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Backfill missing Vault chunk embeddings in the DuckDB broker store
+    EmbedVault {
+        /// DuckDB broker-store path. Defaults to JCODE_BROKER_DUCKDB_PATH or the runtime broker DB.
+        #[arg(long)]
+        db: Option<String>,
+
+        /// Embedding model label to write with each vector
+        #[arg(long, default_value = "jcode-local-embedding")]
+        model: String,
+
+        /// Maximum missing chunks to embed in this run
+        #[arg(long, default_value_t = 64)]
+        limit: usize,
+
+        /// Emit JSON report
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

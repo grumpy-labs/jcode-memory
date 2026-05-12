@@ -94,6 +94,37 @@ fn broker_ingest_vault_subcommand_parses() {
 }
 
 #[test]
+fn broker_embed_vault_subcommand_parses() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "broker",
+        "embed-vault",
+        "--db",
+        "/tmp/broker.duckdb",
+        "--model",
+        "test-model",
+        "--limit",
+        "7",
+        "--json",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::Broker(BrokerCommand::EmbedVault {
+            db,
+            model,
+            limit,
+            json,
+        })) => {
+            assert_eq!(db.as_deref(), Some("/tmp/broker.duckdb"));
+            assert_eq!(model, "test-model");
+            assert_eq!(limit, 7);
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
 fn session_rename_subcommand_parses() {
     let args = Args::try_parse_from([
         "jcode",
