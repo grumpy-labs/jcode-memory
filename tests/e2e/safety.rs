@@ -5,7 +5,7 @@
 /// Test safety system: action classification
 #[test]
 fn test_safety_classification() {
-    use jcode::safety::SafetySystem;
+    use jcode::safety::{ActionTier, SafetyActionCategory, SafetySystem};
 
     let safety = SafetySystem::new();
 
@@ -27,8 +27,23 @@ fn test_safety_classification() {
     assert!(safety.classify("send_email") == jcode::safety::ActionTier::RequiresPermission);
 
     // Case insensitive
-    assert!(safety.classify("READ") == jcode::safety::ActionTier::AutoAllowed);
-    assert!(safety.classify("Bash") == jcode::safety::ActionTier::RequiresPermission);
+    assert!(safety.classify("READ") == ActionTier::AutoAllowed);
+    assert!(safety.classify("Bash") == ActionTier::RequiresPermission);
+
+    let local_garden = safety.classify_action("ambient_garden_apply");
+    assert_eq!(local_garden.tier, ActionTier::AutoAllowed);
+    assert_eq!(local_garden.category, SafetyActionCategory::LocalGarden);
+
+    let external_message = safety.classify_action("send_message");
+    assert_eq!(external_message.tier, ActionTier::RequiresPermission);
+    assert_eq!(
+        external_message.category,
+        SafetyActionCategory::ExternalCommunication
+    );
+
+    let code_change = safety.classify_action("apply_patch");
+    assert_eq!(code_change.tier, ActionTier::RequiresPermission);
+    assert_eq!(code_change.category, SafetyActionCategory::CodeChange);
 }
 
 /// Test safety system: permission request queue + decision flow

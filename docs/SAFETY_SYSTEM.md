@@ -1,9 +1,9 @@
 # Safety System
 
-> **Status:** Design
-> **Updated:** 2026-02-08
+> **Status:** Implemented v1 for ambient/non-local autonomy gating
+> **Updated:** 2026-05-12
 
-A human-in-the-loop safety layer for unmonitored agent operations. Designed as an independent subsystem that any jcode feature can integrate with. Currently the only consumer is ambient mode, but the system is intentionally decoupled so it can be reused for future features.
+A human-in-the-loop safety layer for unmonitored agent operations. Designed as an independent subsystem that any jcode feature can integrate with. Currently the main consumer is ambient mode, but the system is intentionally decoupled so it can be reused for future features.
 
 ## Overview
 
@@ -14,7 +14,7 @@ When an agent operates without direct user supervision (e.g. ambient mode), it n
 4. **Wait or move on** while the user reviews
 5. **Report what it did** after each session
 
-The safety system provides all of this. There are only two tiers: auto-allowed and requires-permission. There is no "always denied" — if the user explicitly approves something, the agent can do it. The core principle is that **anything that communicates with another human or leaves a trace outside the local sandbox requires permission.**
+The safety system provides all of this. There are only two tiers: auto-allowed and requires-permission. There is no "always denied" -- if the user explicitly approves something, the agent can do it. The core principle is that **anything that communicates with another human or leaves a trace outside the local sandbox requires permission.**
 
 ---
 
@@ -31,10 +31,11 @@ graph TB
 
     subgraph "Safety System"
         RQ[(Review Queue<br/>persistent)]
-        CL[Action Classifier]
+        CL[Action Classifier<br/>tier + category + reason]
         NF[Notification Dispatcher]
         TL[Transcript Logger]
         SR[Session Reporter]
+        DBG[Debug classify command]
     end
 
     subgraph "Notification Channels"
@@ -52,6 +53,7 @@ graph TB
     end
 
     A --> CL
+    DBG --> CL
     CL --> AC
     AC -->|safe| AUTO
     AC -->|needs review| PERM
@@ -82,57 +84,47 @@ graph TB
 
 ## Action Classification
 
-Every action an agent wants to take is classified into one of two tiers. There is no "always denied" tier — if the user approves it, the agent can do it. The safety system's job is to make sure the user is asked, not to prevent actions entirely.
+Every action an agent wants to take is classified into one of two tiers and one category. There is no "always denied" tier -- if the user approves it, the agent can do it. The safety system's job is to make sure the user is asked, not to prevent actions entirely.
+
+The v1 classifier exposes:
+
+- `classify(action) -> ActionTier`
+- `classify_action(action) -> { tier, category, reason }`
+- `requires_permission(action) -> bool`
+- `review_or_request_permission(request) -> PermissionResult`
+
+The debug socket also supports `ambient:safety:classify:<action>` so operators can inspect the current tier/category without starting a cycle.
 
 ### Tier 1: Auto-Allowed (no permission needed)
 
 Actions that are local, reversible, and don't affect anything outside the project sandbox.
 
-| Action | Rationale |
-|--------|-----------|
-| Read files in project | Read-only, no side effects |
-| Read git history / status | Read-only |
-| Run tests (read-only) | Verification, no mutations |
-| Memory operations (within per-cycle caps) | Local data, reversible |
-| Create local branches / git worktrees | Local only, easily deleted |
-| Write to ambient's own log/state files | Internal bookkeeping |
-| Embed / similarity search | Computation only |
-| Analyze sessions for extraction | Read-only analysis |
+| Category | Examples | Rationale |
+|----------|----------|-----------|
+| `local_read` | `read`, `grep`, `conversation_search`, `session_search`, `git_status` | Read-only local inspection |
+| `local_memory` | `memory`, `todo`, `memory_consolidation`, `memory_prune`, `semantic_search` | Local broker memory/todo maintenance |
+| `local_garden` | `ambient_garden`, `ambient_garden_apply`, `vault_embedding_backfill`, stale-fact reconciliation | Explicit local broker-index gardening |
+| `local_verification` | `run_tests`, `cargo_test`, `cargo_check`, `python_unittest` | Local verification without project-file edits or external communication |
+| `local_state` | `schedule_ambient`, `end_ambient_cycle`, `write_ambient_log`, `save_transcript` | Ambient runtime bookkeeping |
 
 ### Tier 2: Requires Permission (ask user)
 
-Actions that leave a trace outside the local sandbox, affect shared state, or can't be easily undone. **The general rule: anything that communicates directly with another human always requires permission — no exceptions.**
+Actions that leave a trace outside the local sandbox, affect shared state, or can't be easily undone. **The general rule: anything that communicates directly with another human always requires permission -- no exceptions.**
 
-| Action | Rationale |
-|--------|-----------|
-| **Communication with humans (always Tier 2)** | |
-| Send emails | Irreversible, visible to others |
-| Submit assignments | Academic consequences |
-| Post to Slack / Discord / chat | Visible to others |
-| Create GitHub issues / PR comments | Publicly visible |
-| Any form of direct human communication | Cannot be unsent |
-| **Code modifications** | |
-| Modify code in a repo (must use worktree + PR) | Requires review before merge |
-| Push to remote | Visible to collaborators |
-| Create pull requests | Visible to collaborators |
-| Modify CI/CD pipelines | Affects shared infrastructure |
-| **System changes** | |
-| Install system packages | Modifies system state |
-| Modify dotfiles / system config | Affects other tools |
-| Start network services / open ports | Security implications |
-| **Deployment** | |
-| Deploy to any environment | Affects users/services |
-| **Data** | |
-| Delete files outside project sandbox | May not be recoverable |
-| Drop databases / clear non-trivial caches | Data loss risk |
-| **Financial / Account** | |
-| Purchases / billing changes | Financial consequences |
-| Change passwords / API keys / auth | Security consequences |
-| Revoke tokens / modify permissions | Access consequences |
+| Category | Examples | Rationale |
+|----------|----------|-----------|
+| `external_communication` | `send_message`, `send_email`, Slack/Discord/Telegram posts, GitHub issues/comments | Visible to humans and cannot be unsent |
+| `code_change` | `write`, `edit`, `patch`, `apply_patch`, refactors | Changes project state and needs review |
+| `remote_git` | `push`, `create_pull_request`, `open_pr`, `merge_pr` | Leaves a durable shared repository trace |
+| `system_change` | `bash`, installs, dotfiles/config changes, services/ports, web fetch/search | Can escape local broker assumptions |
+| `deployment` | `deploy`, `release`, `publish` | Affects external environments or artifacts |
+| `destructive_data` | `delete_file`, `rm`, `drop_database`, cache clears | Data loss or hard-to-undo side effects |
+| `financial_or_account` | purchases, billing, passwords, token revocation, permission changes | Financial, credential, or access consequences |
+| **`unknown`** | Any unrecognized action | Defaults to permission required |
 
 ### Custom Rules
 
-Users can configure custom classification rules to promote or demote actions:
+Future custom classification rules can promote or demote actions. They are not part of the v1 implementation:
 
 ```toml
 [safety.rules]
@@ -159,7 +151,7 @@ sequenceDiagram
     participant US as User
 
     AG->>CL: "I want to create a PR"
-    CL->>CL: Classify action → Tier 2
+    CL->>CL: Classify action as Tier 2
     CL->>AG: Permission required
 
     AG->>RQ: request_permission({action, context, rationale})
@@ -201,22 +193,23 @@ Available to any agent operating under the safety system:
 }
 ```
 
-**Response:**
+**Internal result:**
 ```rust
-// If wait=true and user responds:
-{ "approved": true, "message": "looks good" }
+// Local, auto-allowed action:
+{ "type": "approved", "message": "auto-allowed local action: ..." }
 
-// If wait=true and timeout:
-{ "approved": false, "reason": "timeout", "timeout_minutes": 60 }
+// Non-local action awaiting review:
+{ "type": "queued", "request_id": "req_abc123" }
 
-// If wait=false:
-{ "queued": true, "request_id": "req_abc123" }
+// Future wait/decision paths:
+{ "type": "denied", "reason": "..." }
+{ "type": "timeout" }
 ```
 
 ### Agent Behavior While Waiting
 
 When the agent requests permission with `wait: true`:
-- It doesn't block the entire cycle — it moves on to other ambient tasks
+- It doesn't block the entire cycle -- it moves on to other ambient tasks
 - When the user approves, the action is queued for the next cycle (or current cycle if still running)
 - If the user doesn't respond within a configurable timeout, the request expires and is logged
 
@@ -443,7 +436,7 @@ Past decisions are stored so the system can learn patterns:
 }
 ```
 
-This history could eventually feed into smarter classification — if the user always approves a certain type of action, suggest promoting it to auto-allowed.
+This history could eventually feed into smarter classification -- if the user always approves a certain type of action, suggest promoting it to auto-allowed.
 
 ---
 
@@ -509,14 +502,15 @@ pub enum Urgency {
 ## Implementation Phases
 
 ### Phase 1: Foundation
-- [ ] Action classifier (tier 1/2/3 lookup)
-- [ ] Review queue (persistent storage)
-- [ ] `request_permission` tool for agents
-- [ ] Transcript logger
-- [ ] Basic session summary generation
+- [x] Action classifier (tier/category/reason lookup)
+- [x] Review queue (persistent storage)
+- [x] `request_permission` tool for ambient agents
+- [x] Transcript logger
+- [x] Basic session summary generation
+- [x] Auto-allow local memory/garden actions while queueing non-local autonomy
 
 ### Phase 2: Notification Channels
-- [ ] Desktop notifications (notify-send / Wayland)
+- [x] Desktop notifications for queued permission requests
 - [ ] Email notifications (SMTP)
 - [ ] Webhook support
 - [ ] Notification batching and quiet hours
@@ -524,6 +518,7 @@ pub enum Urgency {
 
 ### Phase 3: Review Interfaces
 - [ ] TUI review panel
+- [x] Debug socket commands (`ambient:permissions`, `ambient:approve:<id>`, `ambient:deny:<id>`, `ambient:safety:classify:<action>`)
 - [ ] CLI commands (`jcode safety review/list/approve/deny/log`)
 - [ ] Email approve/deny links (relay service)
 
@@ -540,4 +535,4 @@ pub enum Urgency {
 
 ---
 
-*Last updated: 2026-02-08*
+*Last updated: 2026-05-12*

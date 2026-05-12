@@ -637,12 +637,26 @@ impl Tool for RequestPermissionTool {
 
         let request_id = safety::new_request_id();
         let now = Utc::now();
-        let review = build_permission_review_context(
+        let system = get_safety_system();
+        let classification = system.classify_action(&params.action);
+        let requires_permission = classification.requires_permission();
+        let mut review = build_permission_review_context(
             &params.action,
             &params.description,
             &params.rationale,
             params.context.as_ref(),
         );
+        if let Some(obj) = review.as_object_mut() {
+            obj.insert(
+                "safety".to_string(),
+                json!({
+                    "tier": classification.tier,
+                    "category": classification.category,
+                    "reason": classification.reason.clone(),
+                    "requires_permission": requires_permission,
+                }),
+            );
+        }
         let mut request_context = json!({
             "session_id": ctx.session_id,
             "message_id": ctx.message_id,
@@ -668,13 +682,12 @@ impl Tool for RequestPermissionTool {
             context: Some(request_context),
         };
 
-        let system = get_safety_system();
-        let result = system.request_permission(request);
+        let result = system.review_or_request_permission(request);
 
         let output = match result {
             PermissionResult::Approved { ref message } => {
                 let msg = message.as_deref().unwrap_or("no message");
-                format!("Permission approved: {}", msg)
+                format!("Auto-approved by safety gate: {}", msg)
             }
             PermissionResult::Denied { ref reason } => {
                 let reason = reason.as_deref().unwrap_or("no reason given");

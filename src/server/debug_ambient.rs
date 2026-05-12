@@ -86,6 +86,20 @@ pub(super) async fn maybe_handle_ambient_command(
         return Ok(Some(output));
     }
 
+    if let Some(action) = cmd.strip_prefix("ambient:safety:classify:") {
+        let action = action.trim();
+        if action.is_empty() {
+            return Err(anyhow::anyhow!("Usage: ambient:safety:classify:<action>"));
+        }
+        let classification = if let Some(runner) = ambient_runner {
+            runner.safety().classify_action(action)
+        } else {
+            crate::safety::SafetySystem::new().classify_action(action)
+        };
+        let output = serde_json::to_string_pretty(&classification)?;
+        return Ok(Some(output));
+    }
+
     if cmd == "ambient:permissions" {
         let output = if let Some(runner) = ambient_runner {
             let _ = runner
@@ -200,6 +214,7 @@ pub(super) async fn maybe_handle_ambient_command(
   ambient:log                 - Recent transcript summaries
   ambient:garden              - Read-only broker index garden report
   ambient:garden:apply[:kind] - Explicitly apply garden actions: all, embeddings, duplicates, tombstones, facts, retroactive
+  ambient:safety:classify:<a> - Show safety tier/category for an action
   ambient:permissions         - List pending permission requests
   ambient:approve:<id>        - Approve a permission request
   ambient:deny:<id> [reason]  - Deny a permission request (optional reason)

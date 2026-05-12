@@ -90,6 +90,7 @@ AMBIENT COMMANDS (ambient: prefix):
   ambient:log                 - Recent transcript summaries
   ambient:garden              - Read-only broker index garden report
   ambient:garden:apply[:kind] - Explicit garden apply actions: all, embeddings, duplicates, tombstones, facts, retroactive
+  ambient:safety:classify:<a> - Show safety tier/category for an action
   ambient:permissions         - List pending permission requests
   ambient:approve:<id>        - Approve a permission request
   ambient:deny:<id> [reason]  - Deny a permission request (optional reason)

@@ -19,6 +19,53 @@ pub enum ActionTier {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum SafetyActionCategory {
+    LocalRead,
+    LocalMemory,
+    LocalGarden,
+    LocalVerification,
+    LocalState,
+    ExternalCommunication,
+    CodeChange,
+    RemoteGit,
+    SystemChange,
+    Deployment,
+    DestructiveData,
+    FinancialOrAccount,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionClassification {
+    pub tier: ActionTier,
+    pub category: SafetyActionCategory,
+    pub reason: String,
+}
+
+impl ActionClassification {
+    pub fn requires_permission(&self) -> bool {
+        self.tier == ActionTier::RequiresPermission
+    }
+
+    fn auto_allowed(category: SafetyActionCategory, reason: impl Into<String>) -> Self {
+        Self {
+            tier: ActionTier::AutoAllowed,
+            category,
+            reason: reason.into(),
+        }
+    }
+
+    fn permission_required(category: SafetyActionCategory, reason: impl Into<String>) -> Self {
+        Self {
+            tier: ActionTier::RequiresPermission,
+            category,
+            reason: reason.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Urgency {
     Low,
     Normal,
@@ -107,19 +154,278 @@ pub struct AmbientTranscript {
 // Tier-1 (auto-allowed) action names
 // ---------------------------------------------------------------------------
 
-const AUTO_ALLOWED: &[&str] = &[
+const LOCAL_READ_ACTIONS: &[&str] = &[
     "read",
     "glob",
     "grep",
     "ls",
+    "conversation_search",
+    "session_search",
+    "codesearch",
+    "query_vault",
+    "git_status",
+    "git_log",
+    "ambient_status",
+    "ambient_queue",
+    "ambient_log",
+    "ambient_permissions",
+    "ambient_safety_classify",
+];
+
+const LOCAL_MEMORY_ACTIONS: &[&str] = &[
     "memory",
     "todo",
     "todowrite",
     "todoread",
-    "conversation_search",
-    "session_search",
-    "codesearch",
+    "memory_consolidation",
+    "memory_prune",
+    "memory_verification",
+    "derive_memory",
+    "semantic_search",
+    "cascade_retrieval",
 ];
+
+const LOCAL_GARDEN_ACTIONS: &[&str] = &[
+    "ambient_garden",
+    "ambient_garden_apply",
+    "ambient_garden_report",
+    "ambient_garden_embedding_backfill",
+    "ambient_garden_duplicate_consolidation",
+    "ambient_garden_tombstone_prune",
+    "ambient_garden_stale_fact_verification",
+    "ambient_garden_retroactive_extraction",
+    "vault_embedding_backfill",
+    "duplicate_entity_consolidation",
+    "stale_tombstone_prune",
+    "stale_fact_verification",
+    "retroactive_extraction",
+];
+
+const LOCAL_VERIFICATION_ACTIONS: &[&str] = &[
+    "run_tests",
+    "cargo_test",
+    "cargo_check",
+    "python_unittest",
+    "lint",
+];
+
+const LOCAL_STATE_ACTIONS: &[&str] = &[
+    "schedule_ambient",
+    "end_ambient_cycle",
+    "write_ambient_log",
+    "save_transcript",
+];
+
+const EXTERNAL_COMMUNICATION_ACTIONS: &[&str] = &[
+    "send_message",
+    "send_email",
+    "email",
+    "gmail_send",
+    "slack_post",
+    "discord_post",
+    "telegram_send",
+    "communicate",
+    "pr_comment",
+    "github_pr_comment",
+    "create_github_issue",
+];
+
+const CODE_CHANGE_ACTIONS: &[&str] = &[
+    "write",
+    "edit",
+    "multiedit",
+    "patch",
+    "apply_patch",
+    "modify_code",
+    "code_change",
+    "refactor",
+    "rewrite_file",
+];
+
+const REMOTE_GIT_ACTIONS: &[&str] = &[
+    "push",
+    "git_push",
+    "create_pull_request",
+    "open_pr",
+    "merge_pr",
+    "pull_request",
+    "pr",
+];
+
+const SYSTEM_CHANGE_ACTIONS: &[&str] = &[
+    "bash",
+    "shell",
+    "exec",
+    "install",
+    "brew_install",
+    "apt_install",
+    "install_system_package",
+    "modify_dotfiles",
+    "launchctl",
+    "open_port",
+    "start_network_service",
+    "system_config",
+    "launch",
+    "open",
+    "webfetch",
+    "websearch",
+];
+
+const DEPLOYMENT_ACTIONS: &[&str] = &["deploy", "release", "publish"];
+
+const DESTRUCTIVE_DATA_ACTIONS: &[&str] = &[
+    "delete",
+    "delete_file",
+    "rm",
+    "drop_database",
+    "clear_cache",
+    "truncate",
+    "destroy",
+    "wipe",
+];
+
+const FINANCIAL_OR_ACCOUNT_ACTIONS: &[&str] = &[
+    "purchase",
+    "billing_change",
+    "change_password",
+    "revoke_token",
+    "modify_permissions",
+    "account_change",
+];
+
+fn classify_action_name(action: &str) -> ActionClassification {
+    let normalized = normalize_action(action);
+    if normalized.is_empty() {
+        return ActionClassification::permission_required(
+            SafetyActionCategory::Unknown,
+            "Empty or missing action name requires review.",
+        );
+    }
+
+    if action_matches(&normalized, LOCAL_READ_ACTIONS, &[]) {
+        return ActionClassification::auto_allowed(
+            SafetyActionCategory::LocalRead,
+            "Read-only local inspection stays inside the local sandbox.",
+        );
+    }
+    if action_matches(&normalized, LOCAL_MEMORY_ACTIONS, &[]) {
+        return ActionClassification::auto_allowed(
+            SafetyActionCategory::LocalMemory,
+            "Local memory or todo maintenance stays inside broker memory.",
+        );
+    }
+    if action_matches(&normalized, LOCAL_GARDEN_ACTIONS, &["ambient_garden"]) {
+        return ActionClassification::auto_allowed(
+            SafetyActionCategory::LocalGarden,
+            "Ambient garden work mutates only local broker memory/index state.",
+        );
+    }
+    if action_matches(&normalized, LOCAL_VERIFICATION_ACTIONS, &[]) {
+        return ActionClassification::auto_allowed(
+            SafetyActionCategory::LocalVerification,
+            "Local verification does not communicate externally or change project files.",
+        );
+    }
+    if action_matches(&normalized, LOCAL_STATE_ACTIONS, &[]) {
+        return ActionClassification::auto_allowed(
+            SafetyActionCategory::LocalState,
+            "Local ambient state updates stay inside the local runtime.",
+        );
+    }
+
+    if action_matches(
+        &normalized,
+        EXTERNAL_COMMUNICATION_ACTIONS,
+        &["send_", "post_"],
+    ) {
+        return ActionClassification::permission_required(
+            SafetyActionCategory::ExternalCommunication,
+            "External or human-facing communication must be approved first.",
+        );
+    }
+    if action_matches(
+        &normalized,
+        CODE_CHANGE_ACTIONS,
+        &["edit_", "write_", "patch_"],
+    ) {
+        return ActionClassification::permission_required(
+            SafetyActionCategory::CodeChange,
+            "Code or file modifications must be approved before an ambient agent acts.",
+        );
+    }
+    if action_matches(&normalized, REMOTE_GIT_ACTIONS, &["git_push", "pr_"]) {
+        return ActionClassification::permission_required(
+            SafetyActionCategory::RemoteGit,
+            "Remote git, pull request, or review activity leaves a durable external trace.",
+        );
+    }
+    if action_matches(&normalized, SYSTEM_CHANGE_ACTIONS, &["install_", "system_"]) {
+        return ActionClassification::permission_required(
+            SafetyActionCategory::SystemChange,
+            "System, shell, network, or dependency changes require review.",
+        );
+    }
+    if action_matches(
+        &normalized,
+        DEPLOYMENT_ACTIONS,
+        &["deploy_", "release_", "publish_"],
+    ) {
+        return ActionClassification::permission_required(
+            SafetyActionCategory::Deployment,
+            "Deployments, releases, and publishing actions affect external environments.",
+        );
+    }
+    if action_matches(
+        &normalized,
+        DESTRUCTIVE_DATA_ACTIONS,
+        &["delete_", "drop_", "rm_"],
+    ) {
+        return ActionClassification::permission_required(
+            SafetyActionCategory::DestructiveData,
+            "Destructive data or file operations require explicit approval.",
+        );
+    }
+    if action_matches(
+        &normalized,
+        FINANCIAL_OR_ACCOUNT_ACTIONS,
+        &["billing_", "account_"],
+    ) {
+        return ActionClassification::permission_required(
+            SafetyActionCategory::FinancialOrAccount,
+            "Account, permission, credential, or financial operations require review.",
+        );
+    }
+
+    ActionClassification::permission_required(
+        SafetyActionCategory::Unknown,
+        "Unknown action type defaults to permission required.",
+    )
+}
+
+fn normalize_action(action: &str) -> String {
+    action
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+fn action_matches(action: &str, exact: &[&str], prefixes: &[&str]) -> bool {
+    exact.iter().any(|candidate| *candidate == action)
+        || prefixes
+            .iter()
+            .any(|prefix| action.starts_with(prefix) && action.len() > prefix.len())
+}
 
 // ---------------------------------------------------------------------------
 // SafetySystem
@@ -155,11 +461,44 @@ impl SafetySystem {
 
     /// Classify an action name into a tier.
     pub fn classify(&self, action: &str) -> ActionTier {
-        let lower = action.to_lowercase();
-        if AUTO_ALLOWED.iter().any(|&a| a == lower) {
-            ActionTier::AutoAllowed
-        } else {
-            ActionTier::RequiresPermission
+        self.classify_action(action).tier
+    }
+
+    /// Classify an action with the category and explanation used by ambient gating.
+    pub fn classify_action(&self, action: &str) -> ActionClassification {
+        classify_action_name(action)
+    }
+
+    /// True when the action must be reviewed before execution.
+    pub fn requires_permission(&self, action: &str) -> bool {
+        self.classify_action(action).requires_permission()
+    }
+
+    /// Apply the v1 safety gate: local memory/read/garden operations are approved
+    /// immediately, while non-local autonomy is queued for review.
+    pub fn review_or_request_permission(&self, request: PermissionRequest) -> PermissionResult {
+        let classification = self.classify_action(&request.action);
+        if classification.requires_permission() {
+            return self.request_permission(request);
+        }
+
+        let reason = classification.reason.clone();
+        let details = serde_json::json!({
+            "safety_category": classification.category,
+            "safety_reason": reason,
+        });
+        self.log_action(ActionLog {
+            action_type: request.action.clone(),
+            description: request.description,
+            tier: classification.tier,
+            details: Some(details),
+            timestamp: Utc::now(),
+        });
+        PermissionResult::Approved {
+            message: Some(format!(
+                "auto-allowed local action: {}",
+                classification.reason
+            )),
         }
     }
 
@@ -568,6 +907,94 @@ mod tests {
             assert_eq!(sys.classify("Read"), ActionTier::AutoAllowed);
             assert_eq!(sys.classify("GLOB"), ActionTier::AutoAllowed);
             assert_eq!(sys.classify("Bash"), ActionTier::RequiresPermission);
+        });
+    }
+
+    #[test]
+    fn test_classify_non_local_autonomy_with_categories() {
+        with_temp_home(|| {
+            let sys = SafetySystem::new();
+
+            let local = sys.classify_action("ambient_garden_apply");
+            assert_eq!(local.tier, ActionTier::AutoAllowed);
+            assert_eq!(local.category, SafetyActionCategory::LocalGarden);
+            assert!(!local.requires_permission());
+
+            let message = sys.classify_action("send_message");
+            assert_eq!(message.tier, ActionTier::RequiresPermission);
+            assert_eq!(
+                message.category,
+                SafetyActionCategory::ExternalCommunication
+            );
+            assert!(message.requires_permission());
+
+            let edit = sys.classify_action("apply_patch");
+            assert_eq!(edit.tier, ActionTier::RequiresPermission);
+            assert_eq!(edit.category, SafetyActionCategory::CodeChange);
+
+            let pr = sys.classify_action("create_pull_request");
+            assert_eq!(pr.tier, ActionTier::RequiresPermission);
+            assert_eq!(pr.category, SafetyActionCategory::RemoteGit);
+
+            let system = sys.classify_action("install_system_package");
+            assert_eq!(system.tier, ActionTier::RequiresPermission);
+            assert_eq!(system.category, SafetyActionCategory::SystemChange);
+
+            let deploy = sys.classify_action("deploy");
+            assert_eq!(deploy.tier, ActionTier::RequiresPermission);
+            assert_eq!(deploy.category, SafetyActionCategory::Deployment);
+
+            let destructive = sys.classify_action("drop_database");
+            assert_eq!(destructive.tier, ActionTier::RequiresPermission);
+            assert_eq!(destructive.category, SafetyActionCategory::DestructiveData);
+
+            let account = sys.classify_action("purchase");
+            assert_eq!(account.tier, ActionTier::RequiresPermission);
+            assert_eq!(account.category, SafetyActionCategory::FinancialOrAccount);
+        });
+    }
+
+    #[test]
+    fn test_review_or_request_permission_auto_allows_local_memory_actions() {
+        with_temp_home(|| {
+            let sys = SafetySystem::new();
+            let baseline = sys.pending_requests().len();
+            let req = PermissionRequest {
+                id: "req_memory_auto".to_string(),
+                action: "memory_consolidation".to_string(),
+                description: "Merge duplicate memories".to_string(),
+                rationale: "Local memory garden maintenance".to_string(),
+                urgency: Urgency::Low,
+                wait: false,
+                created_at: Utc::now(),
+                context: None,
+            };
+
+            let result = sys.review_or_request_permission(req);
+            assert!(matches!(result, PermissionResult::Approved { .. }));
+            assert_eq!(sys.pending_requests().len(), baseline);
+        });
+    }
+
+    #[test]
+    fn test_review_or_request_permission_queues_non_local_autonomy() {
+        with_temp_home(|| {
+            let sys = SafetySystem::new();
+            let baseline = sys.pending_requests().len();
+            let req = PermissionRequest {
+                id: "req_send_message".to_string(),
+                action: "send_message".to_string(),
+                description: "Send a status message to Telegram".to_string(),
+                rationale: "External human-facing communication".to_string(),
+                urgency: Urgency::Normal,
+                wait: false,
+                created_at: Utc::now(),
+                context: None,
+            };
+
+            let result = sys.review_or_request_permission(req);
+            assert!(matches!(result, PermissionResult::Queued { .. }));
+            assert_eq!(sys.pending_requests().len(), baseline + 1);
         });
     }
 

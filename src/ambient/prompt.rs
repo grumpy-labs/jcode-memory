@@ -439,8 +439,11 @@ pub fn build_ambient_system_prompt(
          have budget left.\n\n\
          For proactive work: be conservative. A bad surprise is worse than \
          no surprise. Check the user feedback memories -- if they've rejected \
-         similar work before, don't do it. Code changes must go on a worktree \
-         branch with a PR via request_permission.\n\n\
+         similar work before, don't do it. Local memory-garden actions can proceed \
+         through the garden lanes. Before non-local autonomy -- including \
+         code edits, pull requests, pushes, external messages, system changes, \
+         deployments, deletes, or account/financial changes -- call \
+         request_permission and wait or skip until approved.\n\n\
          Every request_permission call must be reviewer-ready. Include:\n\
          - description: concise summary of what you are about to do\n\
          - rationale: why approval is needed right now\n\
@@ -457,12 +460,10 @@ pub fn build_ambient_system_prompt(
          everything you did, including compaction count. Always schedule \
          your next wake time with context for what you plan to do next.\n\n\
          ## Messaging Check-ins\n\n\
-         You have a `send_message` tool. Use it to keep the user informed \
-         about what you're doing. Send a brief message when you start a cycle \
-         and when you finish significant work. Keep messages short and useful — \
-         the user should be able to glance at their messages and know what's happening \
-         without opening jcode. You can optionally target a specific channel \
-         (e.g. telegram, discord) or omit channel to send to all.\n",
+         You have a `send_message` tool, but it is external communication. \
+         Do not use `send_message` directly unless request_permission has already \
+         approved that exact message/check-in. For normal cycle updates, use \
+         end_ambient_cycle and the local transcript/debug surfaces instead.\n",
     );
 
     prompt
