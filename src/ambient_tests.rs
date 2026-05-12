@@ -395,6 +395,158 @@ fn garden_report_surfaces_retroactive_extraction_candidates_for_crashed_sessions
 }
 
 #[test]
+#[cfg(feature = "duckdb-storage")]
+fn garden_apply_reconciles_stale_facts_and_audits_retroactive_extraction() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let vault = temp.path().join("Vault");
+    std::fs::create_dir_all(&vault).expect("create vault");
+    std::fs::write(
+        vault.join("Alpha.md"),
+        "# Alpha\nThe garden verifier should refresh this summary.\n",
+    )
+    .expect("write Alpha");
+
+    let db_path = temp.path().join("broker.duckdb");
+    let service = jcode_storage::duckdb_broker_store::DuckDbBrokerStoreService::start(&db_path)
+        .expect("start broker store");
+    service.reconcile_vault_path(&vault).expect("ingest vault");
+    let mut alpha = service
+        .list_vault_files()
+        .expect("list files")
+        .into_iter()
+        .find(|file| file.path == "Alpha.md")
+        .expect("Alpha file");
+    alpha.checksum = "sha256:stale-source-checksum".to_string();
+    service
+        .upsert_vault_records(jcode_storage::duckdb_broker_store::VaultRecordBatch {
+            files: vec![alpha],
+            ..Default::default()
+        })
+        .expect("make summary stale");
+    assert_eq!(
+        service.count_stale_vault_summaries().expect("stale count"),
+        1
+    );
+    drop(service);
+
+    let mut session = crate::session::Session::create_with_id(
+        "session_ambient_apply_1772405007295".to_string(),
+        None,
+        Some("Apply missed extraction proof".to_string()),
+    );
+    session.set_debug(false);
+    session.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "Remember the garden apply retroactive extraction audit path.".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.mark_crashed(Some("test crash".to_string()));
+    session.save().expect("save crashed session");
+
+    let report = apply_ambient_garden_actions(AmbientGardenApplyOptions {
+        db_path: Some(db_path.clone()),
+        vault_path: Some(vault),
+        embedding_model: "test-model".to_string(),
+        kinds: vec![
+            AmbientGardenActionKind::VerifyStaleFacts,
+            AmbientGardenActionKind::RetroactiveExtraction,
+        ],
+        limit: 10,
+        tombstone_retention_days: 0,
+    })
+    .expect("apply ambient garden actions");
+
+    assert!(!report.read_only);
+    assert!(!report.autonomous_actions_allowed);
+    assert!(!report.system_changes_allowed);
+    assert_eq!(report.counts_after.stale_vault_summary_facts, 0);
+    assert!(report.actions.iter().any(|action| {
+        action.kind == "stale_fact_verification"
+            && action.status == "applied"
+            && action.summary.contains("reconciled Vault")
+    }));
+    assert!(report.actions.iter().any(|action| {
+        action.kind == "retroactive_extraction"
+            && action.status == "skipped_sidecar_disabled"
+            && action
+                .paths
+                .iter()
+                .any(|path| path.ends_with("session_ambient_apply_1772405007295.json"))
+    }));
+
+    let audit_path = temp
+        .path()
+        .join("ambient")
+        .join("retroactive_extraction.jsonl");
+    let audit = std::fs::read_to_string(audit_path).expect("retroactive extraction audit");
+    assert!(audit.contains("session_ambient_apply_1772405007295"));
+}
+
+#[test]
+#[cfg(feature = "duckdb-storage")]
+fn garden_apply_consolidates_duplicates_and_prunes_tombstones() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let vault = temp.path().join("Vault");
+    std::fs::create_dir_all(&vault).expect("create vault");
+    std::fs::write(
+        vault.join("Alpha.md"),
+        "# Alpha\nOld tombstone candidate.\n",
+    )
+    .expect("write Alpha");
+    std::fs::write(vault.join("Beta.md"), "# Beta\n[[Shared Ambient Topic]]\n")
+        .expect("write Beta");
+    std::fs::write(
+        vault.join("Gamma.md"),
+        "# Gamma\n[[Shared Ambient Topic]]\n",
+    )
+    .expect("write Gamma");
+
+    let db_path = temp.path().join("broker.duckdb");
+    let service = jcode_storage::duckdb_broker_store::DuckDbBrokerStoreService::start(&db_path)
+        .expect("start broker store");
+    service.reconcile_vault_path(&vault).expect("ingest vault");
+    let alpha = service
+        .list_vault_files()
+        .expect("list files")
+        .into_iter()
+        .find(|file| file.path == "Alpha.md")
+        .expect("Alpha file");
+    service
+        .tombstone_file_records(&alpha.id, "2000-01-01T00:00:00Z")
+        .expect("tombstone Alpha");
+    drop(service);
+
+    let report = apply_ambient_garden_actions(AmbientGardenApplyOptions {
+        db_path: Some(db_path),
+        vault_path: None,
+        embedding_model: "test-model".to_string(),
+        kinds: vec![
+            AmbientGardenActionKind::ConsolidateDuplicates,
+            AmbientGardenActionKind::PruneTombstones,
+        ],
+        limit: 10,
+        tombstone_retention_days: 0,
+    })
+    .expect("apply ambient garden actions");
+
+    assert!(report.actions.iter().any(|action| {
+        action.kind == "duplicate_entity_consolidation"
+            && action.status == "applied"
+            && action.count == 1
+    }));
+    assert!(report.actions.iter().any(|action| {
+        action.kind == "stale_tombstone_prune" && action.status == "applied" && action.count > 0
+    }));
+    assert_eq!(report.counts_after.tombstoned_vault_file, 0);
+    assert_eq!(report.counts_after.tombstoned_vault_chunk, 0);
+}
+
+#[test]
 fn test_ambient_lock_release() {
     // Use a temp dir so we don't conflict with real state
     let tmp_dir = tempfile::tempdir().unwrap();

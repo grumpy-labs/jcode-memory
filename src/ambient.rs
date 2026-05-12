@@ -16,7 +16,9 @@ pub use directives::{
     UserDirective, add_directive, has_pending_directives, load_directives, take_pending_directives,
 };
 pub use garden::{
-    AmbientGardenCounts, AmbientGardenReport, AmbientGardenWorkItem, gather_ambient_garden_report,
+    AmbientGardenActionKind, AmbientGardenActionResult, AmbientGardenApplyOptions,
+    AmbientGardenApplyReport, AmbientGardenCounts, AmbientGardenReport, AmbientGardenWorkItem,
+    apply_ambient_garden_actions, apply_ambient_garden_from_env, gather_ambient_garden_report,
     gather_ambient_garden_report_from_env,
 };
 pub use manager::AmbientManager;

@@ -557,7 +557,7 @@ impl DuckDbBrokerStore {
                 e.kind,
                 e.name,
                 count(DISTINCT e.file_id) AS active_file_count,
-                string_agg(DISTINCT e.path, '\n' ORDER BY e.path) AS paths
+                string_agg(DISTINCT e.path, chr(10) ORDER BY e.path) AS paths
             FROM vault_entity e
             JOIN vault_file f ON f.id = e.file_id
             WHERE e.deleted_at IS NULL
@@ -634,6 +634,82 @@ impl DuckDbBrokerStore {
             });
         }
         Ok(candidates)
+    }
+
+    pub fn consolidate_duplicate_vault_entities(&mut self, limit: usize) -> Result<usize> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT
+                e.kind,
+                e.name,
+                string_agg(e.id, chr(10) ORDER BY e.path, e.id) AS entity_ids
+            FROM vault_entity e
+            JOIN vault_file f ON f.id = e.file_id
+            WHERE e.deleted_at IS NULL
+              AND f.deleted_at IS NULL
+            GROUP BY e.kind, e.name
+            HAVING count(DISTINCT e.file_id) > 1
+            ORDER BY count(DISTINCT e.file_id) DESC, e.kind, e.name
+            LIMIT ?
+            "#,
+        )?;
+        let mut rows = statement.query(duckdb::params![limit as i64])?;
+        let mut edges = Vec::new();
+        while let Some(row) = rows.next()? {
+            let kind: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let entity_ids: String = row.get(2)?;
+            let ids: Vec<String> = entity_ids
+                .lines()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(ToOwned::to_owned)
+                .collect();
+            let Some(canonical_id) = ids.first() else {
+                continue;
+            };
+            for duplicate_id in ids.iter().skip(1) {
+                edges.push(GraphEdgeRecord {
+                    id: format!("graph_edge:duplicate_entity:{duplicate_id}:{canonical_id}"),
+                    source_id: duplicate_id.clone(),
+                    target_id: canonical_id.clone(),
+                    kind: format!("DuplicateEntityOf:{kind}:{name}"),
+                    weight: 0.75,
+                    deleted_at: None,
+                });
+            }
+        }
+        drop(rows);
+        drop(statement);
+
+        let edge_count = edges.len();
+        for edge in edges {
+            self.upsert_graph_edge(&edge)?;
+        }
+        Ok(edge_count)
+    }
+
+    pub fn purge_tombstoned_vault_records(&mut self, older_than_deleted_at: &str) -> Result<usize> {
+        let mut deleted = 0usize;
+        for table in [
+            "vault_embedding",
+            "graph_edge",
+            "vault_task",
+            "vault_summary",
+            "vault_entity",
+            "vault_link",
+            "vault_chunk",
+            "vault_file",
+        ] {
+            deleted += self.connection.execute(
+                &format!("DELETE FROM {table} WHERE deleted_at IS NOT NULL AND deleted_at <= ?"),
+                duckdb::params![older_than_deleted_at],
+            )?;
+        }
+        Ok(deleted)
     }
 
     pub fn query_vault_chunks_by_embedding(
@@ -1463,6 +1539,16 @@ impl DuckDbBrokerStoreService {
                     BrokerStoreRequest::ListStaleVaultSummaries { limit, response } => {
                         let _ = response.send(store.list_stale_vault_summaries(limit));
                     }
+                    BrokerStoreRequest::ConsolidateDuplicateVaultEntities { limit, response } => {
+                        let _ = response.send(store.consolidate_duplicate_vault_entities(limit));
+                    }
+                    BrokerStoreRequest::PurgeTombstonedVaultRecords {
+                        older_than_deleted_at,
+                        response,
+                    } => {
+                        let _ = response
+                            .send(store.purge_tombstoned_vault_records(&older_than_deleted_at));
+                    }
                     BrokerStoreRequest::QueryVaultChunksByEmbedding {
                         embedding_model,
                         query_embedding,
@@ -1586,6 +1672,15 @@ impl DuckDbBrokerStoreService {
     ) -> Result<Vec<VaultChunkEmbeddingHit>> {
         self.client
             .query_vault_chunks_by_embedding(embedding_model, query_embedding, limit)
+    }
+
+    pub fn consolidate_duplicate_vault_entities(&self, limit: usize) -> Result<usize> {
+        self.client.consolidate_duplicate_vault_entities(limit)
+    }
+
+    pub fn purge_tombstoned_vault_records(&self, older_than_deleted_at: &str) -> Result<usize> {
+        self.client
+            .purge_tombstoned_vault_records(older_than_deleted_at)
     }
 
     pub fn backup_to(&self, backup_path: impl AsRef<Path>) -> Result<PathBuf> {
@@ -1746,6 +1841,19 @@ impl DuckDbBrokerStoreClient {
         })
     }
 
+    pub fn consolidate_duplicate_vault_entities(&self, limit: usize) -> Result<usize> {
+        self.request(
+            |response| BrokerStoreRequest::ConsolidateDuplicateVaultEntities { limit, response },
+        )
+    }
+
+    pub fn purge_tombstoned_vault_records(&self, older_than_deleted_at: &str) -> Result<usize> {
+        self.request(|response| BrokerStoreRequest::PurgeTombstonedVaultRecords {
+            older_than_deleted_at: older_than_deleted_at.to_string(),
+            response,
+        })
+    }
+
     pub fn backup_to(&self, backup_path: impl AsRef<Path>) -> Result<PathBuf> {
         let backup_path = backup_path.as_ref().expand_homeish();
         self.request(|response| BrokerStoreRequest::BackupTo {
@@ -1821,6 +1929,14 @@ enum BrokerStoreRequest {
     ListStaleVaultSummaries {
         limit: usize,
         response: mpsc::Sender<Result<Vec<VaultStaleSummaryCandidate>>>,
+    },
+    ConsolidateDuplicateVaultEntities {
+        limit: usize,
+        response: mpsc::Sender<Result<usize>>,
+    },
+    PurgeTombstonedVaultRecords {
+        older_than_deleted_at: String,
+        response: mpsc::Sender<Result<usize>>,
     },
     QueryVaultChunksByEmbedding {
         embedding_model: String,

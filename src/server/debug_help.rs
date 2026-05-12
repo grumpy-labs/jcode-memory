@@ -89,6 +89,7 @@ AMBIENT COMMANDS (ambient: prefix):
   ambient:trigger             - Manually trigger an ambient cycle
   ambient:log                 - Recent transcript summaries
   ambient:garden              - Read-only broker index garden report
+  ambient:garden:apply[:kind] - Explicit garden apply actions: all, embeddings, duplicates, tombstones, facts, retroactive
   ambient:permissions         - List pending permission requests
   ambient:approve:<id>        - Approve a permission request
   ambient:deny:<id> [reason]  - Deny a permission request (optional reason)

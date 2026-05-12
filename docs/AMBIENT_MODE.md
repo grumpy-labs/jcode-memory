@@ -1,7 +1,7 @@
 # Ambient Mode
 
-> **Status:** Design + initial garden-only broker-index report
-> **Updated:** 2026-05-11
+> **Status:** Design + garden-only broker-index report/apply boundary
+> **Updated:** 2026-05-12
 
 A proactive, always-on agent mode that works autonomously without user prompting. Like a brain consolidating memories during sleep, ambient mode tends to the memory graph, identifies useful work, and acts on the user's behalf — all while staying within resource limits.
 
@@ -20,6 +20,33 @@ These aren't separate phases. The agent does all three in a single pass — whil
 3. **User priority** — interactive sessions always take precedence over ambient work
 4. **Strong models** — uses the strongest available model from the selected provider so the agent can reason well about what's actually useful
 5. **Self-scheduling** — the agent decides when to wake next, constrained by adaptive resource limits
+
+## Broker-Index Garden Boundary
+
+The current broker-index garden lane is intentionally narrower than full ambient
+mode:
+
+- `ambient:garden` is read-only. It reports Vault index counts, missing chunk
+  embeddings, duplicate entity candidates, stale summary/fact candidates,
+  tombstone review candidates, and recent crashed/error sessions that may need
+  retroactive extraction.
+- `ambient:garden:apply:<kind>` is the explicit local write boundary. Supported
+  kinds are `all`, `embeddings`, `duplicates`, `tombstones`, `facts`, and
+  `retroactive`.
+- Apply actions are local-only: no PRs, no external messages, no code edits, and
+  no system changes. Vault Markdown files remain source of truth.
+- Duplicate consolidation is non-destructive graph-edge reinforcement between
+  duplicate Vault entity records, not file merging.
+- Tombstone pruning removes disposable DuckDB broker-index records older than the
+  retention cutoff; it does not delete Vault files.
+- Stale fact verification reconciles the configured Vault path back into the
+  broker index.
+- Retroactive extraction writes an audit row under
+  `$JCODE_HOME/ambient/retroactive_extraction.jsonl`; if the memory sidecar is
+  disabled, the action records `skipped_sidecar_disabled` rather than inventing
+  memories.
+- Post-cycle Vault embedding backfill is opt-in with
+  `JCODE_AMBIENT_GARDEN_EMBEDDING_BACKFILL=1`.
 
 ---
 

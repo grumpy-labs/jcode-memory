@@ -777,6 +777,25 @@ impl AmbientRunnerHandle {
                                 ));
                             }
                         }
+                        if env_flag_enabled("JCODE_AMBIENT_GARDEN_EMBEDDING_BACKFILL") {
+                            match crate::ambient::apply_ambient_garden_from_env(vec![
+                                crate::ambient::AmbientGardenActionKind::EmbeddingBackfill,
+                            ]) {
+                                Ok(report) => {
+                                    if let Some(action) = report.actions.first()
+                                        && action.count > 0
+                                    {
+                                        logging::info(&format!("Ambient: {}", action.summary));
+                                    }
+                                }
+                                Err(e) => {
+                                    logging::error(&format!(
+                                        "Ambient: Vault embedding backfill failed: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                        }
                     });
                 }
                 Err(e) => {
@@ -1061,6 +1080,15 @@ impl AmbientRunnerHandle {
             }
         }
     }
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------

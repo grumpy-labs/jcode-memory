@@ -56,6 +56,36 @@ pub(super) async fn maybe_handle_ambient_command(
         return Ok(Some(output));
     }
 
+    if let Some(rest) = cmd.strip_prefix("ambient:garden:apply") {
+        let action = rest.trim_start_matches(':').trim();
+        let kinds = match action {
+            "" | "all" => crate::ambient::AmbientGardenActionKind::all(),
+            "embeddings" | "embedding_backfill" => {
+                vec![crate::ambient::AmbientGardenActionKind::EmbeddingBackfill]
+            }
+            "duplicates" | "duplicate_entity_consolidation" => {
+                vec![crate::ambient::AmbientGardenActionKind::ConsolidateDuplicates]
+            }
+            "tombstones" | "stale_tombstone_prune" => {
+                vec![crate::ambient::AmbientGardenActionKind::PruneTombstones]
+            }
+            "facts" | "stale_fact_verification" => {
+                vec![crate::ambient::AmbientGardenActionKind::VerifyStaleFacts]
+            }
+            "retroactive" | "retroactive_extraction" => {
+                vec![crate::ambient::AmbientGardenActionKind::RetroactiveExtraction]
+            }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Usage: ambient:garden:apply[:all|embeddings|duplicates|tombstones|facts|retroactive]"
+                ));
+            }
+        };
+        let report = crate::ambient::apply_ambient_garden_from_env(kinds)?;
+        let output = serde_json::to_string_pretty(&report)?;
+        return Ok(Some(output));
+    }
+
     if cmd == "ambient:permissions" {
         let output = if let Some(runner) = ambient_runner {
             let _ = runner
@@ -169,6 +199,7 @@ pub(super) async fn maybe_handle_ambient_command(
   ambient:trigger             - Manually trigger an ambient cycle
   ambient:log                 - Recent transcript summaries
   ambient:garden              - Read-only broker index garden report
+  ambient:garden:apply[:kind] - Explicitly apply garden actions: all, embeddings, duplicates, tombstones, facts, retroactive
   ambient:permissions         - List pending permission requests
   ambient:approve:<id>        - Approve a permission request
   ambient:deny:<id> [reason]  - Deny a permission request (optional reason)

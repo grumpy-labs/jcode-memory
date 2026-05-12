@@ -1,6 +1,6 @@
 use crate::duckdb_broker_store::{
     DuckDbBrokerStoreService, GraphEdgeRecord, VaultChunkRecord, VaultEmbeddingRecord,
-    VaultFileRecord, VaultLinkRecord, VaultRecordBatch, VaultTaskRecord,
+    VaultEntityRecord, VaultFileRecord, VaultLinkRecord, VaultRecordBatch, VaultTaskRecord,
 };
 
 fn sample_file(id: &str, path: &str, checksum: &str) -> VaultFileRecord {
@@ -340,4 +340,77 @@ fn duckdb_broker_store_backs_up_and_restores_database_file() {
     assert_eq!(counts.vault_chunk, 1);
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, "chunk_alpha");
+}
+
+#[test]
+fn duckdb_broker_store_consolidates_duplicates_and_purges_old_tombstones() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("broker.duckdb");
+    let service = DuckDbBrokerStoreService::start(&path).expect("start broker store");
+
+    service
+        .replace_vault_records(VaultRecordBatch {
+            files: vec![
+                sample_file("file_alpha", "Alpha.md", "sha256:alpha"),
+                sample_file("file_beta", "Beta.md", "sha256:beta"),
+            ],
+            chunks: vec![
+                sample_chunk(
+                    "chunk_alpha",
+                    "file_alpha",
+                    "Alpha mentions the shared ambient topic.",
+                ),
+                sample_chunk(
+                    "chunk_beta",
+                    "file_beta",
+                    "Beta also mentions the shared ambient topic.",
+                ),
+            ],
+            entities: vec![
+                VaultEntityRecord {
+                    id: "entity_alpha_shared".to_string(),
+                    file_id: "file_alpha".to_string(),
+                    path: "Alpha.md".to_string(),
+                    name: "Shared Ambient Topic".to_string(),
+                    kind: "wikilink".to_string(),
+                    source: "[[Shared Ambient Topic]]".to_string(),
+                    deleted_at: None,
+                },
+                VaultEntityRecord {
+                    id: "entity_beta_shared".to_string(),
+                    file_id: "file_beta".to_string(),
+                    path: "Beta.md".to_string(),
+                    name: "Shared Ambient Topic".to_string(),
+                    kind: "wikilink".to_string(),
+                    source: "[[Shared Ambient Topic]]".to_string(),
+                    deleted_at: None,
+                },
+            ],
+            ..VaultRecordBatch::default()
+        })
+        .expect("seed duplicate entities");
+
+    let consolidated = service
+        .consolidate_duplicate_vault_entities(10)
+        .expect("consolidate duplicate entities");
+    assert_eq!(consolidated, 1);
+    let counts = service.table_counts().expect("table counts");
+    assert_eq!(counts.active_graph_edge, 1);
+
+    service
+        .tombstone_file_records("file_alpha", "2000-01-01T00:00:00Z")
+        .expect("tombstone old file");
+    let pruned = service
+        .purge_tombstoned_vault_records("2026-05-12T00:00:00Z")
+        .expect("purge old tombstones");
+    assert!(pruned > 0);
+
+    let counts = service.table_counts().expect("table counts after purge");
+    assert_eq!(counts.vault_file, 1);
+    assert_eq!(counts.active_vault_file, 1);
+    assert_eq!(counts.vault_chunk, 1);
+    assert_eq!(counts.active_vault_chunk, 1);
+    assert_eq!(counts.vault_entity, 1);
+    assert_eq!(counts.active_vault_entity, 1);
+    assert_eq!(counts.graph_edge, 0);
 }
