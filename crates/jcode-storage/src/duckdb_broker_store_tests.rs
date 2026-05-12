@@ -167,3 +167,39 @@ fn duckdb_broker_store_serializes_concurrent_client_writes() {
         .expect("query chunks");
     assert_eq!(hits.len(), 8);
 }
+
+#[test]
+fn duckdb_broker_store_backs_up_and_restores_database_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("broker.duckdb");
+    let backup_path = temp.path().join("backups").join("broker-backup.duckdb");
+    let restore_path = temp.path().join("restored").join("broker.duckdb");
+    let service = DuckDbBrokerStoreService::start(&path).expect("start broker store");
+
+    service
+        .replace_vault_records(VaultRecordBatch {
+            files: vec![sample_file("file_alpha", "Alpha.md", "sha256:file")],
+            chunks: vec![sample_chunk(
+                "chunk_alpha",
+                "file_alpha",
+                "DuckDB backup restore should preserve broker context.",
+            )],
+            ..VaultRecordBatch::default()
+        })
+        .expect("replace records");
+    service.backup_to(&backup_path).expect("backup database");
+    drop(service);
+
+    DuckDbBrokerStoreService::restore_from_backup(&backup_path, &restore_path)
+        .expect("restore backup");
+    let restored = DuckDbBrokerStoreService::start(&restore_path).expect("start restored store");
+    let counts = restored.table_counts().expect("table counts");
+    let hits = restored
+        .query_vault_chunks("backup restore broker context", 5)
+        .expect("query restored chunks");
+
+    assert_eq!(counts.vault_file, 1);
+    assert_eq!(counts.vault_chunk, 1);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, "chunk_alpha");
+}

@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -290,6 +290,22 @@ impl DuckDbBrokerStore {
         Ok(hits)
     }
 
+    pub fn backup_to(&self, backup_path: impl AsRef<Path>) -> Result<PathBuf> {
+        let backup_path = backup_path.as_ref().expand_homeish();
+        if let Some(parent) = backup_path.parent() {
+            crate::ensure_dir(parent)?;
+        }
+        self.connection.execute_batch("CHECKPOINT;")?;
+        std::fs::copy(&self.db_path, &backup_path).with_context(|| {
+            format!(
+                "failed to copy DuckDB broker store backup from {} to {}",
+                self.db_path.display(),
+                backup_path.display()
+            )
+        })?;
+        Ok(backup_path)
+    }
+
     fn initialize_schema(&self) -> Result<()> {
         self.connection.execute_batch(
             r#"
@@ -548,6 +564,12 @@ impl DuckDbBrokerStoreService {
                     } => {
                         let _ = response.send(store.query_vault_chunks(&query, limit));
                     }
+                    BrokerStoreRequest::BackupTo {
+                        backup_path,
+                        response,
+                    } => {
+                        let _ = response.send(store.backup_to(backup_path));
+                    }
                     BrokerStoreRequest::Shutdown => break,
                 }
             }
@@ -591,6 +613,29 @@ impl DuckDbBrokerStoreService {
         limit: usize,
     ) -> Result<Vec<VaultChunkContextRow>> {
         self.client.query_vault_chunks(query, limit)
+    }
+
+    pub fn backup_to(&self, backup_path: impl AsRef<Path>) -> Result<PathBuf> {
+        self.client.backup_to(backup_path)
+    }
+
+    pub fn restore_from_backup(
+        backup_path: impl AsRef<Path>,
+        db_path: impl AsRef<Path>,
+    ) -> Result<PathBuf> {
+        let backup_path = backup_path.as_ref().expand_homeish();
+        let db_path = db_path.as_ref().expand_homeish();
+        if let Some(parent) = db_path.parent() {
+            crate::ensure_dir(parent)?;
+        }
+        std::fs::copy(&backup_path, &db_path).with_context(|| {
+            format!(
+                "failed to restore DuckDB broker store backup from {} to {}",
+                backup_path.display(),
+                db_path.display()
+            )
+        })?;
+        Ok(db_path)
     }
 }
 
@@ -641,6 +686,14 @@ impl DuckDbBrokerStoreClient {
         })
     }
 
+    pub fn backup_to(&self, backup_path: impl AsRef<Path>) -> Result<PathBuf> {
+        let backup_path = backup_path.as_ref().expand_homeish();
+        self.request(|response| BrokerStoreRequest::BackupTo {
+            backup_path,
+            response,
+        })
+    }
+
     fn request<T>(
         &self,
         make_request: impl FnOnce(mpsc::Sender<Result<T>>) -> BrokerStoreRequest,
@@ -671,6 +724,10 @@ enum BrokerStoreRequest {
         query: String,
         limit: usize,
         response: mpsc::Sender<Result<Vec<VaultChunkContextRow>>>,
+    },
+    BackupTo {
+        backup_path: PathBuf,
+        response: mpsc::Sender<Result<PathBuf>>,
     },
     Shutdown,
 }

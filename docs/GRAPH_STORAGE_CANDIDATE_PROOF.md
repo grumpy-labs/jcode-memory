@@ -148,6 +148,8 @@ Rust storage-boundary proof:
 | Normalized Rust broker tables | Pass | `jcode-storage` creates normalized `vault_file`, `vault_chunk`, `vault_link`, `vault_task`, and `graph_edge` tables behind the opt-in `duckdb-storage` feature. |
 | Rust single-writer service | Pass | Concurrent Rust clients serialize writes through one DuckDB-owning worker service. |
 | Rust context/tombstone boundary | Pass | `query_vault_chunks` returns chunk context metadata from normalized tables and hides tombstoned file records from active context. |
+| Broker context integration | Pass | With `duckdb-storage` and `JCODE_BROKER_DUCKDB_PATH`, `broker_context.items` can include `vault_chunk` items from normalized DuckDB rows. |
+| Rust backup/restore proof | Pass | The normalized broker service checkpoints and copies a DuckDB file, then reopens a restored copy with context rows intact. |
 
 ## What This Means
 
@@ -179,12 +181,13 @@ DuckDB is not yet fully proven as the operational broker store:
   extension ergonomics remain unproven here.
 - Whole-Vault collection is still a Python proof harness.
 - The first normalized Rust DuckDB broker store now exists for Vault files,
-  chunks, links, tasks, and graph edges, but the live broker does not route
-  Vault context through it yet.
+  chunks, links, tasks, and graph edges. The live broker can read `vault_chunk`
+  context from it when `duckdb-storage` is enabled and
+  `JCODE_BROKER_DUCKDB_PATH` points at the broker database.
 - The current embedding backfill is deterministic/local for storage and query
   shape proof; real model embeddings still need integration.
 - Incremental file watching, rename reconciliation, real FTS/vector index
-  refresh, and Rust `broker_context` Vault-item integration are still pending.
+  refresh, and a production ingestion writer are still pending.
 
 ## Recommendation
 
@@ -197,14 +200,14 @@ server as a blocker.
 
 Next DuckDB proof requirements:
 
-- Rust broker context reads wired to the normalized DuckDB broker store
+- Production ingestion writer wired to the normalized DuckDB broker store
 - repeated small writes under broker-like concurrency on a larger corpus
 - incremental filesystem watch/reconciliation for Vault chunks
 - index refresh timing for FTS/vector
-- backup/restore and rebuild-from-source behavior
+- rebuild-from-source behavior from the source Vault
 - real vector embedding backfill for whole-Vault chunks
-- Rust broker context formatting from `vault_chunk`, `vault_link`, and
-  `vault_task` records without prompt bloat
+- Rust broker context formatting from `vault_link` and `vault_task` records
+  without prompt bloat
 
 Keep SurrealDB as the current operational baseline until DuckDB passes those
 Rust integration tests. Even if DuckDB does not become the operational graph

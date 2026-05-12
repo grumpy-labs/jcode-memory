@@ -14,7 +14,14 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+#[cfg(feature = "duckdb-storage")]
+use std::sync::{Mutex as StdMutex, OnceLock};
 use tokio::sync::mpsc;
+
+#[cfg(feature = "duckdb-storage")]
+use jcode_storage::duckdb_broker_store::{
+    DuckDbBrokerStoreClient, DuckDbBrokerStoreService, VaultChunkContextRow,
+};
 
 type TranscriptExtractionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<crate::sidecar::ExtractedMemory>>> + Send + 'a>>;
@@ -22,6 +29,8 @@ type TranscriptExtractionFuture<'a> =
 const BROKER_SEMANTIC_THRESHOLD: f32 = crate::memory::EMBEDDING_SIMILARITY_THRESHOLD;
 const BROKER_SEARCH_HIT_LIMIT: usize = 3;
 const BROKER_SKILL_SUMMARY_LIMIT: usize = 8;
+#[cfg(feature = "duckdb-storage")]
+const BROKER_DUCKDB_PATH_ENV: &str = "JCODE_BROKER_DUCKDB_PATH";
 
 trait TranscriptMemoryExtractor {
     fn extract<'a>(
@@ -356,7 +365,7 @@ async fn broker_context_event(
         collect_session_search_hits(&session_id, working_dir.as_deref(), query, limit)?;
     let conversation_search_hits =
         collect_conversation_search_hits(&session_snapshot, query, limit);
-    let items = collect_context_items(
+    let mut items = collect_context_items(
         &session_id,
         working_dir.as_deref(),
         &tool_names,
@@ -367,6 +376,11 @@ async fn broker_context_event(
         &session_search_hits,
         &conversation_search_hits,
     );
+    items.extend(collect_vault_context_items(
+        working_dir.as_deref(),
+        query,
+        limit,
+    )?);
 
     Ok(ServerEvent::BrokerContext {
         id,
@@ -934,6 +948,153 @@ fn collect_context_items(
     items
 }
 
+#[cfg(feature = "duckdb-storage")]
+struct BrokerDuckDbServiceState {
+    path: PathBuf,
+    service: DuckDbBrokerStoreService,
+}
+
+#[cfg(feature = "duckdb-storage")]
+static BROKER_DUCKDB_SERVICE: OnceLock<StdMutex<Option<BrokerDuckDbServiceState>>> =
+    OnceLock::new();
+
+#[cfg(feature = "duckdb-storage")]
+fn collect_vault_context_items(
+    working_dir: Option<&str>,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<Vec<BrokerContextItem>> {
+    let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let limit = broker_search_hit_limit(limit);
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let Some(db_path) = std::env::var_os(BROKER_DUCKDB_PATH_ENV).map(PathBuf::from) else {
+        return Ok(Vec::new());
+    };
+
+    let client = broker_duckdb_store_client(db_path)?;
+    let rows = client.query_vault_chunks(query, limit)?;
+    Ok(rows
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| vault_chunk_broker_item(row, query, idx + 1, working_dir))
+        .collect())
+}
+
+#[cfg(not(feature = "duckdb-storage"))]
+fn collect_vault_context_items(
+    _working_dir: Option<&str>,
+    _query: Option<&str>,
+    _limit: usize,
+) -> Result<Vec<BrokerContextItem>> {
+    Ok(Vec::new())
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn broker_duckdb_store_client(db_path: PathBuf) -> Result<DuckDbBrokerStoreClient> {
+    let db_path = if db_path.is_absolute() {
+        db_path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(db_path)
+    };
+    let service_slot = BROKER_DUCKDB_SERVICE.get_or_init(|| StdMutex::new(None));
+    let mut guard = service_slot
+        .lock()
+        .map_err(|_| anyhow::anyhow!("DuckDB broker store service lock poisoned"))?;
+    let should_start = guard
+        .as_ref()
+        .map(|state| state.path != db_path)
+        .unwrap_or(true);
+    if should_start {
+        *guard = Some(BrokerDuckDbServiceState {
+            path: db_path.clone(),
+            service: DuckDbBrokerStoreService::start(&db_path)?,
+        });
+    }
+    guard
+        .as_ref()
+        .map(|state| state.service.client())
+        .context("DuckDB broker store service did not initialize")
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_chunk_broker_item(
+    row: &VaultChunkContextRow,
+    query: &str,
+    rank: usize,
+    working_dir: Option<&str>,
+) -> BrokerContextItem {
+    let uri = vault_chunk_uri(&row.path, &row.heading);
+    let score = Some(row.score as f32);
+    BrokerContextItem {
+        id: format!("vault_chunk:{}", row.id),
+        kind: "vault_chunk".to_string(),
+        scope: "vault".to_string(),
+        content_format: "markdown".to_string(),
+        title: Some(if row.heading.trim().is_empty() {
+            row.title.clone()
+        } else {
+            format!("{} / {}", row.title, row.heading)
+        }),
+        summary: Some(summarize_content(&row.content)),
+        content: Some(row.content.clone()),
+        tags: vec!["vault".to_string(), "vault_chunk".to_string()],
+        source: Some(uri.clone()),
+        score,
+        origin: BrokerContextOrigin {
+            tool: Some("duckdb_broker_store".to_string()),
+            source: Some("vault".to_string()),
+            working_dir: working_dir.map(str::to_string),
+            path: Some(row.path.clone()),
+            uri: Some(uri.clone()),
+            ..Default::default()
+        },
+        relevance: Some(BrokerContextRelevance {
+            query: Some(query.to_string()),
+            retrieval_mode: Some("duckdb_broker_store".to_string()),
+            score,
+            rank: Some(rank),
+            matched_terms: row.matched_terms.clone(),
+            exact_match: Some(row.content.to_lowercase().contains(&query.to_lowercase())),
+        }),
+        fragments: vec![BrokerContextFragment {
+            relation: "source_span".to_string(),
+            content: row.content.clone(),
+            content_format: "markdown".to_string(),
+            role: None,
+            message_index: None,
+            message_id: None,
+            timestamp: None,
+        }],
+        metadata: json!({
+            "durable_memory": false,
+            "source_kind": "vault_chunk",
+            "file_id": row.file_id,
+            "chunk_id": row.id,
+            "checksum": row.checksum,
+            "source_checksum": row.source_checksum,
+            "mtime_ns": row.mtime_ns,
+            "start_line": row.start_line,
+            "end_line": row.end_line,
+            "uri": uri,
+        }),
+    }
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_chunk_uri(path: &str, heading: &str) -> String {
+    if heading.trim().is_empty() {
+        format!("vault://{path}")
+    } else {
+        format!("vault://{path}#{heading}")
+    }
+}
+
 fn collect_session_search_hits(
     session_id: &str,
     working_dir: Option<&str>,
@@ -1459,6 +1620,11 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex;
 
+    #[cfg(feature = "duckdb-storage")]
+    use jcode_storage::duckdb_broker_store::{
+        DuckDbBrokerStoreService, VaultChunkRecord, VaultFileRecord, VaultRecordBatch,
+    };
+
     struct TestHome {
         old_home: Option<OsString>,
         temp_home: tempfile::TempDir,
@@ -1488,6 +1654,28 @@ mod tests {
             match self.old_home.as_ref() {
                 Some(value) => crate::env::set_var("JCODE_HOME", value),
                 None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+
+    struct TestEnvVar {
+        name: &'static str,
+        old_value: Option<OsString>,
+    }
+
+    impl TestEnvVar {
+        fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let old_value = std::env::var_os(name);
+            crate::env::set_var(name, value);
+            Self { name, old_value }
+        }
+    }
+
+    impl Drop for TestEnvVar {
+        fn drop(&mut self) {
+            match self.old_value.as_ref() {
+                Some(value) => crate::env::set_var(self.name, value),
+                None => crate::env::remove_var(self.name),
             }
         }
     }
@@ -2055,5 +2243,64 @@ mod tests {
                 "not masquerade as durable memory"
             );
         }
+    }
+
+    #[cfg(feature = "duckdb-storage")]
+    #[test]
+    fn broker_context_collects_vault_chunk_items_from_duckdb_store() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let db_path = _env.path().join("broker.duckdb");
+        let _db_env = TestEnvVar::set("JCODE_BROKER_DUCKDB_PATH", db_path.as_os_str());
+        let service = DuckDbBrokerStoreService::start(&db_path).expect("start broker store");
+        service
+            .replace_vault_records(VaultRecordBatch {
+                files: vec![VaultFileRecord {
+                    id: "file_alpha".to_string(),
+                    path: "Alpha.md".to_string(),
+                    title: "Alpha".to_string(),
+                    checksum: "sha256:file".to_string(),
+                    size_bytes: 64,
+                    mtime_ns: 123,
+                    frontmatter_json: "{}".to_string(),
+                    deleted_at: None,
+                }],
+                chunks: vec![VaultChunkRecord {
+                    id: "chunk_alpha".to_string(),
+                    file_id: "file_alpha".to_string(),
+                    path: "Alpha.md".to_string(),
+                    heading: "DuckDB broker".to_string(),
+                    content: "DuckDB vault context should route through broker_context items."
+                        .to_string(),
+                    start_line: 2,
+                    end_line: 4,
+                    checksum: "sha256:chunk".to_string(),
+                    deleted_at: None,
+                }],
+                ..VaultRecordBatch::default()
+            })
+            .expect("seed broker store");
+        drop(service);
+
+        let items =
+            collect_vault_context_items(Some("/tmp/project"), Some("DuckDB vault context"), 8)
+                .expect("collect vault context items");
+
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.kind, "vault_chunk");
+        assert_eq!(item.scope, "vault");
+        assert_eq!(item.content_format, "markdown");
+        assert_eq!(item.origin.tool.as_deref(), Some("duckdb_broker_store"));
+        assert_eq!(item.origin.path.as_deref(), Some("Alpha.md"));
+        assert_eq!(item.metadata["durable_memory"], false);
+        assert_eq!(item.metadata["source_checksum"], "sha256:file");
+        assert!(
+            item.relevance
+                .as_ref()
+                .expect("relevance")
+                .matched_terms
+                .contains(&"duckdb".to_string())
+        );
     }
 }
