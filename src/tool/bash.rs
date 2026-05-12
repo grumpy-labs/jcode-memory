@@ -580,6 +580,13 @@ impl Tool for BashTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: BashInput = serde_json::from_value(input)?;
+        if crate::tool::ambient::is_ambient_session(&ctx.session_id)
+            && ambient_shell_uses_raw_destructive_command(&params.command)
+        {
+            anyhow::bail!(
+                "Ambient shell blocked a raw destructive command. Use the archive-aware file tools for deletes/overwrites, or request permission before an irreversible shell operation."
+            );
+        }
         let run_in_background = params.run_in_background.unwrap_or(false);
 
         if run_in_background {
@@ -609,6 +616,14 @@ impl Tool for BashTool {
         // Foreground execution with stdin detection
         self.execute_foreground(&params, &ctx).await
     }
+}
+
+fn ambient_shell_uses_raw_destructive_command(command: &str) -> bool {
+    static DESTRUCTIVE_SHELL: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(?i)(^|[;&|()`\s])(rm|rmdir|unlink|shred|srm)\b")
+            .expect("valid ambient shell destructive regex")
+    });
+    DESTRUCTIVE_SHELL.is_match(command)
 }
 
 impl BashTool {

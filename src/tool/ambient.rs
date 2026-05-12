@@ -83,15 +83,20 @@ pub fn unregister_ambient_session(session_id: &str) {
     }
 }
 
-fn is_ambient_session_registered(session_id: &str) -> bool {
+pub(crate) fn is_ambient_session(session_id: &str) -> bool {
     ambient_session_ids()
         .lock()
         .map(|ids| ids.contains(session_id))
         .unwrap_or(false)
 }
 
+#[cfg(test)]
+fn is_ambient_session_registered(session_id: &str) -> bool {
+    is_ambient_session(session_id)
+}
+
 fn ensure_ambient_session(ctx: &ToolContext) -> Result<()> {
-    if is_ambient_session_registered(&ctx.session_id) {
+    if is_ambient_session(&ctx.session_id) {
         Ok(())
     } else {
         anyhow::bail!(

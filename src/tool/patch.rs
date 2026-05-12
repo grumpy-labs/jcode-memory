@@ -71,7 +71,7 @@ impl Tool for PatchTool {
 
         for patch in patches {
             let resolved_path = ctx.resolve_path(Path::new(&patch.path));
-            let result = apply_patch_with_diff(&patch, &resolved_path).await;
+            let result = apply_patch_with_diff(&patch, &resolved_path, &ctx).await;
             match result {
                 Ok((msg, diff)) => {
                     if diff.is_empty() {
@@ -206,14 +206,28 @@ fn parse_hunk(lines: &[&str], i: &mut usize) -> Option<Hunk> {
 }
 
 /// Apply a patch and return (status_message, diff_output)
-async fn apply_patch_with_diff(patch: &FilePatch, path: &Path) -> Result<(String, String)> {
+async fn apply_patch_with_diff(
+    patch: &FilePatch,
+    path: &Path,
+    ctx: &ToolContext,
+) -> Result<(String, String)> {
     // Handle deletion
     if patch.is_delete {
         if path.exists() {
             let old_content = tokio::fs::read_to_string(path).await.unwrap_or_default();
+            let archive_path = crate::tool::file_archive::archive_existing_file_for_ambient(
+                ctx,
+                path,
+                "patch_delete",
+            )
+            .await?;
             tokio::fs::remove_file(path).await?;
             let diff = generate_diff(&old_content, "", 1);
-            return Ok(("deleted".to_string(), diff));
+            let archive_note = archive_path
+                .as_ref()
+                .map(|path| format!("\nArchived previous version at {}", path.display()))
+                .unwrap_or_default();
+            return Ok(("deleted".to_string(), format!("{diff}{archive_note}")));
         } else {
             return Err(anyhow::anyhow!("file does not exist"));
         }
@@ -264,10 +278,20 @@ async fn apply_patch_with_diff(patch: &FilePatch, path: &Path) -> Result<(String
     }
 
     let new_content = lines.join("\n") + "\n";
+    let archive_path =
+        crate::tool::file_archive::archive_existing_file_for_ambient(ctx, path, "patch_update")
+            .await?;
     tokio::fs::write(path, &new_content).await?;
 
     let diff = generate_diff(&old_content, &new_content, first_line);
-    Ok((format!("modified ({} hunks)", patch.hunks.len()), diff))
+    let archive_note = archive_path
+        .as_ref()
+        .map(|path| format!("\nArchived previous version at {}", path.display()))
+        .unwrap_or_default();
+    Ok((
+        format!("modified ({} hunks)", patch.hunks.len()),
+        format!("{diff}{archive_note}"),
+    ))
 }
 
 /// Generate a compact diff with line numbers (max 30 lines)

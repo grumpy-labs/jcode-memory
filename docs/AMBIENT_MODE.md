@@ -1,6 +1,6 @@
 # Ambient Mode
 
-> **Status:** Design + garden-only broker-index report/apply boundary
+> **Status:** Live Rob full ambient worker enabled, with garden apply boundary and reversible local file archives
 > **Updated:** 2026-05-12
 
 A proactive, always-on agent mode that works autonomously without user prompting. Like a brain consolidating memories during sleep, ambient mode tends to the memory graph, identifies useful work, and acts on the user's behalf — all while staying within resource limits.
@@ -23,8 +23,7 @@ These aren't separate phases. The agent does all three in a single pass — whil
 
 ## Broker-Index Garden Boundary
 
-The current broker-index garden lane is intentionally narrower than full ambient
-mode:
+The broker-index garden lane is intentionally narrower than full ambient mode:
 
 - `ambient:garden` is read-only. It reports Vault index counts, missing chunk
   embeddings, duplicate entity candidates, stale summary/fact candidates,
@@ -47,6 +46,84 @@ mode:
   memories.
 - Post-cycle Vault embedding backfill is opt-in with
   `JCODE_AMBIENT_GARDEN_EMBEDDING_BACKFILL=1`.
+
+## Live Rob Ambient Worker
+
+Rob's live setup runs ambient as a separate worker from the Hermes context
+broker:
+
+- Hermes context broker socket:
+  `/Users/rob/.jcode-memory/runtime/jcode-broker.sock`
+- Ambient worker socket:
+  `/Users/rob/.jcode-memory/runtime/jcode-ambient.sock`
+- Ambient launchd job:
+  `/Users/rob/Library/LaunchAgents/ai.codex.jcode-memory-ambient.plist`
+- Ambient start script:
+  `/Users/rob/.jcode-memory/bin/start-ambient-worker.sh`
+- Ambient config:
+  `/Users/rob/.jcode-memory/home/config.toml`
+- Ambient broker index:
+  `/Users/rob/.jcode-memory/broker/hermes-vault.duckdb`
+
+The live worker uses the `ambient-local` OpenAI-compatible provider pointed at
+Rob's local Ollama endpoint, with `gemma4:26b` as the default model. It uses a
+full local tool profile so it can perform useful background work, while
+non-local or outside-world actions are still expected to go through the safety
+permission flow.
+
+To inspect the live worker:
+
+```bash
+JCODE_HOME=/Users/rob/.jcode-memory/home \
+JCODE_RUNTIME_DIR=/Users/rob/.jcode-memory/runtime \
+JCODE_DEBUG_CONTROL=1 \
+JCODE_NO_TELEMETRY=1 \
+/Users/rob/.local/bin/jcode-memory-broker debug \
+  --socket /Users/rob/.jcode-memory/runtime/jcode-ambient.sock ambient:status
+```
+
+## Reversible Ambient File Archive
+
+Ambient sessions archive existing local file contents before mutating or deleting
+files through jcode's archive-aware tools. Archive batches are stored under:
+
+```text
+$JCODE_HOME/ambient/archive/
+```
+
+The restore ledger is:
+
+```text
+$JCODE_HOME/ambient/archive/manifest.jsonl
+```
+
+Each manifest entry records the timestamp, ambient session id, tool call id,
+operation, original path, and archive path. A manual restore is intentionally
+simple:
+
+```bash
+cp "<archive_path from manifest.jsonl>" "<original_path from manifest.jsonl>"
+```
+
+Covered paths:
+
+- `write`
+- `edit`
+- `multiedit`
+- unified-diff `patch`
+- `apply_patch` add-overwrites
+- `apply_patch` updates
+- `apply_patch` deletes
+- `apply_patch` move-destination overwrites
+- `apply_patch` move-source removals
+
+Raw ambient shell delete commands such as `rm`, `rmdir`, `unlink`, `shred`, and
+`srm` are blocked so destructive file changes go through archive-aware paths.
+
+This archive lane makes local file mistakes reversible. It does not make
+external communication, remote git pushes, deployments, account changes, or
+financial actions reversible; those remain permission-gated by the safety
+system.
 
 ---
 

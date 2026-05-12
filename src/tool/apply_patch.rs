@@ -89,14 +89,25 @@ impl Tool for ApplyPatchTool {
                     if let Some(parent) = resolved.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
+                    let archive_path =
+                        crate::tool::file_archive::archive_existing_file_for_ambient(
+                            &ctx,
+                            &resolved,
+                            "apply_patch_add_overwrite",
+                        )
+                        .await?;
                     tokio::fs::write(&resolved, contents).await?;
                     let diff = generate_diff_summary("", contents);
                     publish_file_touch(&ctx, &resolved, path, "created", &diff);
                     touched_paths.push(path.clone());
+                    let archive_note = archive_path
+                        .as_ref()
+                        .map(|path| format!("\nArchived previous version at {}", path.display()))
+                        .unwrap_or_default();
                     if diff.is_empty() {
-                        results.push(format!("✓ {}: created", path));
+                        results.push(format!("✓ {}: created{}", path, archive_note));
                     } else {
-                        results.push(format!("✓ {}: created\n{}", path, diff));
+                        results.push(format!("✓ {}: created\n{}{}", path, diff, archive_note));
                     }
                 }
                 PatchHunk::DeleteFile { path } => {
@@ -104,14 +115,27 @@ impl Tool for ApplyPatchTool {
                     let old_contents = tokio::fs::read_to_string(&resolved)
                         .await
                         .unwrap_or_default();
+                    let archive_path =
+                        crate::tool::file_archive::archive_existing_file_for_ambient(
+                            &ctx,
+                            &resolved,
+                            "apply_patch_delete",
+                        )
+                        .await?;
                     if tokio::fs::remove_file(&resolved).await.is_ok() {
                         let diff = generate_diff_summary(&old_contents, "");
                         publish_file_touch(&ctx, &resolved, path, "deleted", &diff);
                         touched_paths.push(path.clone());
+                        let archive_note = archive_path
+                            .as_ref()
+                            .map(|path| {
+                                format!("\nArchived previous version at {}", path.display())
+                            })
+                            .unwrap_or_default();
                         if diff.is_empty() {
-                            results.push(format!("✓ {}: deleted", path));
+                            results.push(format!("✓ {}: deleted{}", path, archive_note));
                         } else {
-                            results.push(format!("✓ {}: deleted\n{}", path, diff));
+                            results.push(format!("✓ {}: deleted\n{}{}", path, diff, archive_note));
                         }
                     } else {
                         results.push(format!("✗ {}: failed to delete", path));
@@ -131,44 +155,86 @@ impl Tool for ApplyPatchTool {
                                 if let Some(parent) = dest_resolved.parent() {
                                     tokio::fs::create_dir_all(parent).await?;
                                 }
+                                let dest_archive_path =
+                                    crate::tool::file_archive::archive_existing_file_for_ambient(
+                                        &ctx,
+                                        &dest_resolved,
+                                        "apply_patch_move_destination",
+                                    )
+                                    .await?;
+                                let source_archive_path =
+                                    crate::tool::file_archive::archive_existing_file_for_ambient(
+                                        &ctx,
+                                        &resolved,
+                                        "apply_patch_move_source",
+                                    )
+                                    .await?;
                                 tokio::fs::write(&dest_resolved, &new_contents).await?;
                                 let _ = tokio::fs::remove_file(&resolved).await;
                                 publish_file_touch(&ctx, &resolved, path, "modified", &diff);
                                 publish_file_touch(&ctx, &dest_resolved, dest, "modified", &diff);
                                 touched_paths.push(path.clone());
                                 touched_paths.push(dest.clone());
+                                let archive_note =
+                                    [source_archive_path.as_ref(), dest_archive_path.as_ref()]
+                                        .into_iter()
+                                        .flatten()
+                                        .map(|path| {
+                                            format!(
+                                                "\nArchived previous version at {}",
+                                                path.display()
+                                            )
+                                        })
+                                        .collect::<String>();
                                 if diff.is_empty() {
                                     results.push(format!(
-                                        "✓ {}: modified ({} hunks), moved to {}",
-                                        path,
-                                        chunks.len(),
-                                        dest
-                                    ));
-                                } else {
-                                    results.push(format!(
-                                        "✓ {}: modified ({} hunks), moved to {}\n{}",
+                                        "✓ {}: modified ({} hunks), moved to {}{}",
                                         path,
                                         chunks.len(),
                                         dest,
-                                        diff
-                                    ));
-                                }
-                            } else {
-                                tokio::fs::write(&resolved, &new_contents).await?;
-                                publish_file_touch(&ctx, &resolved, path, "modified", &diff);
-                                touched_paths.push(path.clone());
-                                if diff.is_empty() {
-                                    results.push(format!(
-                                        "✓ {}: modified ({} hunks)",
-                                        path,
-                                        chunks.len()
+                                        archive_note
                                     ));
                                 } else {
                                     results.push(format!(
-                                        "✓ {}: modified ({} hunks)\n{}",
+                                        "✓ {}: modified ({} hunks), moved to {}\n{}{}",
                                         path,
                                         chunks.len(),
-                                        diff
+                                        dest,
+                                        diff,
+                                        archive_note
+                                    ));
+                                }
+                            } else {
+                                let archive_path =
+                                    crate::tool::file_archive::archive_existing_file_for_ambient(
+                                        &ctx,
+                                        &resolved,
+                                        "apply_patch_update",
+                                    )
+                                    .await?;
+                                tokio::fs::write(&resolved, &new_contents).await?;
+                                publish_file_touch(&ctx, &resolved, path, "modified", &diff);
+                                touched_paths.push(path.clone());
+                                let archive_note = archive_path
+                                    .as_ref()
+                                    .map(|path| {
+                                        format!("\nArchived previous version at {}", path.display())
+                                    })
+                                    .unwrap_or_default();
+                                if diff.is_empty() {
+                                    results.push(format!(
+                                        "✓ {}: modified ({} hunks){}",
+                                        path,
+                                        chunks.len(),
+                                        archive_note
+                                    ));
+                                } else {
+                                    results.push(format!(
+                                        "✓ {}: modified ({} hunks)\n{}{}",
+                                        path,
+                                        chunks.len(),
+                                        diff,
+                                        archive_note
                                     ));
                                 }
                             }

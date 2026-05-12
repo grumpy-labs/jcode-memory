@@ -127,6 +127,195 @@ async fn test_apply_update_simple() {
 }
 
 #[tokio::test]
+async fn ambient_apply_patch_delete_archives_removed_file() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path().join("home"));
+    let work = temp.path().join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+    std::fs::write(work.join("old.md"), "delete me, but recoverably\n").expect("seed file");
+
+    crate::tool::ambient::register_ambient_session("ambient_archive_delete".to_string());
+    let tool = ApplyPatchTool::new();
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "patch_text": "*** Begin Patch\n*** Delete File: old.md\n*** End Patch"
+            }),
+            crate::tool::ToolContext {
+                session_id: "ambient_archive_delete".to_string(),
+                message_id: "message_1".to_string(),
+                tool_call_id: "call_delete".to_string(),
+                working_dir: Some(work.clone()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+            },
+        )
+        .await
+        .expect("ambient delete patch should succeed");
+    crate::tool::ambient::unregister_ambient_session("ambient_archive_delete");
+
+    assert!(!work.join("old.md").exists());
+    assert!(output.output.contains("Archived previous version at"));
+    let manifest = temp.path().join("home/ambient/archive/manifest.jsonl");
+    let manifest_text = std::fs::read_to_string(&manifest).expect("archive manifest");
+    assert!(manifest_text.contains("old.md"));
+    assert!(manifest_text.contains("call_delete"));
+
+    let archived = std::fs::read_dir(temp.path().join("home/ambient/archive"))
+        .expect("archive dir")
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.path().join("old.md"))
+        .find(|path| path.exists())
+        .expect("archived deleted file");
+    assert_eq!(
+        std::fs::read_to_string(archived).expect("archived content"),
+        "delete me, but recoverably\n"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn ambient_apply_patch_add_archives_existing_file_before_overwrite() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path().join("home"));
+    let work = temp.path().join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+    std::fs::write(work.join("existing.md"), "recover this\n").expect("seed file");
+
+    crate::tool::ambient::register_ambient_session("ambient_archive_add".to_string());
+    let tool = ApplyPatchTool::new();
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "patch_text": "*** Begin Patch\n*** Add File: existing.md\n+replacement\n*** End Patch"
+            }),
+            crate::tool::ToolContext {
+                session_id: "ambient_archive_add".to_string(),
+                message_id: "message_1".to_string(),
+                tool_call_id: "call_add".to_string(),
+                working_dir: Some(work.clone()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+            },
+        )
+        .await
+        .expect("ambient add overwrite patch should succeed");
+    crate::tool::ambient::unregister_ambient_session("ambient_archive_add");
+
+    assert_eq!(
+        std::fs::read_to_string(work.join("existing.md")).expect("new content"),
+        "replacement\n"
+    );
+    assert!(output.output.contains("Archived previous version at"));
+    let manifest = temp.path().join("home/ambient/archive/manifest.jsonl");
+    let manifest_text = std::fs::read_to_string(&manifest).expect("archive manifest");
+    assert!(manifest_text.contains("apply_patch_add_overwrite"));
+    assert!(manifest_text.contains("call_add"));
+
+    let archived = std::fs::read_dir(temp.path().join("home/ambient/archive"))
+        .expect("archive dir")
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.path().join("existing.md"))
+        .find(|path| path.exists())
+        .expect("archived overwritten file");
+    assert_eq!(
+        std::fs::read_to_string(archived).expect("archived content"),
+        "recover this\n"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn ambient_apply_patch_move_archives_source_and_existing_destination() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path().join("home"));
+    let work = temp.path().join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+    std::fs::write(work.join("old.md"), "old line\n").expect("seed source");
+    std::fs::write(work.join("dest.md"), "dest previous\n").expect("seed destination");
+
+    crate::tool::ambient::register_ambient_session("ambient_archive_move".to_string());
+    let tool = ApplyPatchTool::new();
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "patch_text": "*** Begin Patch\n*** Update File: old.md\n*** Move to: dest.md\n@@\n-old line\n+new line\n*** End Patch"
+            }),
+            crate::tool::ToolContext {
+                session_id: "ambient_archive_move".to_string(),
+                message_id: "message_1".to_string(),
+                tool_call_id: "call_move".to_string(),
+                working_dir: Some(work.clone()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+            },
+        )
+        .await
+        .expect("ambient move patch should succeed");
+    crate::tool::ambient::unregister_ambient_session("ambient_archive_move");
+
+    assert!(!work.join("old.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(work.join("dest.md")).expect("moved content"),
+        "new line\n"
+    );
+    assert_eq!(
+        output
+            .output
+            .matches("Archived previous version at")
+            .count(),
+        2
+    );
+    let manifest = temp.path().join("home/ambient/archive/manifest.jsonl");
+    let manifest_text = std::fs::read_to_string(&manifest).expect("archive manifest");
+    assert!(manifest_text.contains("apply_patch_move_source"));
+    assert!(manifest_text.contains("apply_patch_move_destination"));
+    assert!(manifest_text.contains("call_move"));
+
+    let archive_files = std::fs::read_dir(temp.path().join("home/ambient/archive"))
+        .expect("archive dir")
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .flat_map(|entry| [entry.path().join("old.md"), entry.path().join("dest.md")])
+        .filter(|path| path.exists())
+        .map(|path| std::fs::read_to_string(path).expect("archived content"))
+        .collect::<Vec<_>>();
+    assert!(archive_files.iter().any(|content| content == "old line\n"));
+    assert!(
+        archive_files
+            .iter()
+            .any(|content| content == "dest previous\n")
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
 async fn test_apply_update_multiple_chunks() {
     let f = write_temp("foo\nbar\nbaz\nqux\n");
     let chunks = vec![

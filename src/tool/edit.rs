@@ -107,6 +107,10 @@ impl Tool for EditTool {
         // Find line number where edit starts
         let start_line = find_line_number(&content, &params.old_string);
 
+        let archive_path =
+            crate::tool::file_archive::archive_existing_file_for_ambient(&ctx, &path, "edit")
+                .await?;
+
         // Write back
         tokio::fs::write(&path, &new_content).await?;
 
@@ -134,9 +138,14 @@ impl Tool for EditTool {
         let end_line = start_line + params.new_string.lines().count().saturating_sub(1);
         let context = extract_context(&new_content, start_line, end_line, 3);
 
+        let archive_note = archive_path
+            .as_ref()
+            .map(|path| format!("\n\nArchived previous version at {}", path.display()))
+            .unwrap_or_default();
+
         Ok(ToolOutput::new(format!(
-            "Edited {}: replaced {} occurrence(s)\n{}\n\nContext after edit (lines {}-{}):\n{}",
-            params.file_path, occurrences, diff, context.0, context.1, context.2
+            "Edited {}: replaced {} occurrence(s)\n{}\n\nContext after edit (lines {}-{}):\n{}{}",
+            params.file_path, occurrences, diff, context.0, context.1, context.2, archive_note
         ))
         .with_title(params.file_path.clone()))
     }

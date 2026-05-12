@@ -28,6 +28,18 @@ fn make_agent_ctx(signal: jcode_agent_runtime::InterruptSignal) -> ToolContext {
     }
 }
 
+fn make_ambient_ctx(work_dir: std::path::PathBuf) -> ToolContext {
+    ToolContext {
+        session_id: "ambient-shell-guard".to_string(),
+        message_id: "test-msg".to_string(),
+        tool_call_id: "test-call-ambient".to_string(),
+        working_dir: Some(work_dir),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+    }
+}
+
 #[tokio::test]
 async fn test_basic_command_no_stdin() {
     let tool = BashTool::new();
@@ -35,6 +47,36 @@ async fn test_basic_command_no_stdin() {
     let ctx = make_ctx(None);
     let result = tool.execute(input, ctx).await.unwrap();
     assert!(result.output.contains("hello"));
+}
+
+#[tokio::test]
+async fn ambient_bash_blocks_raw_rm_delete_commands() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let victim = temp.path().join("victim.md");
+    std::fs::write(&victim, "do not remove directly\n").expect("seed victim");
+
+    crate::tool::ambient::register_ambient_session("ambient-shell-guard".to_string());
+    let tool = BashTool::new();
+    let result = tool
+        .execute(
+            json!({"command": "rm victim.md"}),
+            make_ambient_ctx(temp.path().to_path_buf()),
+        )
+        .await;
+    crate::tool::ambient::unregister_ambient_session("ambient-shell-guard");
+
+    assert!(result.is_err(), "ambient raw rm should be blocked");
+    assert!(
+        victim.exists(),
+        "blocked ambient rm must leave file in place"
+    );
+    assert!(
+        result
+            .expect_err("blocked ambient rm")
+            .to_string()
+            .contains("archive-aware"),
+        "error should direct the agent to the archive-aware path"
+    );
 }
 
 #[tokio::test]

@@ -125,6 +125,13 @@ impl Tool for MultiEditTool {
             }
         }
 
+        let archive_path = if content != original_content {
+            crate::tool::file_archive::archive_existing_file_for_ambient(&ctx, &path, "multiedit")
+                .await?
+        } else {
+            None
+        };
+
         // Write the result
         tokio::fs::write(&path, &content).await?;
 
@@ -155,6 +162,12 @@ impl Tool for MultiEditTool {
         if !applied.is_empty() {
             output.push_str("\nDiff:\n");
             output.push_str(&generate_diff_summary(&original_content, &content));
+        }
+        if let Some(archive_path) = archive_path {
+            output.push_str(&format!(
+                "\nArchived previous version at {}",
+                archive_path.display()
+            ));
         }
 
         Ok(ToolOutput::new(output).with_title(params.file_path.clone()))

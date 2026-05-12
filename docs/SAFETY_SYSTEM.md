@@ -1,6 +1,6 @@
 # Safety System
 
-> **Status:** Implemented v1 for ambient/non-local autonomy gating
+> **Status:** Implemented v1 for ambient/non-local autonomy gating, plus archive-backed local ambient file mutations
 > **Updated:** 2026-05-12
 
 A human-in-the-loop safety layer for unmonitored agent operations. Designed as an independent subsystem that any jcode feature can integrate with. Currently the main consumer is ambient mode, but the system is intentionally decoupled so it can be reused for future features.
@@ -15,6 +15,14 @@ When an agent operates without direct user supervision (e.g. ambient mode), it n
 5. **Report what it did** after each session
 
 The safety system provides all of this. There are only two tiers: auto-allowed and requires-permission. There is no "always denied" -- if the user explicitly approves something, the agent can do it. The core principle is that **anything that communicates with another human or leaves a trace outside the local sandbox requires permission.**
+
+For Rob's live ambient worker, local file mutations made by an ambient session
+also pass through a reversible archive guard. The guard archives existing file
+contents before `write`, `edit`, `multiedit`, `patch`, and `apply_patch`
+mutations or delete paths, and raw ambient shell delete commands such as `rm`,
+`rmdir`, `unlink`, `shred`, and `srm` are blocked. This adds a restore path for
+local file mistakes; it does not make external communication, remote git,
+deployments, account changes, or financial actions reversible.
 
 ---
 
@@ -123,6 +131,42 @@ Actions that leave a trace outside the local sandbox, affect shared state, or ca
 | `destructive_data` | `delete_file`, `rm`, `drop_database`, cache clears | Data loss or hard-to-undo side effects |
 | `financial_or_account` | purchases, billing, passwords, token revocation, permission changes | Financial, credential, or access consequences |
 | **`unknown`** | Any unrecognized action | Defaults to permission required |
+
+### Reversible local file archive for ambient sessions
+
+When an ambient session mutates an existing local file through an archive-aware
+tool, jcode copies the pre-mutation file to:
+
+```text
+$JCODE_HOME/ambient/archive/<timestamp>_<session_id>_<tool_call_id>/...
+```
+
+It also appends a JSONL restore record to:
+
+```text
+$JCODE_HOME/ambient/archive/manifest.jsonl
+```
+
+The restore record includes `original_path`, `archive_path`, `operation`,
+`session_id`, and `tool_call_id`. Restoring is a file copy from the archived
+path back to the original path.
+
+Archive-aware ambient file paths:
+
+- `write`
+- `edit`
+- `multiedit`
+- unified-diff `patch`
+- `apply_patch` add-overwrites
+- `apply_patch` updates
+- `apply_patch` deletes
+- `apply_patch` move-destination overwrites
+- `apply_patch` move-source removals
+
+The archive guard is a local reversibility layer, not a permission replacement.
+The ambient prompt and safety classifier still require review before non-local
+actions, shared repository effects, deployments, account changes, or direct
+human communication.
 
 ### Custom Rules
 

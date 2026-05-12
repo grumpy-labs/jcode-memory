@@ -11,6 +11,7 @@ mod communicate;
 mod conversation_search;
 mod debug_socket;
 mod edit;
+pub(crate) mod file_archive;
 mod glob;
 #[cfg(feature = "product-tools")]
 mod gmail;

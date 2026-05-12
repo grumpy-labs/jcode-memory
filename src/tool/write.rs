@@ -72,6 +72,13 @@ impl Tool for WriteTool {
             None
         };
 
+        let archive_path = if existed {
+            crate::tool::file_archive::archive_existing_file_for_ambient(&ctx, &path, "write")
+                .await?
+        } else {
+            None
+        };
+
         // Write the file
         tokio::fs::write(&path, &params.content).await?;
 
@@ -98,12 +105,17 @@ impl Tool for WriteTool {
         }));
 
         if existed {
+            let archive_note = archive_path
+                .as_ref()
+                .map(|path| format!("\nArchived previous version at {}", path.display()))
+                .unwrap_or_default();
             Ok(ToolOutput::new(format!(
-                "Updated {} ({} lines){}\n{}",
+                "Updated {} ({} lines){}\n{}{}",
                 params.file_path,
                 line_count,
                 if diff.is_empty() { "" } else { ":" },
-                diff
+                diff,
+                archive_note
             ))
             .with_title(params.file_path.clone()))
         } else {
@@ -276,5 +288,62 @@ mod tests {
         let diff = generate_diff_summary(old, new);
 
         assert!(diff.is_empty(), "No changes should produce empty diff");
+    }
+
+    #[tokio::test]
+    async fn ambient_write_archives_previous_file_before_overwrite() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path().join("home"));
+        let work = temp.path().join("work");
+        std::fs::create_dir_all(&work).expect("work dir");
+        std::fs::write(work.join("note.md"), "old vault text\n").expect("seed file");
+
+        crate::tool::ambient::register_ambient_session("ambient_archive_write".to_string());
+        let tool = WriteTool::new();
+        let output = tool
+            .execute(
+                json!({
+                    "file_path": "note.md",
+                    "content": "new vault text\n"
+                }),
+                crate::tool::ToolContext {
+                    session_id: "ambient_archive_write".to_string(),
+                    message_id: "message_1".to_string(),
+                    tool_call_id: "call_write".to_string(),
+                    working_dir: Some(work.clone()),
+                    stdin_request_tx: None,
+                    graceful_shutdown_signal: None,
+                    execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+                },
+            )
+            .await
+            .expect("ambient write should succeed");
+        crate::tool::ambient::unregister_ambient_session("ambient_archive_write");
+
+        let manifest = temp.path().join("home/ambient/archive/manifest.jsonl");
+        let manifest_text = std::fs::read_to_string(&manifest).expect("archive manifest");
+        assert!(manifest_text.contains("note.md"));
+        assert!(manifest_text.contains("call_write"));
+        assert!(output.output.contains("Archived previous version at"));
+
+        let archived = std::fs::read_dir(temp.path().join("home/ambient/archive"))
+            .expect("archive dir")
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .map(|entry| entry.path().join("note.md"))
+            .find(|path| path.exists())
+            .expect("archived note");
+        assert_eq!(
+            std::fs::read_to_string(archived).expect("archived content"),
+            "old vault text\n"
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 }
