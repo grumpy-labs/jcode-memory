@@ -591,7 +591,16 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         include_provenance: bool = False,
     ) -> Optional[Dict[str, Any]]:
         if self._client is None:
-            return None
+            self._client = self._new_client()
+            if not self._connect_client():
+                if self._auto_start and self._start_broker():
+                    deadline = time.monotonic() + max(0.0, self._startup_timeout)
+                    while time.monotonic() <= deadline:
+                        if self._connect_client():
+                            break
+                        time.sleep(0.05)
+                if self._client is None:
+                    return None
         try:
             event = self._client.broker_context(
                 query=query,
@@ -602,6 +611,9 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             return event
         except Exception as exc:
             logger.debug("jcode broker_context failed: %s", exc)
+            if self._client is not None:
+                self._client.close()
+                self._client = None
             return None
 
     def _sync_transcript(self, messages: List[Dict[str, Any]], *, source: str) -> None:
@@ -711,6 +723,13 @@ class JcodeGraphMemoryProvider(MemoryProvider):
 
         socket_path = Path(self._socket_path)
         socket_path.parent.mkdir(parents=True, exist_ok=True)
+        if socket_path.exists():
+            try:
+                socket_path.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                logger.debug("Failed to remove stale jcode broker socket: %s", exc)
         env = os.environ.copy()
         env.setdefault("JCODE_RUNTIME_DIR", str(socket_path.parent))
         if self._duckdb_path:

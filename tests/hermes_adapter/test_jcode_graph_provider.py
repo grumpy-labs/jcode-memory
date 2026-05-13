@@ -499,6 +499,26 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         ]
         self.assertEqual(context_requests[-1]["include_provenance"], True)
 
+    def test_provider_context_tool_lazily_connects_without_initialize(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                }
+            )
+            payload = provider.handle_tool_call(
+                "jcode_broker_context",
+                {"query": "lazy context", "limit": 4},
+            )
+            provider.shutdown()
+
+        self.assertEqual(json.loads(payload)["type"], "broker_context")
+        context_requests = [
+            request for request in server.requests if request["type"] == "broker_context"
+        ]
+        self.assertEqual(context_requests[-1]["query"], "lazy context")
+
     def test_provider_can_disable_transcript_sync(self) -> None:
         with FakeBrokerServer() as server:
             provider = JcodeGraphMemoryProvider(
@@ -591,6 +611,40 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
                 "1",
             )
             self.assertTrue(fake_process.terminated)
+
+    def test_provider_auto_start_removes_stale_socket_before_spawn(self) -> None:
+        class FakeProcess:
+            def poll(self):
+                return None
+
+            def terminate(self) -> None:
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_binary = Path(tmp) / "jcode"
+            fake_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_binary.chmod(0o755)
+            socket_path = Path(tmp) / "broker.sock"
+            socket_path.write_text("stale", encoding="utf-8")
+
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": str(socket_path),
+                    "jcode_binary": str(fake_binary),
+                    "startup_timeout_seconds": 0,
+                }
+            )
+
+            with unittest.mock.patch.object(
+                jcode_graph.subprocess, "Popen", return_value=FakeProcess()
+            ):
+                provider.initialize("hermes_session", working_dir="/tmp/project")
+                provider.shutdown()
+
+            self.assertFalse(socket_path.exists())
 
     def test_provider_auto_start_passes_configured_duckdb_path(self) -> None:
         class FakeProcess:

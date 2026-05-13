@@ -370,7 +370,7 @@ async fn broker_context_event(
         collect_session_search_hits(&session_id, working_dir.as_deref(), query, limit)?;
     let conversation_search_hits =
         collect_conversation_search_hits(&session_snapshot, query, limit);
-    let mut items = collect_context_items(
+    let context_items = collect_context_items(
         &session_id,
         working_dir.as_deref(),
         &tool_names,
@@ -381,11 +381,8 @@ async fn broker_context_event(
         &session_search_hits,
         &conversation_search_hits,
     );
-    items.extend(collect_vault_context_items(
-        working_dir.as_deref(),
-        query,
-        limit,
-    )?);
+    let vault_items = collect_vault_context_items(working_dir.as_deref(), query, limit)?;
+    let items = broker_context_items_with_vault_priority(context_items, vault_items);
 
     Ok(ServerEvent::BrokerContext {
         id,
@@ -953,6 +950,14 @@ fn collect_context_items(
     items
 }
 
+fn broker_context_items_with_vault_priority(
+    context_items: Vec<BrokerContextItem>,
+    mut vault_items: Vec<BrokerContextItem>,
+) -> Vec<BrokerContextItem> {
+    vault_items.extend(context_items);
+    vault_items
+}
+
 #[cfg(feature = "duckdb-storage")]
 struct BrokerDuckDbServiceState {
     path: PathBuf,
@@ -1001,6 +1006,12 @@ fn collect_vault_context_items_with_client(
 ) -> Result<Vec<BrokerContextItem>> {
     let mut hits = Vec::new();
     let mut seen_chunks = HashSet::new();
+
+    for row in client.query_vault_chunks(query, limit)? {
+        seen_chunks.insert(row.id.clone());
+        hits.push(VaultContextHit::Chunk(row));
+    }
+
     if let Some(query_embedding) = query_embedding {
         let embedding_model = broker_vault_embedding_model();
         for hit in
@@ -1015,13 +1026,6 @@ fn collect_vault_context_items_with_client(
     }
     hits.extend(
         client
-            .query_vault_chunks(query, limit)?
-            .into_iter()
-            .filter(|row| !seen_chunks.contains(&row.id))
-            .map(VaultContextHit::Chunk),
-    );
-    hits.extend(
-        client
             .query_vault_tasks(query, limit)?
             .into_iter()
             .map(VaultContextHit::Task),
@@ -1032,9 +1036,10 @@ fn collect_vault_context_items_with_client(
             .into_iter()
             .map(VaultContextHit::Link),
     );
+    let strong_lexical_threshold = strong_lexical_match_threshold(query);
     hits.sort_by(|left, right| {
-        left.priority()
-            .cmp(&right.priority())
+        left.priority(strong_lexical_threshold)
+            .cmp(&right.priority(strong_lexical_threshold))
             .then_with(|| {
                 right
                     .score()
@@ -1117,12 +1122,17 @@ impl VaultContextHit {
         }
     }
 
-    fn priority(&self) -> usize {
+    fn priority(&self, strong_lexical_threshold: usize) -> usize {
         match self {
-            Self::SemanticChunk(_) => 0,
-            Self::Chunk(_) => 1,
-            Self::Task(_) => 2,
-            Self::Link(_) => 3,
+            Self::Chunk(row)
+                if is_strong_lexical_match(row.matched_terms.len(), strong_lexical_threshold) =>
+            {
+                0
+            }
+            Self::SemanticChunk(_) => 1,
+            Self::Chunk(_) => 2,
+            Self::Task(_) => 3,
+            Self::Link(_) => 4,
         }
     }
 
@@ -1152,6 +1162,21 @@ impl VaultContextHit {
             Self::Link(row) => vault_link_broker_item(row, query, rank, working_dir),
         }
     }
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn strong_lexical_match_threshold(query: &str) -> usize {
+    let term_count = query_terms(query).len();
+    if term_count <= 1 {
+        usize::MAX
+    } else {
+        term_count.min(4)
+    }
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn is_strong_lexical_match(matched_term_count: usize, threshold: usize) -> bool {
+    matched_term_count >= threshold
 }
 
 #[cfg(feature = "duckdb-storage")]
@@ -2588,6 +2613,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn broker_context_item_order_puts_vault_evidence_before_tool_inventory() {
+        let tool_item = tool_broker_item("memory");
+        let vault_item = BrokerContextItem {
+            id: "vault_chunk:needle".to_string(),
+            kind: "vault_chunk".to_string(),
+            scope: "vault".to_string(),
+            content_format: "markdown".to_string(),
+            title: Some("Needle note".to_string()),
+            summary: Some("Exact Vault evidence.".to_string()),
+            content: None,
+            tags: Vec::new(),
+            source: Some("duckdb_broker_store".to_string()),
+            score: Some(1.0),
+            origin: BrokerContextOrigin {
+                tool: Some("duckdb_broker_store".to_string()),
+                path: Some("TaskNotes/Needle.md".to_string()),
+                ..Default::default()
+            },
+            relevance: None,
+            fragments: Vec::new(),
+            metadata: json!({"durable_memory": false}),
+        };
+
+        let items =
+            broker_context_items_with_vault_priority(vec![tool_item], vec![vault_item.clone()]);
+
+        assert_eq!(items[0], vault_item);
+        assert_eq!(items[1].kind, "tool");
+    }
+
     #[cfg(feature = "duckdb-storage")]
     #[test]
     fn broker_context_collects_vault_chunk_items_from_duckdb_store() {
@@ -2762,6 +2818,153 @@ mod tests {
         assert_eq!(
             item.content.as_deref(),
             Some("Stored vectors should retrieve this note without lexical overlap.")
+        );
+    }
+
+    #[cfg(feature = "duckdb-storage")]
+    #[test]
+    fn broker_context_promotes_exact_vault_needle_hits_over_semantic_distractors() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let db_path = _env.path().join("broker.duckdb");
+        let service = DuckDbBrokerStoreService::start(&db_path).expect("start broker store");
+        service
+            .replace_vault_records(VaultRecordBatch {
+                files: vec![
+                    VaultFileRecord {
+                        id: "file_ghostty".to_string(),
+                        path: "TaskNotes/Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off.md".to_string(),
+                        title: "Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off".to_string(),
+                        checksum: "sha256:file-ghostty".to_string(),
+                        size_bytes: 512,
+                        mtime_ns: 789,
+                        frontmatter_json: "{}".to_string(),
+                        deleted_at: None,
+                    },
+                    VaultFileRecord {
+                        id: "file_distractors".to_string(),
+                        path: "TaskNotes/jcode Coding Agent Harness.md".to_string(),
+                        title: "jcode Coding Agent Harness".to_string(),
+                        checksum: "sha256:file-distractors".to_string(),
+                        size_bytes: 512,
+                        mtime_ns: 790,
+                        frontmatter_json: "{}".to_string(),
+                        deleted_at: None,
+                    },
+                ],
+                chunks: vec![
+                    VaultChunkRecord {
+                        id: "chunk_ghostty_starship".to_string(),
+                        file_id: "file_ghostty".to_string(),
+                        path: "TaskNotes/Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off.md".to_string(),
+                        heading: "1. Install Starship Rainbow Status Bar".to_string(),
+                        content: "Advanced Tips: Make Ghostty Even Better\n\n1. Install Starship Rainbow Status Bar\n\nStarship is a cross-shell prompt tool.".to_string(),
+                        start_line: 199,
+                        end_line: 203,
+                        checksum: "sha256:chunk-ghostty-starship".to_string(),
+                        deleted_at: None,
+                    },
+                    VaultChunkRecord {
+                        id: "chunk_install_one".to_string(),
+                        file_id: "file_distractors".to_string(),
+                        path: "TaskNotes/jcode Coding Agent Harness.md".to_string(),
+                        heading: "Installation".to_string(),
+                        content: "Detailed installation instructions for the coding harness.".to_string(),
+                        start_line: 10,
+                        end_line: 12,
+                        checksum: "sha256:chunk-install-one".to_string(),
+                        deleted_at: None,
+                    },
+                    VaultChunkRecord {
+                        id: "chunk_install_two".to_string(),
+                        file_id: "file_distractors".to_string(),
+                        path: "TaskNotes/jcode Coding Agent Harness.md".to_string(),
+                        heading: "Quick Install".to_string(),
+                        content: "Quick install steps for jcode.".to_string(),
+                        start_line: 20,
+                        end_line: 22,
+                        checksum: "sha256:chunk-install-two".to_string(),
+                        deleted_at: None,
+                    },
+                    VaultChunkRecord {
+                        id: "chunk_install_three".to_string(),
+                        file_id: "file_distractors".to_string(),
+                        path: "TaskNotes/jcode Coding Agent Harness.md".to_string(),
+                        heading: "Detailed Installation".to_string(),
+                        content: "Another installation section for unrelated tooling.".to_string(),
+                        start_line: 30,
+                        end_line: 32,
+                        checksum: "sha256:chunk-install-three".to_string(),
+                        deleted_at: None,
+                    },
+                ],
+                ..VaultRecordBatch::default()
+            })
+            .expect("seed broker store");
+        let client = service.client();
+        client
+            .upsert_vault_embeddings(vec![
+                VaultEmbeddingRecord {
+                    id: "embedding:test-model:chunk_install_one".to_string(),
+                    record_id: "chunk_install_one".to_string(),
+                    record_kind: "vault_chunk".to_string(),
+                    embedding_model: "test-model".to_string(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    content_checksum: "sha256:chunk-install-one".to_string(),
+                    source_checksum: "sha256:file-distractors".to_string(),
+                    updated_at: "2026-05-13T11:00:00Z".to_string(),
+                    deleted_at: None,
+                },
+                VaultEmbeddingRecord {
+                    id: "embedding:test-model:chunk_install_two".to_string(),
+                    record_id: "chunk_install_two".to_string(),
+                    record_kind: "vault_chunk".to_string(),
+                    embedding_model: "test-model".to_string(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    content_checksum: "sha256:chunk-install-two".to_string(),
+                    source_checksum: "sha256:file-distractors".to_string(),
+                    updated_at: "2026-05-13T11:00:00Z".to_string(),
+                    deleted_at: None,
+                },
+                VaultEmbeddingRecord {
+                    id: "embedding:test-model:chunk_install_three".to_string(),
+                    record_id: "chunk_install_three".to_string(),
+                    record_kind: "vault_chunk".to_string(),
+                    embedding_model: "test-model".to_string(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    content_checksum: "sha256:chunk-install-three".to_string(),
+                    source_checksum: "sha256:file-distractors".to_string(),
+                    updated_at: "2026-05-13T11:00:00Z".to_string(),
+                    deleted_at: None,
+                },
+            ])
+            .expect("upsert distractor embeddings");
+        let _model_env = TestEnvVar::set("JCODE_BROKER_VAULT_EMBEDDING_MODEL", "test-model");
+
+        let items = collect_vault_context_items_with_client(
+            &client,
+            Some("/tmp/project"),
+            "Install Starship Rainbow Status Bar",
+            Some(&[1.0, 0.0, 0.0]),
+            3,
+        )
+        .expect("collect needle vault context");
+
+        let first = items.first().expect("at least one vault item");
+        assert_eq!(first.kind, "vault_chunk");
+        assert_eq!(
+            first.origin.path.as_deref(),
+            Some(
+                "TaskNotes/Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off.md"
+            ),
+            "exact lexical Vault needle should outrank semantic distractors: {items:?}"
+        );
+        assert_eq!(
+            first
+                .relevance
+                .as_ref()
+                .and_then(|relevance| relevance.retrieval_mode.as_deref()),
+            Some("duckdb_broker_store")
         );
     }
 }
