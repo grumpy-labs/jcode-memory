@@ -1957,9 +1957,52 @@ fn query_terms(query: &str) -> Vec<String> {
         .split(|ch: char| !ch.is_ascii_alphanumeric())
         .filter_map(|term| {
             let term = term.trim().to_lowercase();
-            if term.is_empty() { None } else { Some(term) }
+            if term.is_empty()
+                || (term.len() == 1 && term.chars().all(|ch| ch.is_ascii_alphabetic()))
+            {
+                None
+            } else {
+                Some(term)
+            }
         })
         .collect()
+}
+
+fn quoted_query_phrases(query: &str) -> Vec<String> {
+    let mut phrases = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+
+    for ch in query.chars() {
+        if matches!(ch, '"' | '“' | '”') {
+            if in_quote {
+                let phrase = current.trim();
+                if !phrase.is_empty() {
+                    phrases.push(phrase.to_string());
+                }
+                current.clear();
+                in_quote = false;
+            } else {
+                current.clear();
+                in_quote = true;
+            }
+        } else if in_quote {
+            current.push(ch);
+        }
+    }
+
+    phrases
+}
+
+fn normalize_match_text(value: &str) -> String {
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter_map(|part| {
+            let part = part.trim().to_lowercase();
+            if part.is_empty() { None } else { Some(part) }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn parse_embedding_json(value: &str) -> Result<Vec<f32>> {
@@ -1999,6 +2042,7 @@ fn cosine_similarity(query: &[f32], candidate: &[f32]) -> f64 {
 
 fn score_query_hit(query: &str, terms: &[String], haystack: &str) -> Option<(f64, Vec<String>)> {
     let haystack = haystack.to_lowercase();
+    let normalized_haystack = normalize_match_text(&haystack);
     let matched_terms: Vec<String> = terms
         .iter()
         .filter(|term| haystack.contains(term.as_str()))
@@ -2010,6 +2054,12 @@ fn score_query_hit(query: &str, terms: &[String], haystack: &str) -> Option<(f64
     let mut score = matched_terms.len() as f64;
     if haystack.contains(&query.to_lowercase()) {
         score += terms.len() as f64;
+    }
+    for phrase in quoted_query_phrases(query) {
+        let normalized_phrase = normalize_match_text(&phrase);
+        if !normalized_phrase.is_empty() && normalized_haystack.contains(&normalized_phrase) {
+            score += 100.0 + (query_terms(&phrase).len() as f64 * 5.0);
+        }
     }
     Some((score, matched_terms))
 }

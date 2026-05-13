@@ -1037,9 +1037,10 @@ fn collect_vault_context_items_with_client(
             .map(VaultContextHit::Link),
     );
     let strong_lexical_threshold = strong_lexical_match_threshold(query);
+    let task_item_query = is_vault_task_item_query(query);
     hits.sort_by(|left, right| {
-        left.priority(strong_lexical_threshold)
-            .cmp(&right.priority(strong_lexical_threshold))
+        left.priority(strong_lexical_threshold, task_item_query)
+            .cmp(&right.priority(strong_lexical_threshold, task_item_query))
             .then_with(|| {
                 right
                     .score()
@@ -1122,17 +1123,27 @@ impl VaultContextHit {
         }
     }
 
-    fn priority(&self, strong_lexical_threshold: usize) -> usize {
+    fn priority(&self, strong_lexical_threshold: usize, task_item_query: bool) -> usize {
         match self {
-            Self::Chunk(row)
-                if is_strong_lexical_match(row.matched_terms.len(), strong_lexical_threshold) =>
+            Self::Task(row)
+                if task_item_query
+                    && is_strong_lexical_match(
+                        row.matched_terms.len(),
+                        strong_lexical_threshold,
+                    ) =>
             {
                 0
             }
-            Self::SemanticChunk(_) => 1,
-            Self::Chunk(_) => 2,
-            Self::Task(_) => 3,
-            Self::Link(_) => 4,
+            Self::Chunk(row)
+                if is_strong_lexical_match(row.matched_terms.len(), strong_lexical_threshold) =>
+            {
+                1
+            }
+            Self::SemanticChunk(_) => 2,
+            Self::Task(_) if task_item_query => 3,
+            Self::Chunk(_) => 4,
+            Self::Task(_) => 5,
+            Self::Link(_) => 6,
         }
     }
 
@@ -1177,6 +1188,18 @@ fn strong_lexical_match_threshold(query: &str) -> usize {
 #[cfg(feature = "duckdb-storage")]
 fn is_strong_lexical_match(matched_term_count: usize, threshold: usize) -> bool {
     matched_term_count >= threshold
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn is_vault_task_item_query(query: &str) -> bool {
+    let query = query.to_lowercase();
+    query.contains("task item")
+        || query.contains("unchecked task")
+        || query.contains("checked task")
+        || query.contains("todo item")
+        || query.contains("todo")
+        || query.contains("[ ]")
+        || query.contains("- [ ]")
 }
 
 #[cfg(feature = "duckdb-storage")]
@@ -2818,6 +2841,112 @@ mod tests {
         assert_eq!(
             item.content.as_deref(),
             Some("Stored vectors should retrieve this note without lexical overlap.")
+        );
+    }
+
+    #[cfg(feature = "duckdb-storage")]
+    #[test]
+    fn broker_context_promotes_exact_vault_task_item_over_generic_chunk_matches() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let db_path = _env.path().join("broker.duckdb");
+        let service = DuckDbBrokerStoreService::start(&db_path).expect("start broker store");
+        service
+            .replace_vault_records(VaultRecordBatch {
+                files: vec![
+                    VaultFileRecord {
+                        id: "file_task".to_string(),
+                        path:
+                            "TaskNotes/Polish Hermes TUI reasoning and progress display parity with Codex.md"
+                                .to_string(),
+                        title: "Polish Hermes TUI reasoning and progress display parity with Codex"
+                            .to_string(),
+                        checksum: "sha256:file-task".to_string(),
+                        size_bytes: 512,
+                        mtime_ns: 111,
+                        frontmatter_json: "{}".to_string(),
+                        deleted_at: None,
+                    },
+                    VaultFileRecord {
+                        id: "file_startup".to_string(),
+                        path:
+                            "Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Root-Default-Startup-Pack.md"
+                                .to_string(),
+                        title: "Hermes Root Default Startup Pack".to_string(),
+                        checksum: "sha256:file-startup".to_string(),
+                        size_bytes: 512,
+                        mtime_ns: 112,
+                        frontmatter_json: "{}".to_string(),
+                        deleted_at: None,
+                    },
+                ],
+                chunks: vec![
+                    VaultChunkRecord {
+                        id: "chunk_future_work".to_string(),
+                        file_id: "file_task".to_string(),
+                        path:
+                            "TaskNotes/Polish Hermes TUI reasoning and progress display parity with Codex.md"
+                                .to_string(),
+                        heading: "Future Work".to_string(),
+                        content: "## Future Work\n- [ ] Test modern Hermes TUI display with a small task.\n- [ ] If reasoning is duplicated, find the existing display/config knob before patching anything.\n- [ ] Keep Rob's preference: do not disable visible reasoning by default.\n- [ ] Prefer built-in display settings over custom code.".to_string(),
+                        start_line: 31,
+                        end_line: 35,
+                        checksum: "sha256:chunk-future-work".to_string(),
+                        deleted_at: None,
+                    },
+                    VaultChunkRecord {
+                        id: "chunk_do_not_load".to_string(),
+                        file_id: "file_startup".to_string(),
+                        path:
+                            "Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Root-Default-Startup-Pack.md"
+                                .to_string(),
+                        heading: "Do Not Load By Default".to_string(),
+                        content: "## Do Not Load By Default\n- full `.hermes/skills/**`\n- OpenClaw runtime directories for cleanup unless doing a dependency-map pass".to_string(),
+                        start_line: 70,
+                        end_line: 78,
+                        checksum: "sha256:chunk-do-not-load".to_string(),
+                        deleted_at: None,
+                    },
+                ],
+                tasks: vec![VaultTaskRecord {
+                    id: "task_keep_reasoning".to_string(),
+                    file_id: "file_task".to_string(),
+                    path: "TaskNotes/Polish Hermes TUI reasoning and progress display parity with Codex.md"
+                        .to_string(),
+                    checked: false,
+                    content: "Keep Rob's preference: do not disable visible reasoning by default."
+                        .to_string(),
+                    line: 34,
+                    deleted_at: None,
+                }],
+                ..VaultRecordBatch::default()
+            })
+            .expect("seed broker store");
+        let client = service.client();
+
+        let items = collect_vault_context_items_with_client(
+            &client,
+            Some("/tmp/project"),
+            "\"Keep Rob's preference: do not disable visible reasoning by default\" unchecked task item",
+            None,
+            5,
+        )
+        .expect("collect task-item vault context");
+
+        let first = items.first().expect("at least one vault item");
+        assert_eq!(
+            first.kind, "vault_task",
+            "exact task-item query should surface the structured task first: {items:?}"
+        );
+        assert_eq!(
+            first.origin.path.as_deref(),
+            Some("TaskNotes/Polish Hermes TUI reasoning and progress display parity with Codex.md")
+        );
+        assert_eq!(first.metadata["source_kind"], "vault_task");
+        assert_eq!(first.metadata["line"], 34);
+        assert_eq!(
+            first.content.as_deref(),
+            Some("Keep Rob's preference: do not disable visible reasoning by default.")
         );
     }
 
