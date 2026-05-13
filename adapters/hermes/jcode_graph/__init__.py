@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -36,6 +37,25 @@ DEFAULT_TURN_BUFFER_LIMIT = 12
 DEFAULT_TURN_BUFFER_MAX_CHARS = 2000
 DEFAULT_TOOL_INVENTORY_LIMIT = 8
 DEFAULT_STARTUP_TIMEOUT_SECONDS = 5.0
+
+_OBSIDIAN_OPENED_NOTE_RE = re.compile(
+    r"<obsidian_opened_note>[\s\S]*?</obsidian_opened_note>", re.IGNORECASE
+)
+_RECALLED_CONTEXT_PREFIX_RE = re.compile(
+    r"(?is)\b(?:without\s+using\s+tools?\s+or\s+file\s+search,\s*)?"
+    r"answer\s+only\s+from\s+recalled\s+context\s+already\s+provided\s+to\s+you\s*:\s*"
+)
+_ANSWER_THIS_PREFIX_RE = re.compile(
+    r"(?is)\buse\s+jcode_broker_context\b[\s\S]{0,240}?\banswer\s+this\s*:\s*"
+)
+_TRAILING_REPORT_RE = re.compile(
+    r"(?is)(?:\n\s*)?(?:please\s+(?:report|answer)\b|include\s+the\s+note\s+path\b|"
+    r"if\s+the\s+recalled\s+context\s+does\s+not\s+contain\s+it\b|"
+    r"then\s+verify\s+with\b)[\s\S]*$"
+)
+_NEGATIVE_INTENT_RE = re.compile(
+    r"\b(?:is|was)\s+not\s+to\s+(?P<body>[^?.!\n]+)", re.IGNORECASE
+)
 
 
 JCODE_BROKER_CONTEXT_SCHEMA = {
@@ -387,8 +407,9 @@ class JcodeGraphMemoryProvider(MemoryProvider):
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         self._ensure_session(session_id)
+        focus_query = _prefetch_focus_query(query)
         event = self._fetch_context(
-            query=query,
+            query=focus_query,
             limit=self._context_limit,
             include_provenance=self._include_provenance,
         )
@@ -826,15 +847,39 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         kind = item.get("kind") or "context"
         scope = item.get("scope") or "session"
         title = item.get("title") or item.get("id") or kind
-        content = item.get("summary") or item.get("content") or ""
+        item_content = item.get("content")
+        item_summary = item.get("summary")
+        if kind in {"vault_chunk", "vault_task", "vault_link"} and item_content:
+            content = item_content
+        else:
+            content = item_summary or item_content or ""
         origin = item.get("origin") or {}
         relevance = item.get("relevance") or {}
+        metadata = item.get("metadata") or {}
         source = origin.get("tool") or item.get("source") or "broker"
         details: List[str] = []
         if origin.get("session_id"):
             details.append(f"session={origin['session_id']}")
         if origin.get("source") and origin.get("source") != source:
             details.append(f"source={origin['source']}")
+        item_source = item.get("source") or origin.get("uri") or origin.get("path")
+        if (
+            item_source
+            and item_source != source
+            and (
+                str(item_source).startswith(("vault://", "file://", "/"))
+                or str(kind).startswith("vault_")
+                or (isinstance(metadata, dict) and metadata.get("line") is not None)
+            )
+        ):
+            details.append(f"ref={item_source}")
+        if isinstance(metadata, dict):
+            if metadata.get("line") is not None:
+                details.append(f"line={metadata['line']}")
+            elif metadata.get("start_line") is not None and metadata.get("end_line") is not None:
+                details.append(f"lines={metadata['start_line']}-{metadata['end_line']}")
+            elif metadata.get("start_line") is not None:
+                details.append(f"line={metadata['start_line']}")
         if relevance.get("rank") is not None:
             details.append(f"rank={relevance['rank']}")
         if relevance.get("retrieval_mode"):
@@ -845,6 +890,42 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         if content:
             line += f": {content}"
         return line
+
+
+def _prefetch_focus_query(query: str) -> str:
+    """Reduce instruction-heavy user prompts to a broker retrieval query."""
+    text = str(query or "").strip()
+    if not text:
+        return ""
+
+    text = _OBSIDIAN_OPENED_NOTE_RE.sub(" ", text)
+    text = _ANSWER_THIS_PREFIX_RE.sub("", text)
+    text = _RECALLED_CONTEXT_PREFIX_RE.sub("", text)
+    text = _TRAILING_REPORT_RE.sub("", text).strip()
+
+    negative = _NEGATIVE_INTENT_RE.search(text)
+    if negative:
+        body = negative.group("body").strip(" .,:;")
+        prefixes: List[str] = []
+        lower = text.lower()
+        if "unchecked" in lower:
+            prefixes.append("unchecked")
+        if re.search(r"\b(?:task|todo)\b", lower):
+            prefixes.append("task")
+        if body:
+            return " ".join([*prefixes, "do not", body]).strip()
+
+    return _compact_query_text(text)
+
+
+def _compact_query_text(text: str) -> str:
+    text = re.sub(r"(?m)^\s*\d+[.)]\s+", "", text)
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = text.strip()
+    if len(text) <= 480:
+        return text
+    return text[:480].rsplit(" ", 1)[0].strip() or text[:480].strip()
 
 
 def register(ctx: Any) -> None:

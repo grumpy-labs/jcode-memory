@@ -18,7 +18,26 @@ from jcode_graph import (  # noqa: E402
     BrokerSocketClient,
     JcodeGraphMemoryProvider,
     _default_socket_path,
+    _prefetch_focus_query,
 )
+
+
+def _add_default_hermes_repo_to_path() -> bool:
+    configured = os.environ.get("HERMES_AGENT_REPO")
+    candidates = (
+        [Path(configured)]
+        if configured
+        else [
+            Path.home() / ".hermes" / "hermes-agent-v0.13.0",
+            Path.home() / ".hermes" / "hermes-agent",
+            Path.home() / ".hermes" / "hermes-agent-v2026.4.30-acp-validation",
+        ]
+    )
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            sys.path.insert(0, str(candidate))
+            return True
+    return False
 
 
 class FakeBrokerServer:
@@ -204,6 +223,63 @@ class RuntimePathTests(unittest.TestCase):
 
 
 class JcodeGraphMemoryProviderTests(unittest.TestCase):
+    def test_prefetch_focus_query_strips_instruction_frame_for_negative_task_prompt(self) -> None:
+        prompt = (
+            "Without using tools or file search, answer only from recalled context already "
+            "provided to you: what unchecked Vault task says Rob's preference is not to "
+            "disable visible reasoning by default? Include the note path/source reference "
+            "and line if present. If the recalled context does not contain it, say not "
+            "found in recalled context."
+        )
+
+        self.assertEqual(
+            _prefetch_focus_query(prompt),
+            "unchecked task do not disable visible reasoning by default",
+        )
+
+    def test_prefetch_focus_query_keeps_heading_target_and_drops_reporting_instructions(self) -> None:
+        prompt = (
+            "Use jcode_broker_context first, before any file search, to answer this:\n\n"
+            "What Vault note contains this heading?\n\n"
+            "Advanced Tips: Make Ghostty Even Better\n\n"
+            "Please report:\n"
+            "1. The exact path returned by jcode broker context.\n"
+            "2. The line number or source span the broker gives, if any."
+        )
+
+        self.assertEqual(
+            _prefetch_focus_query(prompt),
+            "What Vault note contains this heading?\n\nAdvanced Tips: Make Ghostty Even Better",
+        )
+
+    def test_provider_prefetch_sends_focused_query_to_broker(self) -> None:
+        prompt = (
+            "Without using tools or file search, answer only from recalled context already "
+            "provided to you: what unchecked Vault task says Rob's preference is not to "
+            "disable visible reasoning by default? Include the note path/source reference "
+            "and line if present."
+        )
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "context_limit": 4,
+                }
+            )
+            provider.initialize("hermes_session")
+            provider.prefetch(prompt, session_id="hermes_session")
+            provider.shutdown()
+
+        context_requests = [
+            request for request in server.requests if request["type"] == "broker_context"
+        ]
+        self.assertEqual(len(context_requests), 1)
+        self.assertEqual(
+            context_requests[0]["query"],
+            "unchecked task do not disable visible reasoning by default",
+        )
+
     def test_provider_formats_prefetch_context(self) -> None:
         with FakeBrokerServer() as server:
             provider = JcodeGraphMemoryProvider(
@@ -221,6 +297,71 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         self.assertIn("## jcode Broker Context", text)
         self.assertIn("[memory/project/memory] Project Memory", text)
         self.assertIn("[todo/session/todo] Wire Hermes adapter", text)
+
+    def test_hermes_memory_manager_prefetch_injects_current_turn_context_without_tool_call(self) -> None:
+        if not _add_default_hermes_repo_to_path():
+            self.skipTest("Hermes agent repo not available")
+
+        from agent.memory_manager import MemoryManager, build_memory_context_block
+
+        items = [
+            {
+                "id": "vault_task:vault_task_test",
+                "kind": "vault_task",
+                "scope": "vault",
+                "content_format": "plain_text",
+                "title": "Polish Hermes TUI reasoning and progress display parity with Codex / task",
+                "content": "Keep Rob's preference: do not disable visible reasoning by default.",
+                "source": (
+                    "vault://TaskNotes/Polish Hermes TUI reasoning and progress display "
+                    "parity with Codex.md#L34"
+                ),
+                "origin": {"tool": "duckdb_broker_store", "source": "vault"},
+                "metadata": {"source_kind": "vault_task", "line": 34, "checked": False},
+            }
+        ]
+        with FakeBrokerServer(context_items=items) as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "context_limit": 4,
+                }
+            )
+            provider.initialize("hermes_session")
+            manager = MemoryManager()
+            manager.add_provider(provider)
+
+            prefetch = manager.prefetch_all(
+                "Find the unchecked visible reasoning preference task.",
+                session_id="hermes_session",
+            )
+            injected = build_memory_context_block(prefetch)
+            user_message_for_api = (
+                "Find the unchecked visible reasoning preference task."
+                f"\n\n{injected}"
+            )
+            provider.shutdown()
+
+        context_requests = [
+            request for request in server.requests if request["type"] == "broker_context"
+        ]
+        self.assertEqual(len(context_requests), 1)
+        self.assertEqual(
+            context_requests[0]["query"],
+            "Find the unchecked visible reasoning preference task.",
+        )
+        self.assertFalse(context_requests[0].get("include_provenance", False))
+        self.assertIn("<memory-context>", injected)
+        self.assertIn("## jcode Broker Context", injected)
+        self.assertIn("Keep Rob's preference", injected)
+        self.assertIn(
+            "ref=vault://TaskNotes/Polish Hermes TUI reasoning and progress display "
+            "parity with Codex.md#L34",
+            injected,
+        )
+        self.assertIn("line=34", injected)
+        self.assertIn("NOT new user input", user_message_for_api)
 
     def test_provider_formats_phase_3_context_by_kind_and_budget(self) -> None:
         items = [
