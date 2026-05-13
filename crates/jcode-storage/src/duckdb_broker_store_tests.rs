@@ -16,6 +16,12 @@ fn sample_file(id: &str, path: &str, checksum: &str) -> VaultFileRecord {
     }
 }
 
+fn sample_file_with_title(id: &str, path: &str, title: &str, checksum: &str) -> VaultFileRecord {
+    let mut file = sample_file(id, path, checksum);
+    file.title = title.to_string();
+    file
+}
+
 fn sample_chunk(id: &str, file_id: &str, content: &str) -> VaultChunkRecord {
     VaultChunkRecord {
         id: id.to_string(),
@@ -28,6 +34,19 @@ fn sample_chunk(id: &str, file_id: &str, content: &str) -> VaultChunkRecord {
         checksum: format!("sha256:{id}"),
         deleted_at: None,
     }
+}
+
+fn sample_chunk_with_heading(
+    id: &str,
+    file_id: &str,
+    path: &str,
+    heading: &str,
+    content: &str,
+) -> VaultChunkRecord {
+    let mut chunk = sample_chunk(id, file_id, content);
+    chunk.path = path.to_string();
+    chunk.heading = heading.to_string();
+    chunk
 }
 
 fn sample_embedding(
@@ -123,6 +142,46 @@ fn duckdb_broker_store_replaces_vault_records_and_queries_context() {
     assert_eq!(link_hits.len(), 1);
     assert_eq!(link_hits[0].id, "link_alpha_beta");
     assert_eq!(link_hits[0].target, "Beta");
+}
+
+#[test]
+fn duckdb_broker_store_ranks_heading_matches_over_body_mentions() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("broker.duckdb");
+    let service = DuckDbBrokerStoreService::start(&path).expect("start broker store");
+
+    let batch = VaultRecordBatch {
+        files: vec![
+            sample_file_with_title("file_meta", "A-Audit.md", "Audit", "sha256:meta"),
+            sample_file_with_title("file_source", "Z-Ghostty.md", "Ghostty", "sha256:source"),
+        ],
+        chunks: vec![
+            sample_chunk_with_heading(
+                "chunk_meta",
+                "file_meta",
+                "A-Audit.md",
+                "Changes Already Applied",
+                "The exact test phrase Install Starship Rainbow Status Bar appears here as a meta note.",
+            ),
+            sample_chunk_with_heading(
+                "chunk_source",
+                "file_source",
+                "Z-Ghostty.md",
+                "1\\. Install Starship Rainbow Status Bar",
+                "Starship is a cross-shell prompt tool.",
+            ),
+        ],
+        ..VaultRecordBatch::default()
+    };
+
+    service
+        .replace_vault_records(batch)
+        .expect("replace vault records");
+
+    let hits = service
+        .query_vault_chunks("Install Starship Rainbow Status Bar", 5)
+        .expect("query chunks");
+    assert_eq!(hits[0].id, "chunk_source");
 }
 
 #[test]

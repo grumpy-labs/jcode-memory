@@ -75,6 +75,33 @@ fn vault_ingestion_collects_markdown_records_for_broker_store() {
 }
 
 #[test]
+fn vault_ingestion_reports_source_lines_after_frontmatter() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let vault = temp.path().join("Vault");
+    std::fs::create_dir_all(&vault).expect("create vault");
+    std::fs::write(
+        vault.join("Frontmatter.md"),
+        "---\ntitle: Frontmatter\n---\n# Frontmatter\nIntro line.\n## Target Heading\n- [ ] Verify original source line\n",
+    )
+    .expect("write Frontmatter");
+
+    let records = collect_vault_records(&vault).expect("collect records");
+    let target = records
+        .chunks
+        .iter()
+        .find(|chunk| chunk.heading == "Target Heading")
+        .expect("target heading chunk");
+    assert_eq!(target.start_line, 6);
+    assert_eq!(target.end_line, 7);
+    let task = records
+        .tasks
+        .iter()
+        .find(|task| task.content == "Verify original source line")
+        .expect("task record");
+    assert_eq!(task.line, 7);
+}
+
+#[test]
 fn vault_ingestion_reconciles_updates_deletes_and_renames() {
     let temp = tempfile::tempdir().expect("tempdir");
     let vault = temp.path().join("Vault");

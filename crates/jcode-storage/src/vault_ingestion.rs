@@ -158,7 +158,7 @@ fn append_markdown_file_records(
     let rel_path = relative_vault_path(root, path)?;
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read vault file {}", path.display()))?;
-    let body = strip_frontmatter(&text);
+    let (body, line_offset) = strip_frontmatter(&text);
     let metadata = std::fs::metadata(path)?;
     let file_id = stable_id("vault_file", &[&rel_path]);
     let checksum = sha256_text(&text);
@@ -172,9 +172,9 @@ fn append_markdown_file_records(
         frontmatter_json: "{}".to_string(),
         deleted_at: None,
     };
-    let chunks = chunk_body(&file_id, &rel_path, body);
+    let chunks = chunk_body(&file_id, &rel_path, body, line_offset);
     let links = parse_links(&file_id, &rel_path, body);
-    let tasks = parse_tasks(&file_id, &rel_path, body);
+    let tasks = parse_tasks(&file_id, &rel_path, body, line_offset);
     let summaries = summarize_file(&file, &chunks);
     let entities = extract_entities(&file, &links);
 
@@ -213,6 +213,44 @@ fn append_markdown_file_records(
 }
 
 fn records_for_file(batch: &VaultRecordBatch, file_id: &str) -> VaultRecordBatch {
+    let mut record_ids = HashSet::new();
+    record_ids.insert(file_id);
+    record_ids.extend(
+        batch
+            .chunks
+            .iter()
+            .filter(|record| record.file_id == file_id)
+            .map(|record| record.id.as_str()),
+    );
+    record_ids.extend(
+        batch
+            .tasks
+            .iter()
+            .filter(|record| record.file_id == file_id)
+            .map(|record| record.id.as_str()),
+    );
+    record_ids.extend(
+        batch
+            .summaries
+            .iter()
+            .filter(|record| record.file_id == file_id)
+            .map(|record| record.id.as_str()),
+    );
+    record_ids.extend(
+        batch
+            .entities
+            .iter()
+            .filter(|record| record.file_id == file_id)
+            .map(|record| record.id.as_str()),
+    );
+    record_ids.extend(
+        batch
+            .links
+            .iter()
+            .filter(|record| record.source_file_id == file_id)
+            .map(|record| record.id.as_str()),
+    );
+
     VaultRecordBatch {
         files: batch
             .files
@@ -254,28 +292,8 @@ fn records_for_file(batch: &VaultRecordBatch, file_id: &str) -> VaultRecordBatch
             .edges
             .iter()
             .filter(|record| {
-                record.source_id == file_id
-                    || record.target_id == file_id
-                    || batch
-                        .chunks
-                        .iter()
-                        .any(|chunk| chunk.file_id == file_id && chunk.id == record.source_id)
-                    || batch
-                        .tasks
-                        .iter()
-                        .any(|task| task.file_id == file_id && task.id == record.source_id)
-                    || batch
-                        .summaries
-                        .iter()
-                        .any(|summary| summary.file_id == file_id && summary.id == record.source_id)
-                    || batch
-                        .entities
-                        .iter()
-                        .any(|entity| entity.file_id == file_id && entity.id == record.source_id)
-                    || batch
-                        .links
-                        .iter()
-                        .any(|link| link.source_file_id == file_id && link.id == record.source_id)
+                record_ids.contains(record.source_id.as_str())
+                    || record_ids.contains(record.target_id.as_str())
             })
             .cloned()
             .collect(),
@@ -402,15 +420,20 @@ fn retarget_file_id(batch: &mut VaultRecordBatch, old_file_id: &str, new_file_id
     }
 }
 
-fn chunk_body(file_id: &str, rel_path: &str, body: &str) -> Vec<VaultChunkRecord> {
+fn chunk_body(
+    file_id: &str,
+    rel_path: &str,
+    body: &str,
+    line_offset: usize,
+) -> Vec<VaultChunkRecord> {
     let lines: Vec<&str> = body.lines().collect();
     let mut chunks = Vec::new();
     let mut heading = String::new();
-    let mut start_line = 1usize;
+    let mut start_line = line_offset + 1;
     let mut current = Vec::new();
 
     for (idx, line) in lines.iter().enumerate() {
-        let line_no = idx + 1;
+        let line_no = idx + 1 + line_offset;
         if let Some(next_heading) = heading_text(line) {
             if !current.is_empty() {
                 push_chunk(
@@ -436,7 +459,7 @@ fn chunk_body(file_id: &str, rel_path: &str, body: &str) -> Vec<VaultChunkRecord
             rel_path,
             &heading,
             start_line,
-            lines.len().max(start_line),
+            (lines.len() + line_offset).max(start_line),
             &current,
         );
     }
@@ -473,7 +496,12 @@ fn push_chunk(
     });
 }
 
-fn parse_tasks(file_id: &str, rel_path: &str, body: &str) -> Vec<VaultTaskRecord> {
+fn parse_tasks(
+    file_id: &str,
+    rel_path: &str,
+    body: &str,
+    line_offset: usize,
+) -> Vec<VaultTaskRecord> {
     body.lines()
         .enumerate()
         .filter_map(|(idx, line)| {
@@ -490,7 +518,7 @@ fn parse_tasks(file_id: &str, rel_path: &str, body: &str) -> Vec<VaultTaskRecord
                 return None;
             };
             let content = trimmed[6..].trim().to_string();
-            let line_no = (idx + 1) as i64;
+            let line_no = (idx + 1 + line_offset) as i64;
             Some(VaultTaskRecord {
                 id: stable_id("vault_task", &[file_id, &line_no.to_string(), &content]),
                 file_id: file_id.to_string(),
@@ -668,22 +696,24 @@ fn graph_edge(source_id: &str, target_id: &str, kind: &str) -> GraphEdgeRecord {
     }
 }
 
-fn strip_frontmatter(text: &str) -> &str {
+fn strip_frontmatter(text: &str) -> (&str, usize) {
     if !text.starts_with("---") {
-        return text;
+        return (text, 0);
     }
-    let mut lines = text.lines();
-    if lines.next() != Some("---") {
-        return text;
-    }
-    let mut consumed = 4usize;
-    for line in lines {
-        consumed += line.len() + 1;
-        if line.trim() == "---" {
-            return text.get(consumed..).unwrap_or_default();
+    let mut consumed = 0usize;
+    for (idx, line) in text.split_inclusive('\n').enumerate() {
+        let marker = line.trim_end_matches(['\r', '\n']).trim();
+        if idx == 0 {
+            if marker != "---" {
+                return (text, 0);
+            }
+        } else if marker == "---" {
+            consumed += line.len();
+            return (text.get(consumed..).unwrap_or_default(), idx + 1);
         }
+        consumed += line.len();
     }
-    text
+    (text, 0)
 }
 
 fn title_from_body(path: &Path, body: &str) -> String {

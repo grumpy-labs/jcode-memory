@@ -830,8 +830,9 @@ impl DuckDbBrokerStore {
             let heading: String = row.get(4)?;
             let content: String = row.get(5)?;
             let path: String = row.get(2)?;
-            let haystack = format!("{path}\n{title}\n{heading}\n{content}");
-            let Some((score, matched_terms)) = score_query_hit(query, &terms, &haystack) else {
+            let Some((score, matched_terms)) =
+                score_vault_chunk_hit(query, &terms, &path, &title, &heading, &content)
+            else {
                 continue;
             };
             hits.push(VaultChunkContextRow {
@@ -2009,6 +2010,26 @@ fn score_query_hit(query: &str, terms: &[String], haystack: &str) -> Option<(f64
     let mut score = matched_terms.len() as f64;
     if haystack.contains(&query.to_lowercase()) {
         score += terms.len() as f64;
+    }
+    Some((score, matched_terms))
+}
+
+fn score_vault_chunk_hit(
+    query: &str,
+    terms: &[String],
+    path: &str,
+    title: &str,
+    heading: &str,
+    content: &str,
+) -> Option<(f64, Vec<String>)> {
+    let haystack = format!("{path}\n{title}\n{heading}\n{content}");
+    let (mut score, matched_terms) = score_query_hit(query, terms, &haystack)?;
+    let source_label = format!("{title}\n{heading}");
+    if let Some((label_score, _)) = score_query_hit(query, terms, &source_label) {
+        score += 50.0 + (label_score * 2.0);
+        if source_label.to_lowercase().contains(&query.to_lowercase()) {
+            score += terms.len() as f64 * 4.0;
+        }
     }
     Some((score, matched_terms))
 }
