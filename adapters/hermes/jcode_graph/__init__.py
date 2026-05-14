@@ -56,6 +56,28 @@ _TRAILING_REPORT_RE = re.compile(
 _NEGATIVE_INTENT_RE = re.compile(
     r"\b(?:is|was)\s+not\s+to\s+(?P<body>[^?.!\n]+)", re.IGNORECASE
 )
+_MEMORY_INTENT_RE = re.compile(
+    r"(?ix)\b("
+    r"jcode|broker|recalled\s+context|memory|remember|recall|"
+    r"vault|obsidian|note|task|todo|goal|artifact|heading|source|"
+    r"path|line|span|session|conversation|transcript|handoff|"
+    r"project|plan|status|phase|section|§|"
+    r"clio|hermes|honcho|duckdb|graph|ghostty|starship"
+    r")\b"
+)
+_CONTINUITY_INTENT_RE = re.compile(
+    r"(?ix)\b("
+    r"what\s+(?:did|were)\s+we|where\s+did\s+we|"
+    r"we\s+(?:decided|discussed|left|were|are)\b|"
+    r"my\s+(?:vault|note|notes|task|tasks|project|memory|memories)|"
+    r"our\s+(?:vault|note|notes|task|tasks|project|memory|memories|plan)|"
+    r"that\s+(?:thing|note|task|plan|project|memory)|"
+    r"previous|earlier|last\s+(?:session|time|turn)|continue"
+    r")\b"
+)
+_SOURCE_LIKE_RE = re.compile(
+    r"(?i)(?:^|[\s`'\"])(?:/Users/rob/|vault://|[\w .-]+\.md\b|#L\d+\b)"
+)
 
 
 JCODE_BROKER_CONTEXT_SCHEMA = {
@@ -408,6 +430,10 @@ class JcodeGraphMemoryProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         self._ensure_session(session_id)
         focus_query = _prefetch_focus_query(query)
+        if not _prefetch_should_query_broker(query, focus_query):
+            self._diagnostics["last_prefetch_item_count"] = 0
+            self._diagnostics["last_prefetch_chars"] = 0
+            return ""
         event = self._fetch_context(
             query=focus_query,
             limit=self._context_limit,
@@ -916,6 +942,20 @@ def _prefetch_focus_query(query: str) -> str:
             return " ".join([*prefixes, "do not", body]).strip()
 
     return _compact_query_text(text)
+
+
+def _prefetch_should_query_broker(query: str, focus_query: str) -> bool:
+    """Return true when automatic prefetch is likely to help this turn."""
+    combined = f"{query or ''}\n{focus_query or ''}".strip()
+    if not combined:
+        return False
+    if _MEMORY_INTENT_RE.search(combined):
+        return True
+    if _CONTINUITY_INTENT_RE.search(combined):
+        return True
+    if _SOURCE_LIKE_RE.search(combined):
+        return True
+    return False
 
 
 def _compact_query_text(text: str) -> str:

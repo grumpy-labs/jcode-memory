@@ -19,6 +19,7 @@ from jcode_graph import (  # noqa: E402
     JcodeGraphMemoryProvider,
     _default_socket_path,
     _prefetch_focus_query,
+    _prefetch_should_query_broker,
 )
 
 
@@ -252,6 +253,31 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
             "What Vault note contains this heading?\n\nAdvanced Tips: Make Ghostty Even Better",
         )
 
+    def test_prefetch_intent_gate_skips_general_knowledge_prompt(self) -> None:
+        prompt = "Answer in one concise sentence: what makes a cup of tea relaxing?"
+
+        self.assertFalse(_prefetch_should_query_broker(prompt, _prefetch_focus_query(prompt)))
+
+    def test_prefetch_intent_gate_keeps_memory_and_continuity_prompts(self) -> None:
+        prompts = [
+            (
+                "Without using tools or file search, answer only from recalled context "
+                "already provided to you: what unchecked Vault task says Rob's preference "
+                "is not to disable visible reasoning by default?"
+            ),
+            (
+                "Use jcode_broker_context first, before file search, to answer this: "
+                "What Vault note contains this heading? Advanced Tips: Make Ghostty Even Better"
+            ),
+            "What did we decide about DuckDB for the graph database?",
+        ]
+
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self.assertTrue(
+                    _prefetch_should_query_broker(prompt, _prefetch_focus_query(prompt))
+                )
+
     def test_provider_prefetch_sends_focused_query_to_broker(self) -> None:
         prompt = (
             "Without using tools or file search, answer only from recalled context already "
@@ -279,6 +305,28 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
             context_requests[0]["query"],
             "unchecked task do not disable visible reasoning by default",
         )
+
+    def test_provider_prefetch_skips_broker_for_general_prompt(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "context_limit": 4,
+                }
+            )
+            provider.initialize("hermes_session")
+            text = provider.prefetch("Answer in one concise sentence: what makes tea relaxing?")
+            diagnostics = provider.diagnostics()
+            provider.shutdown()
+
+        context_requests = [
+            request for request in server.requests if request["type"] == "broker_context"
+        ]
+        self.assertEqual(context_requests, [])
+        self.assertEqual(text, "")
+        self.assertEqual(diagnostics["last_prefetch_item_count"], 0)
+        self.assertEqual(diagnostics["last_prefetch_chars"], 0)
 
     def test_provider_formats_prefetch_context(self) -> None:
         with FakeBrokerServer() as server:
