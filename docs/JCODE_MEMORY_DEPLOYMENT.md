@@ -1,0 +1,112 @@
+# jcode-memory Deployment Lane
+
+This repo is now the source-controlled home for Rob's custom `jcode-memory`
+broker and Hermes `jcode_graph` adapter work. Live deployments stay as separate
+copies/services:
+
+- CT `1103` runs the broker, DuckDB store, and Vault index.
+- CT `1150` runs Hermes/Clio gateway surfaces and the installed `jcode_graph`
+  Hermes plugin.
+
+The first deployment lane is intentionally manual and dry-run-first. It does not
+install systemd timers, webhooks, or automatic Git pullers.
+
+## Current Manual Flow
+
+1. Commit and push the intended repo state to GitHub.
+2. Print the deploy plan:
+
+   ```bash
+   scripts/deploy_jcode_memory.py --target all
+   ```
+
+3. Read the plan. Confirm the SHA, release directories, tests, binaries, plugin
+   paths, and service names are the ones expected.
+4. Apply only when ready:
+
+   ```bash
+   scripts/deploy_jcode_memory.py --target all --apply
+   ```
+
+By default the script refuses to deploy a commit that is not reachable from the
+configured upstream branch. Use `--allow-unpushed` only for an intentional
+local-only emergency deploy.
+
+## Target Details
+
+### CT1103 Broker
+
+The CT `1103` target stages the exact Git commit under:
+
+```text
+/srv/hermes-jcode/releases/jcode-memory/<sha>
+```
+
+It then runs the focused broker/storage checks and builds the release binary:
+
+```bash
+cargo test -q -p jcode-protocol
+cargo test -q -p jcode-storage --features duckdb-storage-bundled
+cargo test -q --features duckdb-storage-bundled --test e2e broker_runtime
+cargo build -q --release --bin jcode --features duckdb-storage-bundled
+```
+
+Only with `--apply`, it installs:
+
+```text
+/usr/local/bin/jcode-memory-broker
+```
+
+and restarts:
+
+```text
+hermes-jcode-broker.service
+```
+
+The post-restart check verifies that the broker socket exists at:
+
+```text
+/srv/hermes-jcode/runtime/jcode-broker.sock
+```
+
+### CT1150 Hermes Plugin
+
+The CT `1150` target stages only the Hermes adapter subtree under:
+
+```text
+/home/claw/.hermes/releases/jcode_graph/<sha>
+```
+
+It compiles the staged plugin with the live Hermes v0.14 virtual environment.
+
+Only with `--apply`, it backs up and updates:
+
+```text
+/home/claw/.hermes/plugins/jcode_graph
+```
+
+Then it restarts:
+
+```text
+hermes-clio-gateway.service
+```
+
+and verifies:
+
+```text
+http://127.0.0.1:8642/health
+```
+
+## Future Automation Gate
+
+Do not enable automatic CT updates yet. The safe next step is to run this manual
+lane for several normal repo changes and record the evidence in the Master Plan.
+
+When that is boring, add a second phase that converts the release staging into a
+Git-backed pull/fetch workflow on CT `1103` and CT `1150`, with:
+
+- separate service-owned checkouts or release directories;
+- pinned commit SHAs, not floating branch deploys;
+- rollback to the previous release path;
+- systemd timers or webhook-triggered pulls disabled by default during rehearsal;
+- health checks before and after service restarts.
