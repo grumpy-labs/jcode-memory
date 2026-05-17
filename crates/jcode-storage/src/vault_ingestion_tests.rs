@@ -1,4 +1,4 @@
-use crate::duckdb_broker_store::DuckDbBrokerStoreService;
+use crate::duckdb_broker_store::{DuckDbBrokerStoreService, VaultFileRecord, VaultRecordBatch};
 use crate::vault_ingestion::collect_vault_records;
 
 #[test]
@@ -165,5 +165,69 @@ fn vault_ingestion_reconciles_updates_deletes_and_renames() {
     assert_eq!(
         renamed_hits[0].file_id, updated.renamed_files[0].file_id,
         "renamed file should keep stable file identity"
+    );
+}
+
+#[test]
+fn vault_ingestion_reprocesses_when_derived_record_version_changes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let vault = temp.path().join("Vault");
+    std::fs::create_dir_all(vault.join("Projects/OpenClaw-Stack")).expect("create vault");
+    let current = vault.join("Projects/OpenClaw-Stack/CURRENT.md");
+    std::fs::write(
+        &current,
+        "# CURRENT\n\n## Source Of Truth\n- [[Projects/OpenClaw-Stack/Architecture-Reset-v2-Hermes-Centered-Assistant-App]]\n",
+    )
+    .expect("write current");
+    std::fs::write(
+        vault
+            .join("Projects/OpenClaw-Stack")
+            .join("Architecture-Reset-v2-Hermes-Centered-Assistant-App.md"),
+        "# Architecture Reset v2\n",
+    )
+    .expect("write target");
+
+    let records = collect_vault_records(&vault).expect("collect records");
+    let current_file = records
+        .files
+        .iter()
+        .find(|file| file.path == "Projects/OpenClaw-Stack/CURRENT.md")
+        .expect("current file");
+    let service =
+        DuckDbBrokerStoreService::start(temp.path().join("broker.duckdb")).expect("start store");
+    service
+        .replace_vault_records(VaultRecordBatch {
+            files: vec![VaultFileRecord {
+                id: current_file.id.clone(),
+                path: current_file.path.clone(),
+                title: current_file.title.clone(),
+                checksum: current_file.checksum.clone(),
+                size_bytes: current_file.size_bytes,
+                mtime_ns: current_file.mtime_ns,
+                frontmatter_json: "{}".to_string(),
+                deleted_at: None,
+            }],
+            ..VaultRecordBatch::default()
+        })
+        .expect("seed stale derived records");
+
+    let report = service
+        .reconcile_vault_path(&vault)
+        .expect("reconcile unchanged source with stale derived version");
+    let counts = service.table_counts().expect("counts");
+    let relationships = service
+        .query_vault_relationships_for_path("Projects/OpenClaw-Stack/CURRENT.md", 10)
+        .expect("query current relationships");
+
+    assert_eq!(report.updated_files, 1);
+    assert_eq!(counts.active_vault_link, 1);
+    assert!(
+        relationships.iter().any(|row| row.relationship == "outlink"
+            && row.source_path == "Projects/OpenClaw-Stack/CURRENT.md"
+            && row.target_path.as_deref()
+                == Some(
+                    "Projects/OpenClaw-Stack/Architecture-Reset-v2-Hermes-Centered-Assistant-App.md"
+                )),
+        "{relationships:?}"
     );
 }

@@ -326,6 +326,50 @@ impl Client {
         })
     }
 
+    pub async fn refresh_broker_vault(
+        &mut self,
+        vault: String,
+        embed_missing: bool,
+        embedding_model: String,
+        embedding_limit: usize,
+    ) -> Result<ServerEvent> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::BrokerVaultRefresh {
+            id,
+            vault,
+            embed_missing,
+            embedding_model,
+            embedding_limit,
+        };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+
+        for _ in 0..10 {
+            let mut line = String::new();
+            let n = self.reader.read_line(&mut line).await?;
+            if n == 0 {
+                anyhow::bail!("Server disconnected");
+            }
+            let event: ServerEvent = serde_json::from_str(&line)?;
+            match &event {
+                ServerEvent::Ack { .. } => continue,
+                ServerEvent::BrokerVaultRefreshed {
+                    id: response_id, ..
+                } if *response_id == id => return Ok(event),
+                ServerEvent::Error { id: error_id, .. } if *error_id == id => return Ok(event),
+                _ => continue,
+            }
+        }
+
+        Ok(ServerEvent::Error {
+            id,
+            message: "Broker Vault refresh response not received".to_string(),
+            retry_after_secs: None,
+        })
+    }
+
     pub async fn resume_session(&mut self, session_id: &str) -> Result<u64> {
         self.resume_session_with_options(session_id, false, false)
             .await

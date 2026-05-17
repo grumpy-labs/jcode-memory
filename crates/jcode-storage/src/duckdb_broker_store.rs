@@ -174,6 +174,25 @@ pub struct VaultLinkContextRow {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct VaultRelationshipContextRow {
+    pub id: String,
+    pub relationship: String,
+    pub source_file_id: String,
+    pub source_path: String,
+    pub source_title: String,
+    pub target: String,
+    pub target_path: Option<String>,
+    pub target_title: Option<String>,
+    pub link_kind: Option<String>,
+    pub raw: Option<String>,
+    pub source_checksum: String,
+    pub target_checksum: Option<String>,
+    pub mtime_ns: i64,
+    pub score: f64,
+    pub retrieval_mode: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct VaultChunkEmbeddingCandidate {
     pub id: String,
     pub file_id: String,
@@ -222,6 +241,25 @@ pub struct VaultStaleSummaryCandidate {
 pub struct DuckDbBrokerStore {
     db_path: PathBuf,
     connection: duckdb::Connection,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveVaultFile {
+    id: String,
+    path: String,
+    title: String,
+    checksum: String,
+    mtime_ns: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveVaultLink {
+    id: String,
+    source_file_id: String,
+    source_path: String,
+    target: String,
+    kind: String,
+    raw: String,
 }
 
 impl DuckDbBrokerStore {
@@ -991,6 +1029,182 @@ impl DuckDbBrokerStore {
         Ok(hits)
     }
 
+    pub fn query_vault_relationships_for_path(
+        &self,
+        requested_path: &str,
+        limit: usize,
+    ) -> Result<Vec<VaultRelationshipContextRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let requested_path = requested_path.trim();
+        if requested_path.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let files = self.active_vault_files_for_relationships()?;
+        let Some(target_file) = files
+            .iter()
+            .find(|file| vault_path_matches(&file.path, requested_path))
+            .or_else(|| {
+                let requested_stem = vault_path_stem(requested_path);
+                files.iter().find(|file| {
+                    !requested_stem.is_empty()
+                        && vault_path_stem(&file.path).eq_ignore_ascii_case(&requested_stem)
+                })
+            })
+        else {
+            return Ok(Vec::new());
+        };
+        let links = self.active_vault_links_for_relationships()?;
+        let mut rows = Vec::new();
+
+        for link in links
+            .iter()
+            .filter(|link| link.source_path == target_file.path)
+        {
+            let linked_file = resolve_vault_link_target(&link.target, &link.source_path, &files);
+            rows.push(VaultRelationshipContextRow {
+                id: format!("vault_relationship:outlink:{}", link.id),
+                relationship: "outlink".to_string(),
+                source_file_id: link.source_file_id.clone(),
+                source_path: link.source_path.clone(),
+                source_title: target_file.title.clone(),
+                target: link.target.clone(),
+                target_path: linked_file.map(|file| file.path.clone()),
+                target_title: linked_file.map(|file| file.title.clone()),
+                link_kind: Some(link.kind.clone()),
+                raw: Some(link.raw.clone()),
+                source_checksum: target_file.checksum.clone(),
+                target_checksum: linked_file.map(|file| file.checksum.clone()),
+                mtime_ns: target_file.mtime_ns,
+                score: 100.0,
+                retrieval_mode: "duckdb_broker_store_relationship".to_string(),
+            });
+        }
+
+        for link in links
+            .iter()
+            .filter(|link| link.source_path != target_file.path)
+            .filter(|link| {
+                resolve_vault_link_target(&link.target, &link.source_path, &files)
+                    .map(|file| file.path == target_file.path)
+                    .unwrap_or(false)
+            })
+        {
+            let Some(source_file) = files.iter().find(|file| file.path == link.source_path) else {
+                continue;
+            };
+            rows.push(VaultRelationshipContextRow {
+                id: format!("vault_relationship:backlink:{}", link.id),
+                relationship: "backlink".to_string(),
+                source_file_id: link.source_file_id.clone(),
+                source_path: link.source_path.clone(),
+                source_title: source_file.title.clone(),
+                target: link.target.clone(),
+                target_path: Some(target_file.path.clone()),
+                target_title: Some(target_file.title.clone()),
+                link_kind: Some(link.kind.clone()),
+                raw: Some(link.raw.clone()),
+                source_checksum: source_file.checksum.clone(),
+                target_checksum: Some(target_file.checksum.clone()),
+                mtime_ns: source_file.mtime_ns,
+                score: 95.0,
+                retrieval_mode: "duckdb_broker_store_relationship".to_string(),
+            });
+        }
+
+        let parent = vault_parent_path(&target_file.path);
+        for file in files
+            .iter()
+            .filter(|file| file.path != target_file.path)
+            .filter(|file| vault_parent_path(&file.path) == parent)
+        {
+            rows.push(VaultRelationshipContextRow {
+                id: format!(
+                    "vault_relationship:folder_neighbor:{}:{}",
+                    target_file.id, file.id
+                ),
+                relationship: "folder_neighbor".to_string(),
+                source_file_id: target_file.id.clone(),
+                source_path: target_file.path.clone(),
+                source_title: target_file.title.clone(),
+                target: file.path.clone(),
+                target_path: Some(file.path.clone()),
+                target_title: Some(file.title.clone()),
+                link_kind: None,
+                raw: None,
+                source_checksum: target_file.checksum.clone(),
+                target_checksum: Some(file.checksum.clone()),
+                mtime_ns: file.mtime_ns,
+                score: 25.0,
+                retrieval_mode: "duckdb_broker_store_relationship".to_string(),
+            });
+        }
+
+        rows.sort_by(|left, right| {
+            relationship_priority(&left.relationship)
+                .cmp(&relationship_priority(&right.relationship))
+                .then_with(|| {
+                    right
+                        .score
+                        .partial_cmp(&left.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| left.source_path.cmp(&right.source_path))
+                .then_with(|| left.target_path.cmp(&right.target_path))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    fn active_vault_files_for_relationships(&self) -> Result<Vec<ActiveVaultFile>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, path, title, checksum, mtime_ns
+            FROM vault_file
+            WHERE deleted_at IS NULL
+            ORDER BY path
+            "#,
+        )?;
+        let mut rows = statement.query([])?;
+        let mut files = Vec::new();
+        while let Some(row) = rows.next()? {
+            files.push(ActiveVaultFile {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                title: row.get(2)?,
+                checksum: row.get(3)?,
+                mtime_ns: row.get(4)?,
+            });
+        }
+        Ok(files)
+    }
+
+    fn active_vault_links_for_relationships(&self) -> Result<Vec<ActiveVaultLink>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, source_file_id, source_path, target, kind, raw
+            FROM vault_link
+            WHERE deleted_at IS NULL
+            ORDER BY source_path, target, kind
+            "#,
+        )?;
+        let mut rows = statement.query([])?;
+        let mut links = Vec::new();
+        while let Some(row) = rows.next()? {
+            links.push(ActiveVaultLink {
+                id: row.get(0)?,
+                source_file_id: row.get(1)?,
+                source_path: row.get(2)?,
+                target: row.get(3)?,
+                kind: row.get(4)?,
+                raw: row.get(5)?,
+            });
+        }
+        Ok(links)
+    }
+
     pub fn backup_to(&self, backup_path: impl AsRef<Path>) -> Result<PathBuf> {
         let backup_path = backup_path.as_ref().expand_homeish();
         if let Some(parent) = backup_path.parent() {
@@ -1515,6 +1729,14 @@ impl DuckDbBrokerStoreService {
                     } => {
                         let _ = response.send(store.query_vault_links(&query, limit));
                     }
+                    BrokerStoreRequest::QueryVaultRelationshipsForPath {
+                        path,
+                        limit,
+                        response,
+                    } => {
+                        let _ =
+                            response.send(store.query_vault_relationships_for_path(&path, limit));
+                    }
                     BrokerStoreRequest::ListMissingVaultChunkEmbeddings {
                         embedding_model,
                         limit,
@@ -1631,6 +1853,14 @@ impl DuckDbBrokerStoreService {
 
     pub fn query_vault_links(&self, query: &str, limit: usize) -> Result<Vec<VaultLinkContextRow>> {
         self.client.query_vault_links(query, limit)
+    }
+
+    pub fn query_vault_relationships_for_path(
+        &self,
+        path: &str,
+        limit: usize,
+    ) -> Result<Vec<VaultRelationshipContextRow>> {
+        self.client.query_vault_relationships_for_path(path, limit)
     }
 
     pub fn list_missing_vault_chunk_embeddings(
@@ -1787,6 +2017,20 @@ impl DuckDbBrokerStoreClient {
         })
     }
 
+    pub fn query_vault_relationships_for_path(
+        &self,
+        path: &str,
+        limit: usize,
+    ) -> Result<Vec<VaultRelationshipContextRow>> {
+        self.request(
+            |response| BrokerStoreRequest::QueryVaultRelationshipsForPath {
+                path: path.to_string(),
+                limit,
+                response,
+            },
+        )
+    }
+
     pub fn list_missing_vault_chunk_embeddings(
         &self,
         embedding_model: &str,
@@ -1911,6 +2155,11 @@ enum BrokerStoreRequest {
         limit: usize,
         response: mpsc::Sender<Result<Vec<VaultLinkContextRow>>>,
     },
+    QueryVaultRelationshipsForPath {
+        path: String,
+        limit: usize,
+        response: mpsc::Sender<Result<Vec<VaultRelationshipContextRow>>>,
+    },
     ListMissingVaultChunkEmbeddings {
         embedding_model: String,
         limit: usize,
@@ -1959,6 +2208,7 @@ fn query_terms(query: &str) -> Vec<String> {
             let term = term.trim().to_lowercase();
             if term.is_empty()
                 || (term.len() == 1 && term.chars().all(|ch| ch.is_ascii_alphabetic()))
+                || is_query_stopword(&term)
             {
                 None
             } else {
@@ -1966,6 +2216,54 @@ fn query_terms(query: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn is_query_stopword(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "by"
+            | "contains"
+            | "contain"
+            | "file"
+            | "files"
+            | "for"
+            | "from"
+            | "has"
+            | "have"
+            | "how"
+            | "in"
+            | "into"
+            | "is"
+            | "it"
+            | "its"
+            | "mentions"
+            | "my"
+            | "note"
+            | "notes"
+            | "of"
+            | "on"
+            | "or"
+            | "our"
+            | "that"
+            | "the"
+            | "this"
+            | "to"
+            | "vault"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "why"
+            | "with"
+            | "your"
+    )
 }
 
 fn quoted_query_phrases(query: &str) -> Vec<String> {
@@ -2082,6 +2380,104 @@ fn score_vault_chunk_hit(
         }
     }
     Some((score, matched_terms))
+}
+
+fn vault_parent_path(path: &str) -> String {
+    let path = normalize_vault_path_key(path);
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent.to_string())
+        .unwrap_or_default()
+}
+
+fn relationship_priority(relationship: &str) -> usize {
+    match relationship {
+        "backlink" => 0,
+        "outlink" => 1,
+        "folder_neighbor" => 2,
+        _ => 3,
+    }
+}
+
+fn resolve_vault_link_target<'a>(
+    target: &str,
+    source_path: &str,
+    files: &'a [ActiveVaultFile],
+) -> Option<&'a ActiveVaultFile> {
+    let target = normalize_vault_path_key(target);
+    if target.is_empty() {
+        return None;
+    }
+    let target_no_ext = strip_md_extension(&target);
+
+    if let Some(file) = files.iter().find(|file| {
+        let path = normalize_vault_path_key(&file.path);
+        let path_no_ext = strip_md_extension(&path);
+        target == path || target_no_ext == path_no_ext
+    }) {
+        return Some(file);
+    }
+
+    if target.contains('/') {
+        return None;
+    }
+
+    let source_parent = vault_parent_path(source_path);
+    if let Some(file) = files.iter().find(|file| {
+        vault_parent_path(&file.path) == source_parent
+            && vault_path_stem(&file.path).eq_ignore_ascii_case(target_no_ext)
+    }) {
+        return Some(file);
+    }
+
+    let mut matching_files = files
+        .iter()
+        .filter(|file| vault_path_stem(&file.path).eq_ignore_ascii_case(target_no_ext));
+    let first = matching_files.next()?;
+    if matching_files.next().is_some() {
+        None
+    } else {
+        Some(first)
+    }
+}
+
+fn vault_path_matches(path: &str, requested_path: &str) -> bool {
+    let path = normalize_vault_path_key(path);
+    let requested_path = normalize_vault_path_key(requested_path);
+    if path.is_empty() || requested_path.is_empty() {
+        return false;
+    }
+    let path_no_ext = strip_md_extension(&path);
+    let requested_no_ext = strip_md_extension(&requested_path);
+    path == requested_path
+        || path_no_ext == requested_no_ext
+        || requested_path.ends_with(&format!("/{path}"))
+        || requested_no_ext.ends_with(&format!("/{path_no_ext}"))
+        || path.ends_with(&format!("/{requested_path}"))
+        || path_no_ext.ends_with(&format!("/{requested_no_ext}"))
+}
+
+fn vault_path_stem(path: &str) -> String {
+    let path = normalize_vault_path_key(path);
+    let name = path.rsplit('/').next().unwrap_or(path.as_str());
+    strip_md_extension(name).to_string()
+}
+
+fn normalize_vault_path_key(value: &str) -> String {
+    let mut value = value
+        .trim()
+        .trim_matches(['`', '"', '\'', '<', '>', '(', ')']);
+    if let Some(rest) = value.strip_prefix("vault://") {
+        value = rest;
+    }
+    value = value.split('#').next().unwrap_or(value);
+    value = value.split('|').next().unwrap_or(value);
+    let value = value.replace('\\', "/");
+    let value = value.trim_start_matches("./").trim_start_matches('/');
+    value.to_lowercase()
+}
+
+fn strip_md_extension(value: &str) -> &str {
+    value.strip_suffix(".md").unwrap_or(value)
 }
 
 trait ExpandHomeish {

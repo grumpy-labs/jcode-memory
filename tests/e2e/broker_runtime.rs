@@ -322,6 +322,164 @@ async fn typed_broker_context_api_returns_memory_tools_and_artifacts() -> Result
     result
 }
 
+#[cfg(feature = "duckdb-storage")]
+#[tokio::test]
+async fn broker_vault_refresh_reconciles_vault_without_restarting_broker() -> Result<()> {
+    let _env = setup_test_env()?;
+    let _profile = EnvVarGuard::set("JCODE_TOOL_PROFILE", "broker");
+    let runtime_dir = short_runtime_dir(format!(
+        "jcode-broker-vault-refresh-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let project_dir = runtime_dir.join("project");
+    let vault_dir = runtime_dir.join("vault");
+    let db_path = runtime_dir.join("broker.duckdb");
+    std::fs::create_dir_all(&project_dir)?;
+    std::fs::create_dir_all(&vault_dir)?;
+    std::fs::write(
+        vault_dir.join("Needle.md"),
+        "# Gateway Refresh\n\nInitial gateway refresh proof.\n",
+    )?;
+    let _db = EnvVarGuard::set("JCODE_BROKER_DUCKDB_PATH", &db_path);
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+
+    let provider = MockProvider::new();
+    let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
+    let server_instance =
+        server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+
+    let result = async {
+        wait_for_server_ready(&socket_path, &debug_socket_path).await?;
+
+        let create_command = format!("create_session:{}", project_dir.display());
+        let session_id =
+            debug_create_headless_session_with_command(debug_socket_path.clone(), &create_command)
+                .await?;
+
+        let mut client = server::Client::connect_with_path(socket_path.clone()).await?;
+        let resume_id = client.resume_session(&session_id).await?;
+        let _ = collect_until_history_unix(&mut client, resume_id).await?;
+
+        let refresh_event = client
+            .refresh_broker_vault(
+                vault_dir.to_string_lossy().to_string(),
+                false,
+                "jcode-local-embedding".to_string(),
+                0,
+            )
+            .await?;
+        let ServerEvent::BrokerVaultRefreshed {
+            vault,
+            new_files,
+            updated_files,
+            unchanged_files,
+            tombstoned_files,
+            embedded_chunks,
+            counts,
+            ..
+        } = refresh_event
+        else {
+            anyhow::bail!("expected broker vault refresh event, got {refresh_event:?}");
+        };
+        assert_eq!(vault, vault_dir.to_string_lossy());
+        assert_eq!(new_files, 1);
+        assert_eq!(updated_files, 0);
+        assert_eq!(unchanged_files, 0);
+        assert_eq!(tombstoned_files, 0);
+        assert_eq!(embedded_chunks, 0);
+        assert_eq!(counts.active_vault_file, 1);
+        assert!(counts.active_vault_chunk > 0);
+
+        let context_event = client
+            .get_broker_context(
+                Some(session_id.clone()),
+                Some("Initial gateway refresh proof".to_string()),
+                4,
+            )
+            .await?;
+        let ServerEvent::BrokerContext { items, .. } = context_event else {
+            anyhow::bail!("expected broker context event, got {context_event:?}");
+        };
+        assert!(
+            items.iter().any(|item| {
+                item.kind == "vault_chunk"
+                    && item
+                        .origin
+                        .path
+                        .as_deref()
+                        .is_some_and(|path| path.ends_with("Needle.md"))
+                    && item
+                        .content
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("Initial gateway refresh proof")
+            }),
+            "broker context should include freshly refreshed Vault chunk, got {items:?}"
+        );
+
+        std::fs::write(
+            vault_dir.join("Needle.md"),
+            "# Gateway Refresh\n\nUpdated in-service refresh proof.\n",
+        )?;
+        let refresh_event = client
+            .refresh_broker_vault(
+                vault_dir.to_string_lossy().to_string(),
+                false,
+                "jcode-local-embedding".to_string(),
+                0,
+            )
+            .await?;
+        let ServerEvent::BrokerVaultRefreshed {
+            new_files,
+            updated_files,
+            unchanged_files,
+            embedded_chunks,
+            counts,
+            ..
+        } = refresh_event
+        else {
+            anyhow::bail!("expected second broker vault refresh event, got {refresh_event:?}");
+        };
+        assert_eq!(new_files, 0);
+        assert_eq!(updated_files, 1);
+        assert_eq!(unchanged_files, 0);
+        assert_eq!(embedded_chunks, 0);
+        assert_eq!(counts.active_vault_file, 1);
+
+        let context_event = client
+            .get_broker_context(
+                Some(session_id),
+                Some("Updated in-service refresh proof".to_string()),
+                4,
+            )
+            .await?;
+        let ServerEvent::BrokerContext { items, .. } = context_event else {
+            anyhow::bail!("expected updated broker context event, got {context_event:?}");
+        };
+        assert!(
+            items.iter().any(|item| {
+                item.kind == "vault_chunk"
+                    && item
+                        .content
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("Updated in-service refresh proof")
+            }),
+            "broker context should include updated Vault chunk without a restart, got {items:?}"
+        );
+
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
+    result
+}
+
 #[tokio::test]
 async fn broker_context_emits_phase_2_context_evidence_candidates_and_boundaries() -> Result<()> {
     let _env = setup_test_env()?;

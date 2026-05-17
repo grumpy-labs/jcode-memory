@@ -2,6 +2,8 @@ use super::SessionAgents;
 use crate::memory::TrustLevel;
 use crate::memory::{MemoryCategory, MemoryEntry, MemoryManager, MemoryScope};
 use crate::memory_graph::EdgeKind;
+#[cfg(feature = "duckdb-storage")]
+use crate::protocol::BrokerVaultRefreshCounts;
 use crate::protocol::{
     BrokerContextFragment, BrokerContextItem, BrokerContextOrigin, BrokerContextRelevance,
     BrokerMemoryContextItem, BrokerMemoryExtractionStatus, ServerEvent,
@@ -20,8 +22,9 @@ use tokio::sync::mpsc;
 
 #[cfg(feature = "duckdb-storage")]
 use jcode_storage::duckdb_broker_store::{
-    DuckDbBrokerStoreClient, DuckDbBrokerStoreService, VaultChunkContextRow,
-    VaultChunkEmbeddingHit, VaultLinkContextRow, VaultTaskContextRow,
+    BrokerStoreCounts, DuckDbBrokerStoreClient, DuckDbBrokerStoreService, VaultChunkContextRow,
+    VaultChunkEmbeddingHit, VaultEmbeddingRecord, VaultLinkContextRow, VaultRelationshipContextRow,
+    VaultTaskContextRow,
 };
 
 type TranscriptExtractionFuture<'a> =
@@ -34,8 +37,6 @@ const BROKER_SKILL_SUMMARY_LIMIT: usize = 8;
 const BROKER_DUCKDB_PATH_ENV: &str = "JCODE_BROKER_DUCKDB_PATH";
 #[cfg(feature = "duckdb-storage")]
 const BROKER_VAULT_EMBEDDING_MODEL_ENV: &str = "JCODE_BROKER_VAULT_EMBEDDING_MODEL";
-#[cfg(feature = "duckdb-storage")]
-const DEFAULT_BROKER_VAULT_EMBEDDING_MODEL: &str = "jcode-local-embedding";
 
 trait TranscriptMemoryExtractor {
     fn extract<'a>(
@@ -123,6 +124,35 @@ pub(super) async fn handle_broker_transcript_sync(
     let _ = client_event_tx.send(event);
 }
 
+pub(super) async fn handle_broker_vault_refresh(
+    id: u64,
+    vault: String,
+    embed_missing: bool,
+    embedding_model: String,
+    embedding_limit: usize,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let event = match tokio::task::spawn_blocking(move || {
+        broker_vault_refresh_event(id, vault, embed_missing, embedding_model, embedding_limit)
+    })
+    .await
+    {
+        Ok(Ok(event)) => event,
+        Ok(Err(error)) => ServerEvent::Error {
+            id,
+            message: format!("{error:#}"),
+            retry_after_secs: None,
+        },
+        Err(error) => ServerEvent::Error {
+            id,
+            message: format!("broker Vault refresh task failed: {error}"),
+            retry_after_secs: None,
+        },
+    };
+
+    let _ = client_event_tx.send(event);
+}
+
 pub(super) async fn handle_broker_context(
     id: u64,
     requested_session_id: Option<String>,
@@ -153,6 +183,124 @@ pub(super) async fn handle_broker_context(
     };
 
     let _ = client_event_tx.send(event);
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn broker_vault_refresh_event(
+    id: u64,
+    vault: String,
+    embed_missing: bool,
+    embedding_model: String,
+    embedding_limit: usize,
+) -> Result<ServerEvent> {
+    let vault = vault.trim();
+    if vault.is_empty() {
+        anyhow::bail!("broker Vault refresh requires a vault path");
+    }
+    let vault_path = PathBuf::from(vault);
+    if !vault_path.is_dir() {
+        anyhow::bail!(
+            "broker Vault refresh path is not a directory: {}",
+            vault_path.display()
+        );
+    }
+
+    let db_path = broker_duckdb_path();
+    let client = broker_duckdb_store_client(db_path.clone())?;
+    let report = client.reconcile_vault_path(&vault_path)?;
+    let mut embedded_chunks = 0;
+    let counts = if embed_missing {
+        embedded_chunks =
+            backfill_missing_vault_chunk_embeddings(&client, &embedding_model, embedding_limit)?;
+        client.table_counts()?
+    } else {
+        report.counts.clone()
+    };
+
+    Ok(ServerEvent::BrokerVaultRefreshed {
+        id,
+        vault: vault_path.to_string_lossy().to_string(),
+        db: Some(db_path.to_string_lossy().to_string()),
+        new_files: report.new_files,
+        updated_files: report.updated_files,
+        unchanged_files: report.unchanged_files,
+        tombstoned_files: report.tombstoned_files,
+        renamed_files: report.renamed_files.len(),
+        embedded_chunks,
+        counts: broker_vault_refresh_counts(&counts),
+    })
+}
+
+#[cfg(not(feature = "duckdb-storage"))]
+fn broker_vault_refresh_event(
+    _id: u64,
+    _vault: String,
+    _embed_missing: bool,
+    _embedding_model: String,
+    _embedding_limit: usize,
+) -> Result<ServerEvent> {
+    anyhow::bail!("broker Vault refresh requires the duckdb-storage feature");
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn broker_duckdb_path() -> PathBuf {
+    std::env::var_os(BROKER_DUCKDB_PATH_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| jcode_storage::runtime_dir().join("jcode-broker.duckdb"))
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn backfill_missing_vault_chunk_embeddings(
+    client: &DuckDbBrokerStoreClient,
+    embedding_model: &str,
+    embedding_limit: usize,
+) -> Result<usize> {
+    let candidates =
+        client.list_missing_vault_chunk_embeddings(embedding_model, embedding_limit)?;
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut records = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let embedding_text = format!(
+            "{}\n{}\n{}",
+            candidate.title, candidate.heading, candidate.content
+        );
+        let embedding = crate::embedding::embed(&embedding_text).with_context(|| {
+            format!(
+                "failed to embed Vault chunk {} from {}",
+                candidate.id, candidate.path
+            )
+        })?;
+        records.push(VaultEmbeddingRecord {
+            id: format!("vault_embedding:{embedding_model}:{}", candidate.id),
+            record_id: candidate.id,
+            record_kind: "vault_chunk".to_string(),
+            embedding_model: embedding_model.to_string(),
+            embedding,
+            content_checksum: candidate.checksum,
+            source_checksum: candidate.source_checksum,
+            updated_at: now.clone(),
+            deleted_at: None,
+        });
+    }
+
+    let embedded_chunks = records.len();
+    client.upsert_vault_embeddings(records)?;
+    Ok(embedded_chunks)
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn broker_vault_refresh_counts(counts: &BrokerStoreCounts) -> BrokerVaultRefreshCounts {
+    BrokerVaultRefreshCounts {
+        active_vault_file: counts.active_vault_file,
+        active_vault_chunk: counts.active_vault_chunk,
+        active_vault_embedding: counts.active_vault_embedding,
+        active_vault_task: counts.active_vault_task,
+        active_graph_edge: counts.active_graph_edge,
+    }
 }
 
 async fn broker_turn_sync_event(
@@ -357,8 +505,27 @@ async fn broker_context_event(
     };
     tool_names.sort();
 
-    let memory_results =
-        collect_broker_memory_results(working_dir.as_deref(), query, limit, include_provenance)?;
+    #[cfg(feature = "duckdb-storage")]
+    let relationship_query = vault_relationship_query_requested(query);
+    #[cfg(not(feature = "duckdb-storage"))]
+    let relationship_query = false;
+
+    let memory_results = if relationship_query {
+        Vec::new()
+    } else {
+        let memory_working_dir = working_dir.clone();
+        let memory_query = query.map(str::to_string);
+        tokio::task::spawn_blocking(move || {
+            collect_broker_memory_results(
+                memory_working_dir.as_deref(),
+                memory_query.as_deref(),
+                limit,
+                include_provenance,
+            )
+        })
+        .await
+        .context("broker memory context task failed")??
+    };
     let memories: Vec<BrokerMemoryContextItem> = memory_results
         .iter()
         .map(|result| result.memory.clone())
@@ -381,7 +548,13 @@ async fn broker_context_event(
         &session_search_hits,
         &conversation_search_hits,
     );
-    let vault_items = collect_vault_context_items(working_dir.as_deref(), query, limit)?;
+    let vault_working_dir = working_dir.clone();
+    let vault_query = query.map(str::to_string);
+    let vault_items = tokio::task::spawn_blocking(move || {
+        collect_vault_context_items(vault_working_dir.as_deref(), vault_query.as_deref(), limit)
+    })
+    .await
+    .context("broker Vault context task failed")??;
     let items = broker_context_items_with_vault_priority(context_items, vault_items);
 
     Ok(ServerEvent::BrokerContext {
@@ -977,7 +1150,12 @@ fn collect_vault_context_items(
     let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) else {
         return Ok(Vec::new());
     };
-    let limit = broker_search_hit_limit(limit);
+    let relationship_query = vault_relationship_query_requested(Some(query));
+    let limit = if relationship_query {
+        limit
+    } else {
+        broker_search_hit_limit(limit)
+    };
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -986,7 +1164,11 @@ fn collect_vault_context_items(
     };
 
     let client = broker_duckdb_store_client(db_path)?;
-    let query_embedding = crate::embedding::embed(query).ok();
+    let query_embedding = if relationship_query {
+        None
+    } else {
+        crate::embedding::embed(query).ok()
+    };
     collect_vault_context_items_with_client(
         &client,
         working_dir,
@@ -1006,6 +1188,15 @@ fn collect_vault_context_items_with_client(
 ) -> Result<Vec<BrokerContextItem>> {
     let mut hits = Vec::new();
     let mut seen_chunks = HashSet::new();
+    let mut seen_relationships = HashSet::new();
+
+    for path in vault_relationship_anchor_paths_from_query(query) {
+        for row in client.query_vault_relationships_for_path(&path, limit)? {
+            if seen_relationships.insert(row.id.clone()) {
+                hits.push(VaultContextHit::Relationship(row));
+            }
+        }
+    }
 
     for row in client.query_vault_chunks(query, limit)? {
         seen_chunks.insert(row.id.clone());
@@ -1039,8 +1230,8 @@ fn collect_vault_context_items_with_client(
     let strong_lexical_threshold = strong_lexical_match_threshold(query);
     let task_item_query = is_vault_task_item_query(query);
     hits.sort_by(|left, right| {
-        left.priority(strong_lexical_threshold, task_item_query)
-            .cmp(&right.priority(strong_lexical_threshold, task_item_query))
+        left.priority(query, strong_lexical_threshold, task_item_query)
+            .cmp(&right.priority(query, strong_lexical_threshold, task_item_query))
             .then_with(|| {
                 right
                     .score()
@@ -1063,7 +1254,7 @@ fn broker_vault_embedding_model() -> String {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_BROKER_VAULT_EMBEDDING_MODEL.to_string())
+        .unwrap_or_else(crate::embedding::configured_model_label)
 }
 
 #[cfg(not(feature = "duckdb-storage"))]
@@ -1106,6 +1297,7 @@ fn broker_duckdb_store_client(db_path: PathBuf) -> Result<DuckDbBrokerStoreClien
 
 #[cfg(feature = "duckdb-storage")]
 enum VaultContextHit {
+    Relationship(VaultRelationshipContextRow),
     SemanticChunk(VaultChunkEmbeddingHit),
     Chunk(VaultChunkContextRow),
     Task(VaultTaskContextRow),
@@ -1116,6 +1308,7 @@ enum VaultContextHit {
 impl VaultContextHit {
     fn score(&self) -> f64 {
         match self {
+            Self::Relationship(row) => row.score,
             Self::SemanticChunk(row) => row.score,
             Self::Chunk(row) => row.score,
             Self::Task(row) => row.score,
@@ -1123,8 +1316,14 @@ impl VaultContextHit {
         }
     }
 
-    fn priority(&self, strong_lexical_threshold: usize, task_item_query: bool) -> usize {
+    fn priority(
+        &self,
+        query: &str,
+        strong_lexical_threshold: usize,
+        task_item_query: bool,
+    ) -> usize {
         match self {
+            Self::Relationship(_) => 0,
             Self::Task(row)
                 if task_item_query
                     && is_strong_lexical_match(
@@ -1132,23 +1331,30 @@ impl VaultContextHit {
                         strong_lexical_threshold,
                     ) =>
             {
-                0
+                1
             }
+            Self::Chunk(row) if is_exact_vault_chunk_match(row, query) => 2,
+            Self::SemanticChunk(_) => 3,
             Self::Chunk(row)
                 if is_strong_lexical_match(row.matched_terms.len(), strong_lexical_threshold) =>
             {
-                1
+                4
             }
-            Self::SemanticChunk(_) => 2,
-            Self::Task(_) if task_item_query => 3,
-            Self::Chunk(_) => 4,
-            Self::Task(_) => 5,
-            Self::Link(_) => 6,
+            Self::Task(_) if task_item_query => 5,
+            Self::Chunk(_) => 6,
+            Self::Task(_) => 7,
+            Self::Link(_) => 8,
         }
     }
 
     fn tie_breaker(&self) -> String {
         match self {
+            Self::Relationship(row) => format!(
+                "relationship:{}:{}:{}",
+                row.relationship,
+                row.source_path,
+                row.target_path.as_deref().unwrap_or(&row.target)
+            ),
             Self::SemanticChunk(row) => {
                 format!("semantic_chunk:{}:{:012}", row.path, row.start_line)
             }
@@ -1165,6 +1371,9 @@ impl VaultContextHit {
         working_dir: Option<&str>,
     ) -> BrokerContextItem {
         match self {
+            Self::Relationship(row) => {
+                vault_relationship_broker_item(row, query, rank, working_dir)
+            }
             Self::SemanticChunk(row) => {
                 vault_semantic_chunk_broker_item(row, query, rank, working_dir)
             }
@@ -1191,6 +1400,29 @@ fn is_strong_lexical_match(matched_term_count: usize, threshold: usize) -> bool 
 }
 
 #[cfg(feature = "duckdb-storage")]
+fn is_exact_vault_chunk_match(row: &VaultChunkContextRow, query: &str) -> bool {
+    let needle = normalize_vault_match_text(query);
+    if needle.split_whitespace().count() < 2 {
+        return false;
+    }
+    let haystack =
+        normalize_vault_match_text(&format!("{}\n{}\n{}", row.title, row.heading, row.content));
+    haystack.contains(&needle)
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn normalize_vault_match_text(value: &str) -> String {
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter_map(|part| {
+            let part = part.trim().to_lowercase();
+            if part.is_empty() { None } else { Some(part) }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(feature = "duckdb-storage")]
 fn is_vault_task_item_query(query: &str) -> bool {
     let query = query.to_lowercase();
     query.contains("task item")
@@ -1200,6 +1432,248 @@ fn is_vault_task_item_query(query: &str) -> bool {
         || query.contains("todo")
         || query.contains("[ ]")
         || query.contains("- [ ]")
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_path_candidates_from_query(query: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    for line in query.lines() {
+        if let Some(candidate) = vault_path_candidate_from_line(line) {
+            push_vault_path_candidate(candidate, &mut candidates, &mut seen);
+        }
+    }
+
+    for token in query.split_whitespace() {
+        let mut token =
+            token.trim_matches(['`', '"', '\'', '<', '>', '(', ')', '[', ']', ',', ';', ':']);
+        if let Some(rest) = token.strip_prefix("vault://") {
+            token = rest;
+        }
+        token = token.split('#').next().unwrap_or(token);
+        token = token.split('|').next().unwrap_or(token);
+        token = token.trim_end_matches(['.', '?', '!']);
+        if !token.to_lowercase().contains(".md") {
+            continue;
+        }
+        let Some(md_end) = token.to_lowercase().find(".md").map(|idx| idx + 3) else {
+            continue;
+        };
+        let candidate = token[..md_end].trim_matches('/').to_string();
+        if candidate.is_empty() {
+            continue;
+        }
+        push_vault_path_candidate(candidate, &mut candidates, &mut seen);
+    }
+    candidates
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_path_candidate_from_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    if !line.to_lowercase().contains(".md") {
+        return None;
+    }
+
+    let start = if let Some(vault_start) = line.find("vault://") {
+        vault_start + "vault://".len()
+    } else {
+        vault_path_prefix_start(line)?
+    };
+    let pathish = &line[start..];
+    let md_end = pathish.to_lowercase().find(".md")? + 3;
+    let candidate = pathish[..md_end]
+        .split('#')
+        .next()
+        .unwrap_or("")
+        .split('|')
+        .next()
+        .unwrap_or("")
+        .trim_matches([
+            '`', '"', '\'', '<', '>', '(', ')', '[', ']', ',', ';', ':', '.', '?', '!',
+        ])
+        .trim_matches('/')
+        .trim()
+        .to_string();
+    if candidate.is_empty() {
+        None
+    } else {
+        Some(candidate)
+    }
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_path_prefix_start(value: &str) -> Option<usize> {
+    [
+        "Projects/",
+        "TaskNotes/",
+        "Knowledge/",
+        "System/",
+        "Templates/",
+        "Views/",
+        "Daily/",
+        "Archive/",
+        "Sources/",
+        "Attachments/",
+    ]
+    .iter()
+    .filter_map(|prefix| value.find(prefix))
+    .min()
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn push_vault_path_candidate(
+    candidate: String,
+    candidates: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let normalized = candidate.to_lowercase();
+    if candidates
+        .iter()
+        .any(|existing| existing.to_lowercase().ends_with(&normalized))
+    {
+        return;
+    }
+    if seen.insert(normalized) {
+        candidates.push(candidate);
+    }
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_relationship_anchor_paths_from_query(query: &str) -> Vec<String> {
+    vault_path_candidates_from_query(query)
+        .into_iter()
+        .take(1)
+        .collect()
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_relationship_query_requested(query: Option<&str>) -> bool {
+    let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) else {
+        return false;
+    };
+    if vault_path_candidates_from_query(query).is_empty() {
+        return false;
+    }
+    let query = query.to_lowercase();
+    [
+        "backlink",
+        "back link",
+        "outlink",
+        "out link",
+        "link",
+        "related",
+        "relationship",
+        "neighbor",
+        "neighbour",
+    ]
+    .iter()
+    .any(|term| query.contains(term))
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_relationship_broker_item(
+    row: &VaultRelationshipContextRow,
+    query: &str,
+    rank: usize,
+    working_dir: Option<&str>,
+) -> BrokerContextItem {
+    let source_uri = vault_chunk_uri(&row.source_path, "");
+    let target_uri = row
+        .target_path
+        .as_ref()
+        .map(|path| vault_chunk_uri(path, ""))
+        .unwrap_or_else(|| vault_link_uri(&row.source_path, &row.target));
+    let score = Some(row.score as f32);
+    let content = match row.relationship.as_str() {
+        "backlink" => format!(
+            "{} links to {} via {}",
+            row.source_path,
+            row.target_path.as_deref().unwrap_or(&row.target),
+            row.raw.as_deref().unwrap_or(&row.target)
+        ),
+        "outlink" => format!(
+            "{} links to {} via {}",
+            row.source_path,
+            row.target_path.as_deref().unwrap_or(&row.target),
+            row.raw.as_deref().unwrap_or(&row.target)
+        ),
+        "folder_neighbor" => format!(
+            "{} shares folder with {}",
+            row.target_path.as_deref().unwrap_or(&row.target),
+            row.source_path
+        ),
+        _ => format!(
+            "{} relates to {}",
+            row.source_path,
+            row.target_path.as_deref().unwrap_or(&row.target)
+        ),
+    };
+    BrokerContextItem {
+        id: row.id.clone(),
+        kind: "vault_relationship".to_string(),
+        scope: "vault".to_string(),
+        content_format: "plain_text".to_string(),
+        title: Some(format!(
+            "{}: {} -> {}",
+            row.relationship,
+            row.source_title,
+            row.target_title.as_deref().unwrap_or(&row.target)
+        )),
+        summary: Some(format!("Vault {} relationship", row.relationship)),
+        content: Some(content.clone()),
+        tags: vec![
+            "vault".to_string(),
+            "vault_relationship".to_string(),
+            row.relationship.clone(),
+        ],
+        source: Some(source_uri.clone()),
+        score,
+        origin: BrokerContextOrigin {
+            tool: Some("duckdb_broker_store".to_string()),
+            source: Some("vault".to_string()),
+            working_dir: working_dir.map(str::to_string),
+            path: Some(row.source_path.clone()),
+            uri: Some(source_uri.clone()),
+            ..Default::default()
+        },
+        relevance: Some(BrokerContextRelevance {
+            query: Some(query.to_string()),
+            retrieval_mode: Some(row.retrieval_mode.clone()),
+            score,
+            rank: Some(rank),
+            matched_terms: Vec::new(),
+            exact_match: Some(true),
+        }),
+        fragments: vec![BrokerContextFragment {
+            relation: row.relationship.clone(),
+            content,
+            content_format: "plain_text".to_string(),
+            role: None,
+            message_index: None,
+            message_id: None,
+            timestamp: None,
+        }],
+        metadata: json!({
+            "durable_memory": false,
+            "source_kind": "vault_relationship",
+            "relationship": row.relationship,
+            "source_file_id": row.source_file_id,
+            "source_path": row.source_path,
+            "source_title": row.source_title,
+            "source_uri": source_uri,
+            "target": row.target,
+            "target_path": row.target_path,
+            "target_title": row.target_title,
+            "target_uri": target_uri,
+            "link_kind": row.link_kind,
+            "raw": row.raw,
+            "source_checksum": row.source_checksum,
+            "target_checksum": row.target_checksum,
+            "mtime_ns": row.mtime_ns,
+        }),
+    }
 }
 
 #[cfg(feature = "duckdb-storage")]
@@ -1986,9 +2460,58 @@ fn query_terms(query: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     normalized
         .split_whitespace()
+        .filter(|term| !is_query_stopword(term))
         .filter(|term| seen.insert((*term).to_string()))
         .map(str::to_string)
         .collect()
+}
+
+fn is_query_stopword(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "by"
+            | "contains"
+            | "contain"
+            | "file"
+            | "files"
+            | "for"
+            | "from"
+            | "has"
+            | "have"
+            | "how"
+            | "in"
+            | "into"
+            | "is"
+            | "it"
+            | "its"
+            | "mentions"
+            | "my"
+            | "note"
+            | "notes"
+            | "of"
+            | "on"
+            | "or"
+            | "our"
+            | "that"
+            | "the"
+            | "this"
+            | "to"
+            | "vault"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "why"
+            | "with"
+            | "your"
+    )
 }
 
 fn summarize_content(content: &str) -> String {
@@ -2069,6 +2592,34 @@ mod tests {
                 None => crate::env::remove_var(self.name),
             }
         }
+    }
+
+    #[cfg(feature = "duckdb-storage")]
+    #[test]
+    fn vault_relationship_query_requested_requires_path_and_relationship_intent() {
+        assert!(vault_relationship_query_requested(Some(
+            "What backlinks relate to Projects/Demo/Plans/Target.md?"
+        )));
+        assert!(vault_relationship_query_requested(Some(
+            "Show related neighboring notes for vault://Projects/Demo/Plans/Target.md#Decision"
+        )));
+        assert!(!vault_relationship_query_requested(Some(
+            "What note contains Projects/Demo/Plans/Target.md?"
+        )));
+        assert!(!vault_relationship_query_requested(Some(
+            "What links did we discuss yesterday?"
+        )));
+    }
+
+    #[cfg(feature = "duckdb-storage")]
+    #[test]
+    fn vault_path_candidates_extract_spaced_vault_paths_from_lines() {
+        assert_eq!(
+            vault_path_candidates_from_query(
+                "For this Vault note:\n\nSystem/jcode-validation/Freshness Probe Source 2026-05-14.md\n\nWhat links, backlinks, or neighboring notes does the broker return?"
+            ),
+            vec!["System/jcode-validation/Freshness Probe Source 2026-05-14.md"]
+        );
     }
 
     struct FakeTranscriptExtractor {
@@ -2767,6 +3318,337 @@ mod tests {
 
     #[cfg(feature = "duckdb-storage")]
     #[test]
+    fn broker_context_exposes_vault_relationship_neighborhood_for_path_queries() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let db_path = _env.path().join("broker.duckdb");
+        let _db_env = TestEnvVar::set("JCODE_BROKER_DUCKDB_PATH", db_path.as_os_str());
+        let service = DuckDbBrokerStoreService::start(&db_path).expect("start broker store");
+        service
+            .replace_vault_records(VaultRecordBatch {
+                files: vec![
+                    VaultFileRecord {
+                        id: "file_target".to_string(),
+                        path: "Plans/Target.md".to_string(),
+                        title: "Target".to_string(),
+                        checksum: "sha256:target".to_string(),
+                        size_bytes: 64,
+                        mtime_ns: 123,
+                        frontmatter_json: "{}".to_string(),
+                        deleted_at: None,
+                    },
+                    VaultFileRecord {
+                        id: "file_backlink".to_string(),
+                        path: "Plans/Backlink.md".to_string(),
+                        title: "Backlink".to_string(),
+                        checksum: "sha256:backlink".to_string(),
+                        size_bytes: 64,
+                        mtime_ns: 124,
+                        frontmatter_json: "{}".to_string(),
+                        deleted_at: None,
+                    },
+                ],
+                links: vec![VaultLinkRecord {
+                    id: "link_backlink_target".to_string(),
+                    source_file_id: "file_backlink".to_string(),
+                    source_path: "Plans/Backlink.md".to_string(),
+                    target: "Plans/Target".to_string(),
+                    kind: "wikilink".to_string(),
+                    raw: "[[Plans/Target]]".to_string(),
+                    deleted_at: None,
+                }],
+                ..VaultRecordBatch::default()
+            })
+            .expect("seed broker store");
+        drop(service);
+
+        let items = collect_vault_context_items(
+            Some("/tmp/project"),
+            Some("What links or backlinks relate to Projects/Demo/Plans/Target.md?"),
+            8,
+        )
+        .expect("collect vault context items");
+
+        let relationship = items
+            .iter()
+            .find(|item| item.kind == "vault_relationship")
+            .expect("relationship item");
+        assert_eq!(relationship.scope, "vault");
+        assert_eq!(relationship.metadata["source_kind"], "vault_relationship");
+        assert_eq!(relationship.metadata["relationship"], "backlink");
+        assert_eq!(relationship.metadata["source_path"], "Plans/Backlink.md");
+        assert_eq!(relationship.metadata["target_path"], "Plans/Target.md");
+        assert_eq!(
+            relationship
+                .relevance
+                .as_ref()
+                .and_then(|relevance| relevance.retrieval_mode.as_deref()),
+            Some("duckdb_broker_store_relationship")
+        );
+    }
+
+    #[cfg(feature = "duckdb-storage")]
+    #[test]
+    fn broker_context_relationship_query_anchors_on_first_vault_path() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let db_path = _env.path().join("broker.duckdb");
+        let _db_env = TestEnvVar::set("JCODE_BROKER_DUCKDB_PATH", db_path.as_os_str());
+        let service = DuckDbBrokerStoreService::start(&db_path).expect("start broker store");
+        service
+            .replace_vault_records(VaultRecordBatch {
+                files: vec![
+                    VaultFileRecord {
+                        id: "file_source".to_string(),
+                        path: "Projects/OpenClaw-Stack/CURRENT.md".to_string(),
+                        title: "OpenClaw Current".to_string(),
+                        checksum: "sha256:source".to_string(),
+                        size_bytes: 64,
+                        mtime_ns: 123,
+                        frontmatter_json: "{}".to_string(),
+                        deleted_at: None,
+                    },
+                    VaultFileRecord {
+                        id: "file_expected_target".to_string(),
+                        path: "Projects/OpenClaw-Stack/Architecture-Reset-v2-Hermes-Centered-Assistant-App.md"
+                            .to_string(),
+                        title: "Hermes Centered Assistant App".to_string(),
+                        checksum: "sha256:expected-target".to_string(),
+                        size_bytes: 64,
+                        mtime_ns: 124,
+                        frontmatter_json: "{}".to_string(),
+                        deleted_at: None,
+                    },
+                    VaultFileRecord {
+                        id: "file_unrelated_backlink".to_string(),
+                        path: "Projects/OpenClaw-Stack/Architecture-Reset-Hermes-Personal-Runtime-and-Project-LLM-Wikis.md"
+                            .to_string(),
+                        title: "Runtime Wikis".to_string(),
+                        checksum: "sha256:unrelated-backlink".to_string(),
+                        size_bytes: 64,
+                        mtime_ns: 125,
+                        frontmatter_json: "{}".to_string(),
+                        deleted_at: None,
+                    },
+                ],
+                links: vec![VaultLinkRecord {
+                    id: "link_unrelated_to_expected_target".to_string(),
+                    source_file_id: "file_unrelated_backlink".to_string(),
+                    source_path:
+                        "Projects/OpenClaw-Stack/Architecture-Reset-Hermes-Personal-Runtime-and-Project-LLM-Wikis.md"
+                            .to_string(),
+                    target:
+                        "Projects/OpenClaw-Stack/Architecture-Reset-v2-Hermes-Centered-Assistant-App"
+                            .to_string(),
+                    kind: "wikilink".to_string(),
+                    raw: "[[Projects/OpenClaw-Stack/Architecture-Reset-v2-Hermes-Centered-Assistant-App]]"
+                        .to_string(),
+                    deleted_at: None,
+                }],
+                ..VaultRecordBatch::default()
+            })
+            .expect("seed broker store");
+        drop(service);
+
+        let items = collect_vault_context_items(
+            Some("/tmp/project"),
+            Some(
+                "For this Vault note: Projects/OpenClaw-Stack/CURRENT.md what links, backlinks, \
+                 or neighboring notes does the broker return? Specifically say whether an outlink \
+                 to Projects/OpenClaw-Stack/Architecture-Reset-v2-Hermes-Centered-Assistant-App.md appears.",
+            ),
+            8,
+        )
+        .expect("collect vault context items");
+
+        let relationship_items: Vec<_> = items
+            .iter()
+            .filter(|item| item.kind == "vault_relationship")
+            .collect();
+        assert!(!relationship_items.is_empty());
+        for item in relationship_items {
+            let source_path = item.metadata["source_path"].as_str().expect("source path");
+            let target_path = item.metadata["target_path"].as_str().expect("target path");
+            assert!(
+                source_path == "Projects/OpenClaw-Stack/CURRENT.md"
+                    || target_path == "Projects/OpenClaw-Stack/CURRENT.md",
+                "relationship item must involve the first Vault path anchor, got {source_path} -> {target_path}"
+            );
+        }
+    }
+
+    #[cfg(feature = "duckdb-storage")]
+    #[test]
+    fn broker_context_relationship_query_does_not_truncate_outlinks_to_search_hit_cap() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let db_path = _env.path().join("broker.duckdb");
+        let _db_env = TestEnvVar::set("JCODE_BROKER_DUCKDB_PATH", db_path.as_os_str());
+        let service = DuckDbBrokerStoreService::start(&db_path).expect("start broker store");
+
+        let mut files = vec![
+            VaultFileRecord {
+                id: "file_source".to_string(),
+                path: "Projects/OpenClaw-Stack/CURRENT.md".to_string(),
+                title: "OpenClaw Current".to_string(),
+                checksum: "sha256:source".to_string(),
+                size_bytes: 64,
+                mtime_ns: 123,
+                frontmatter_json: "{}".to_string(),
+                deleted_at: None,
+            },
+            VaultFileRecord {
+                id: "file_expected_target".to_string(),
+                path:
+                    "Projects/OpenClaw-Stack/Architecture-Reset-v2-Hermes-Centered-Assistant-App.md"
+                        .to_string(),
+                title: "Hermes Centered Assistant App".to_string(),
+                checksum: "sha256:expected-target".to_string(),
+                size_bytes: 64,
+                mtime_ns: 124,
+                frontmatter_json: "{}".to_string(),
+                deleted_at: None,
+            },
+        ];
+        let mut links = vec![VaultLinkRecord {
+            id: "link_source_expected_target".to_string(),
+            source_file_id: "file_source".to_string(),
+            source_path: "Projects/OpenClaw-Stack/CURRENT.md".to_string(),
+            target: "Projects/OpenClaw-Stack/Architecture-Reset-v2-Hermes-Centered-Assistant-App"
+                .to_string(),
+            kind: "wikilink".to_string(),
+            raw: "[[Projects/OpenClaw-Stack/Architecture-Reset-v2-Hermes-Centered-Assistant-App]]"
+                .to_string(),
+            deleted_at: None,
+        }];
+        for idx in 1..=4 {
+            files.push(VaultFileRecord {
+                id: format!("file_backlink_{idx}"),
+                path: format!("Projects/OpenClaw-Stack/Backlink-{idx}.md"),
+                title: format!("Backlink {idx}"),
+                checksum: format!("sha256:backlink-{idx}"),
+                size_bytes: 64,
+                mtime_ns: 130 + idx,
+                frontmatter_json: "{}".to_string(),
+                deleted_at: None,
+            });
+            links.push(VaultLinkRecord {
+                id: format!("link_backlink_{idx}_source"),
+                source_file_id: format!("file_backlink_{idx}"),
+                source_path: format!("Projects/OpenClaw-Stack/Backlink-{idx}.md"),
+                target: "Projects/OpenClaw-Stack/CURRENT".to_string(),
+                kind: "wikilink".to_string(),
+                raw: "[[Projects/OpenClaw-Stack/CURRENT]]".to_string(),
+                deleted_at: None,
+            });
+        }
+
+        service
+            .replace_vault_records(VaultRecordBatch {
+                files,
+                links,
+                ..VaultRecordBatch::default()
+            })
+            .expect("seed broker store");
+        drop(service);
+
+        let items = collect_vault_context_items(
+            Some("/tmp/project"),
+            Some(
+                "For this Vault note: Projects/OpenClaw-Stack/CURRENT.md what links, backlinks, \
+                 or neighboring notes does the broker return? Specifically say whether an outlink \
+                 to Projects/OpenClaw-Stack/Architecture-Reset-v2-Hermes-Centered-Assistant-App.md appears.",
+            ),
+            8,
+        )
+        .expect("collect vault context items");
+
+        assert!(
+            items.iter().any(|item| {
+                item.kind == "vault_relationship"
+                    && item.metadata["relationship"] == "outlink"
+                    && item.metadata["source_path"] == "Projects/OpenClaw-Stack/CURRENT.md"
+                    && item.metadata["target_path"]
+                        == "Projects/OpenClaw-Stack/Architecture-Reset-v2-Hermes-Centered-Assistant-App.md"
+            }),
+            "{items:?}"
+        );
+    }
+
+    #[cfg(feature = "duckdb-storage")]
+    #[test]
+    fn broker_context_relationship_query_handles_spaced_vault_paths() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let db_path = _env.path().join("broker.duckdb");
+        let _db_env = TestEnvVar::set("JCODE_BROKER_DUCKDB_PATH", db_path.as_os_str());
+        let service = DuckDbBrokerStoreService::start(&db_path).expect("start broker store");
+        service
+            .replace_vault_records(VaultRecordBatch {
+                files: vec![
+                    VaultFileRecord {
+                        id: "file_source".to_string(),
+                        path: "System/jcode-validation/Freshness Probe Source 2026-05-14.md"
+                            .to_string(),
+                        title: "Freshness Probe Source 2026-05-14".to_string(),
+                        checksum: "sha256:spaced-source".to_string(),
+                        size_bytes: 64,
+                        mtime_ns: 123,
+                        frontmatter_json: "{}".to_string(),
+                        deleted_at: None,
+                    },
+                    VaultFileRecord {
+                        id: "file_target".to_string(),
+                        path: "System/jcode-validation/Freshness Probe Target 2026-05-14.md"
+                            .to_string(),
+                        title: "Freshness Probe Target 2026-05-14".to_string(),
+                        checksum: "sha256:spaced-target".to_string(),
+                        size_bytes: 64,
+                        mtime_ns: 124,
+                        frontmatter_json: "{}".to_string(),
+                        deleted_at: None,
+                    },
+                ],
+                links: vec![VaultLinkRecord {
+                    id: "link_source_target".to_string(),
+                    source_file_id: "file_source".to_string(),
+                    source_path: "System/jcode-validation/Freshness Probe Source 2026-05-14.md"
+                        .to_string(),
+                    target: "System/jcode-validation/Freshness Probe Target 2026-05-14".to_string(),
+                    kind: "wikilink".to_string(),
+                    raw: "[[System/jcode-validation/Freshness Probe Target 2026-05-14]]"
+                        .to_string(),
+                    deleted_at: None,
+                }],
+                ..VaultRecordBatch::default()
+            })
+            .expect("seed broker store");
+        drop(service);
+
+        let items = collect_vault_context_items(
+            Some("/tmp/project"),
+            Some(
+                "For this Vault note:\n\nSystem/jcode-validation/Freshness Probe Source 2026-05-14.md\n\nWhat links, backlinks, or neighboring notes does the broker return?",
+            ),
+            8,
+        )
+        .expect("collect vault context items");
+
+        assert!(
+            items.iter().any(|item| {
+                item.kind == "vault_relationship"
+                    && item.metadata["relationship"] == "outlink"
+                    && item.metadata["source_path"]
+                        == "System/jcode-validation/Freshness Probe Source 2026-05-14.md"
+                    && item.metadata["target_path"]
+                        == "System/jcode-validation/Freshness Probe Target 2026-05-14.md"
+            }),
+            "{items:?}"
+        );
+    }
+
+    #[cfg(feature = "duckdb-storage")]
+    #[test]
     fn broker_context_prefers_semantic_vault_chunks_when_embeddings_are_available() {
         let _guard = crate::storage::lock_test_env();
         let _env = TestHome::new();
@@ -2947,6 +3829,109 @@ mod tests {
         assert_eq!(
             first.content.as_deref(),
             Some("Keep Rob's preference: do not disable visible reasoning by default.")
+        );
+    }
+
+    #[cfg(feature = "duckdb-storage")]
+    #[test]
+    fn broker_context_ignores_query_frame_stopwords_for_broad_vault_note_lookup() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let db_path = _env.path().join("broker.duckdb");
+        let service = DuckDbBrokerStoreService::start(&db_path).expect("start broker store");
+        service
+            .replace_vault_records(VaultRecordBatch {
+                files: vec![
+                    VaultFileRecord {
+                        id: "file_ghostty".to_string(),
+                        path: "TaskNotes/Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off.md".to_string(),
+                        title: "Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off".to_string(),
+                        checksum: "sha256:file-ghostty-broad".to_string(),
+                        size_bytes: 512,
+                        mtime_ns: 800,
+                        frontmatter_json: "{}".to_string(),
+                        deleted_at: None,
+                    },
+                    VaultFileRecord {
+                        id: "file_plan".to_string(),
+                        path: "Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md".to_string(),
+                        title: "jcode Nervous-System Broker Parity Plan".to_string(),
+                        checksum: "sha256:file-plan-broad".to_string(),
+                        size_bytes: 512,
+                        mtime_ns: 801,
+                        frontmatter_json: "{}".to_string(),
+                        deleted_at: None,
+                    },
+                ],
+                chunks: vec![
+                    VaultChunkRecord {
+                        id: "chunk_ghostty_advanced".to_string(),
+                        file_id: "file_ghostty".to_string(),
+                        path: "TaskNotes/Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off.md".to_string(),
+                        heading: "Advanced Tips: Make Ghostty Even Better".to_string(),
+                        content: "Install Starship as a cross-shell prompt, add fastfetch for system info, use btop for real-time monitoring, and tune the Ghostty terminal emulator for productive development.".to_string(),
+                        start_line: 199,
+                        end_line: 233,
+                        checksum: "sha256:chunk-ghostty-broad".to_string(),
+                        deleted_at: None,
+                    },
+                    VaultChunkRecord {
+                        id: "chunk_plan_setup".to_string(),
+                        file_id: "file_plan".to_string(),
+                        path: "Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md".to_string(),
+                        heading: "0.1 Plan and source-of-truth setup".to_string(),
+                        content: "This system setup section works with the plan and source of truth migration.".to_string(),
+                        start_line: 83,
+                        end_line: 100,
+                        checksum: "sha256:chunk-plan-broad".to_string(),
+                        deleted_at: None,
+                    },
+                ],
+                ..VaultRecordBatch::default()
+            })
+            .expect("seed broker store");
+        let client = service.client();
+        client
+            .upsert_vault_embeddings(vec![VaultEmbeddingRecord {
+                id: "embedding:test-model:chunk_ghostty_advanced".to_string(),
+                record_id: "chunk_ghostty_advanced".to_string(),
+                record_kind: "vault_chunk".to_string(),
+                embedding_model: "test-model".to_string(),
+                embedding: vec![0.0, 1.0, 0.0],
+                content_checksum: "sha256:chunk-ghostty-broad".to_string(),
+                source_checksum: "sha256:file-ghostty-broad".to_string(),
+                updated_at: "2026-05-14T12:20:00Z".to_string(),
+                deleted_at: None,
+            }])
+            .expect("upsert broad semantic embedding");
+        let _model_env = TestEnvVar::set("JCODE_BROKER_VAULT_EMBEDDING_MODEL", "test-model");
+
+        let items = collect_vault_context_items_with_client(
+            &client,
+            Some("/tmp/project"),
+            "improving a terminal emulator setup with shell prompt styling, system monitor integration, and productivity tweaks?",
+            Some(&[0.0, 1.0, 0.0]),
+            5,
+        )
+        .expect("collect broad vault-note context");
+
+        let first = items.first().expect("at least one vault item");
+        assert_eq!(
+            first.origin.path.as_deref(),
+            Some(
+                "TaskNotes/Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off.md"
+            ),
+            "generic query frame terms should not promote the jcode plan over the target note: {items:?}"
+        );
+        let matched_terms = &first.relevance.as_ref().expect("relevance").matched_terms;
+        assert!(!matched_terms.contains(&"with".to_string()));
+        assert!(!matched_terms.contains(&"and".to_string()));
+        assert_eq!(
+            first
+                .relevance
+                .as_ref()
+                .and_then(|relevance| relevance.retrieval_mode.as_deref()),
+            Some("duckdb_broker_store_semantic")
         );
     }
 

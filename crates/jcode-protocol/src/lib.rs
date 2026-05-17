@@ -85,6 +85,20 @@ pub enum BrokerMemoryExtractionStatus {
     FallbackNoEmbeddings,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BrokerVaultRefreshCounts {
+    #[serde(default)]
+    pub active_vault_file: i64,
+    #[serde(default)]
+    pub active_vault_chunk: i64,
+    #[serde(default)]
+    pub active_vault_embedding: i64,
+    #[serde(default)]
+    pub active_vault_task: i64,
+    #[serde(default)]
+    pub active_graph_edge: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BrokerContextItem {
     pub id: String,
@@ -325,6 +339,19 @@ pub enum Request {
         transcript: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
+    },
+
+    /// Refresh the configured DuckDB Vault index from a Vault path.
+    #[serde(rename = "broker_vault_refresh")]
+    BrokerVaultRefresh {
+        id: u64,
+        vault: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        embed_missing: bool,
+        #[serde(default = "default_broker_vault_embedding_model")]
+        embedding_model: String,
+        #[serde(default = "default_broker_vault_embedding_limit")]
+        embedding_limit: usize,
     },
 
     /// Get a bounded view of compacted historical messages for lazy transcript expansion.
@@ -1153,6 +1180,23 @@ pub enum ServerEvent {
         derived_memory_ids: Vec<String>,
         #[serde(default)]
         extraction_status: BrokerMemoryExtractionStatus,
+    },
+
+    /// Response after the broker refreshed its Vault-backed DuckDB index.
+    #[serde(rename = "broker_vault_refreshed")]
+    BrokerVaultRefreshed {
+        id: u64,
+        vault: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        db: Option<String>,
+        new_files: usize,
+        updated_files: usize,
+        unchanged_files: usize,
+        tombstoned_files: usize,
+        renamed_files: usize,
+        embedded_chunks: usize,
+        #[serde(default)]
+        counts: BrokerVaultRefreshCounts,
     },
 
     /// Expanded compacted-history window (response to GetCompactedHistory).
@@ -2083,6 +2127,7 @@ impl Request {
             Request::BrokerContext { id, .. } => *id,
             Request::BrokerTurnSync { id, .. } => *id,
             Request::BrokerTranscriptSync { id, .. } => *id,
+            Request::BrokerVaultRefresh { id, .. } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
             Request::Reload { id } => *id,
             Request::ResumeSession { id, .. } => *id,
@@ -2147,6 +2192,7 @@ impl Request {
                 | Request::BrokerContext { .. }
                 | Request::BrokerTurnSync { .. }
                 | Request::BrokerTranscriptSync { .. }
+                | Request::BrokerVaultRefresh { .. }
                 | Request::CommShare { .. }
                 | Request::CommRead { .. }
                 | Request::CommMessage { .. }
@@ -2181,6 +2227,14 @@ fn default_model_direction() -> i8 {
 
 fn default_broker_context_limit() -> usize {
     8
+}
+
+fn default_broker_vault_embedding_model() -> String {
+    "jcode-local-embedding".to_string()
+}
+
+fn default_broker_vault_embedding_limit() -> usize {
+    10_000
 }
 
 fn default_broker_context_content_format() -> String {

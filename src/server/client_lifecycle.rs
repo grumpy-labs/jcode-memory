@@ -1,5 +1,6 @@
 use super::broker_context::{
     handle_broker_context, handle_broker_transcript_sync, handle_broker_turn_sync,
+    handle_broker_vault_refresh,
 };
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
@@ -203,6 +204,23 @@ async fn handle_lightweight_control_request(
                 source,
                 None,
                 sessions,
+                &client_event_tx,
+            )
+            .await;
+        }
+        Request::BrokerVaultRefresh {
+            id,
+            vault,
+            embed_missing,
+            embedding_model,
+            embedding_limit,
+        } => {
+            handle_broker_vault_refresh(
+                id,
+                vault,
+                embed_missing,
+                embedding_model,
+                embedding_limit,
                 &client_event_tx,
             )
             .await;
@@ -1764,6 +1782,24 @@ pub(super) async fn handle_client(
                     source,
                     Some(&client_session_id),
                     &sessions,
+                    &client_event_tx,
+                )
+                .await;
+            }
+
+            Request::BrokerVaultRefresh {
+                id,
+                vault,
+                embed_missing,
+                embedding_model,
+                embedding_limit,
+            } => {
+                handle_broker_vault_refresh(
+                    id,
+                    vault,
+                    embed_missing,
+                    embedding_model,
+                    embedding_limit,
                     &client_event_tx,
                 )
                 .await;

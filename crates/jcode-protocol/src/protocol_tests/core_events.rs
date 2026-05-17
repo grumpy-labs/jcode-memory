@@ -194,6 +194,64 @@ fn test_broker_transcript_sync_roundtrip_has_extraction_status() -> Result<()> {
 }
 
 #[test]
+fn test_broker_vault_refresh_roundtrip_has_counts() -> Result<()> {
+    let decoded = parse_request_json(
+        r#"{"type":"broker_vault_refresh","id":16,"vault":"/srv/hermes-jcode/vault","embed_missing":true,"embedding_model":"jcode-local-embedding","embedding_limit":10000}"#,
+    )?;
+    assert_eq!(decoded.id(), 16);
+    let Request::BrokerVaultRefresh {
+        vault,
+        embed_missing,
+        embedding_model,
+        embedding_limit,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(vault, "/srv/hermes-jcode/vault");
+    assert!(embed_missing);
+    assert_eq!(embedding_model, "jcode-local-embedding");
+    assert_eq!(embedding_limit, 10000);
+
+    let event = ServerEvent::BrokerVaultRefreshed {
+        id: 16,
+        vault: "/srv/hermes-jcode/vault".to_string(),
+        db: Some("/srv/hermes-jcode/broker/hermes-vault.duckdb".to_string()),
+        new_files: 0,
+        updated_files: 1,
+        unchanged_files: 462,
+        tombstoned_files: 0,
+        renamed_files: 0,
+        embedded_chunks: 63,
+        counts: BrokerVaultRefreshCounts {
+            active_vault_file: 463,
+            active_vault_chunk: 5357,
+            active_vault_embedding: 5357,
+            active_vault_task: 2141,
+            active_graph_edge: 10476,
+        },
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"broker_vault_refreshed\""));
+    assert!(json.contains("\"embedded_chunks\":63"));
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::BrokerVaultRefreshed {
+        updated_files,
+        embedded_chunks,
+        counts,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(updated_files, 1);
+    assert_eq!(embedded_chunks, 63);
+    assert_eq!(counts.active_vault_embedding, 5357);
+    Ok(())
+}
+
+#[test]
 fn test_rewind_request_roundtrip() -> Result<()> {
     let req = Request::Rewind {
         id: 8,

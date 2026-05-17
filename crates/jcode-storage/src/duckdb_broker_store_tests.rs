@@ -145,6 +145,143 @@ fn duckdb_broker_store_replaces_vault_records_and_queries_context() {
 }
 
 #[test]
+fn duckdb_broker_store_queries_vault_relationship_neighborhood_by_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("broker.duckdb");
+    let service = DuckDbBrokerStoreService::start(&path).expect("start broker store");
+
+    let batch = VaultRecordBatch {
+        files: vec![
+            sample_file_with_title("file_target", "Plans/Target.md", "Target", "sha256:target"),
+            sample_file_with_title("file_out", "Plans/Outbound.md", "Outbound", "sha256:out"),
+            sample_file_with_title("file_back", "Plans/Backlink.md", "Backlink", "sha256:back"),
+            sample_file_with_title(
+                "file_neighbor",
+                "Plans/Neighbor.md",
+                "Neighbor",
+                "sha256:neighbor",
+            ),
+        ],
+        links: vec![
+            VaultLinkRecord {
+                id: "link_target_out".to_string(),
+                source_file_id: "file_target".to_string(),
+                source_path: "Plans/Target.md".to_string(),
+                target: "Plans/Outbound".to_string(),
+                kind: "wikilink".to_string(),
+                raw: "[[Plans/Outbound]]".to_string(),
+                deleted_at: None,
+            },
+            VaultLinkRecord {
+                id: "link_back_target".to_string(),
+                source_file_id: "file_back".to_string(),
+                source_path: "Plans/Backlink.md".to_string(),
+                target: "Plans/Target".to_string(),
+                kind: "wikilink".to_string(),
+                raw: "[[Plans/Target]]".to_string(),
+                deleted_at: None,
+            },
+        ],
+        ..VaultRecordBatch::default()
+    };
+
+    service
+        .replace_vault_records(batch)
+        .expect("replace vault records");
+
+    let rows = service
+        .query_vault_relationships_for_path("Projects/Vault/Plans/Target.md", 10)
+        .expect("query relationships");
+    let relations: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.relationship.as_str(),
+                row.source_path.as_str(),
+                row.target_path.as_deref(),
+            )
+        })
+        .collect();
+
+    assert!(relations.contains(&("outlink", "Plans/Target.md", Some("Plans/Outbound.md"))));
+    assert!(relations.contains(&("backlink", "Plans/Backlink.md", Some("Plans/Target.md"))));
+    assert!(relations.contains(&(
+        "folder_neighbor",
+        "Plans/Target.md",
+        Some("Plans/Neighbor.md")
+    )));
+    assert!(
+        rows.iter()
+            .all(|row| row.retrieval_mode == "duckdb_broker_store_relationship")
+    );
+}
+
+#[test]
+fn duckdb_broker_store_does_not_resolve_full_path_links_by_ambiguous_stem() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("broker.duckdb");
+    let service = DuckDbBrokerStoreService::start(&path).expect("start broker store");
+
+    let batch = VaultRecordBatch {
+        files: vec![
+            sample_file_with_title(
+                "file_hermes_current",
+                "Projects/Hermes/CURRENT.md",
+                "Hermes Current",
+                "sha256:hermes",
+            ),
+            sample_file_with_title(
+                "file_openclaw_current",
+                "Projects/OpenClaw-Stack/CURRENT.md",
+                "OpenClaw Current",
+                "sha256:openclaw",
+            ),
+            sample_file_with_title(
+                "file_source",
+                "Projects/Hermes/Source.md",
+                "Source",
+                "sha256:source",
+            ),
+        ],
+        links: vec![VaultLinkRecord {
+            id: "link_source_openclaw_current".to_string(),
+            source_file_id: "file_source".to_string(),
+            source_path: "Projects/Hermes/Source.md".to_string(),
+            target: "Projects/OpenClaw-Stack/CURRENT".to_string(),
+            kind: "wikilink".to_string(),
+            raw: "[[Projects/OpenClaw-Stack/CURRENT]]".to_string(),
+            deleted_at: None,
+        }],
+        ..VaultRecordBatch::default()
+    };
+
+    service
+        .replace_vault_records(batch)
+        .expect("replace vault records");
+
+    let hermes_rows = service
+        .query_vault_relationships_for_path("Projects/Hermes/CURRENT.md", 10)
+        .expect("query hermes relationships");
+    assert!(
+        !hermes_rows
+            .iter()
+            .any(|row| row.relationship == "backlink"
+                && row.source_path == "Projects/Hermes/Source.md"),
+        "full-path OpenClaw link must not become a backlink to Hermes CURRENT"
+    );
+
+    let openclaw_rows = service
+        .query_vault_relationships_for_path("Projects/OpenClaw-Stack/CURRENT.md", 10)
+        .expect("query openclaw relationships");
+    assert!(openclaw_rows.iter().any(|row| {
+        row.relationship == "backlink"
+            && row.source_path == "Projects/Hermes/Source.md"
+            && row.target_path.as_deref() == Some("Projects/OpenClaw-Stack/CURRENT.md")
+            && row.raw.as_deref() == Some("[[Projects/OpenClaw-Stack/CURRENT]]")
+    }));
+}
+
+#[test]
 fn duckdb_broker_store_ranks_heading_matches_over_body_mentions() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("broker.duckdb");

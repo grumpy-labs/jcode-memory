@@ -17,6 +17,7 @@ const EXCLUDED_DIRS: &[&str] = &[
     "__pycache__",
     "node_modules",
 ];
+const VAULT_INGESTION_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultRename {
@@ -78,9 +79,14 @@ impl DuckDbBrokerStoreClient {
                 Some(existing_file)
                     if existing_file.deleted_at.is_some()
                         || existing_file.checksum != file.checksum
-                        || existing_file.path != file.path =>
+                        || existing_file.path != file.path
+                        || existing_file.frontmatter_json != file.frontmatter_json =>
                 {
-                    if !renamed_ids.contains(&file.id) && existing_file.checksum != file.checksum {
+                    if !renamed_ids.contains(&file.id)
+                        && (existing_file.checksum != file.checksum
+                            || existing_file.path != file.path
+                            || existing_file.frontmatter_json != file.frontmatter_json)
+                    {
                         updated_files += 1;
                     }
                     self.replace_file_records(&file.id, batch)?;
@@ -169,7 +175,7 @@ fn append_markdown_file_records(
         checksum,
         size_bytes: metadata.len() as i64,
         mtime_ns: modified_time_ns(&metadata),
-        frontmatter_json: "{}".to_string(),
+        frontmatter_json: vault_ingestion_metadata_json(),
         deleted_at: None,
     };
     let chunks = chunk_body(&file_id, &rel_path, body, line_offset);
@@ -210,6 +216,10 @@ fn append_markdown_file_records(
     batch.summaries.extend(summaries);
     batch.entities.extend(entities);
     Ok(())
+}
+
+fn vault_ingestion_metadata_json() -> String {
+    format!(r#"{{"ingestion_version":{VAULT_INGESTION_VERSION}}}"#)
 }
 
 fn records_for_file(batch: &VaultRecordBatch, file_id: &str) -> VaultRecordBatch {

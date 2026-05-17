@@ -5,9 +5,10 @@
 //! builds. This module keeps jcode's process-wide cache, stats, and local path /
 //! logging integration stable.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use jcode_embedding as backend;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -16,6 +17,12 @@ use crate::storage::jcode_dir;
 
 /// LRU cache capacity for recent embeddings
 const EMBEDDING_CACHE_CAPACITY: usize = 128;
+const LOCAL_EMBEDDING_MODEL_LABEL: &str = "jcode-local-embedding";
+const OLLAMA_PROVIDER: &str = "ollama";
+const DEFAULT_OLLAMA_BASE_URL: &str = "http://127.0.0.1:11434";
+const DEFAULT_OLLAMA_EMBEDDING_MODEL: &str = "mxbai-embed-large:latest";
+const DEFAULT_OLLAMA_MAX_INPUT_CHARS: usize = 4_000;
+const DEFAULT_OLLAMA_NUM_CTX: usize = 8_192;
 
 /// Global embedder cache and runtime stats.
 ///
@@ -45,6 +52,7 @@ struct EmbedderCache {
     embedding_lru: std::collections::HashMap<u64, (EmbeddingVec, u64)>,
     lru_counter: u64,
     cache_hits: u64,
+    last_embedding_dim: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +84,74 @@ fn saturating_u64_from_u128(value: u128) -> u64 {
         u64::MAX
     } else {
         value as u64
+    }
+}
+
+fn embedding_provider() -> String {
+    std::env::var("JCODE_EMBEDDING_PROVIDER")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "local".to_string())
+}
+
+fn use_ollama_embeddings() -> bool {
+    embedding_provider() == OLLAMA_PROVIDER
+}
+
+fn ollama_base_url() -> String {
+    std::env::var("JCODE_EMBEDDING_OLLAMA_URL")
+        .or_else(|_| std::env::var("OLLAMA_BASE_URL"))
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_OLLAMA_BASE_URL.to_string())
+}
+
+fn ollama_embedding_model() -> String {
+    std::env::var("JCODE_EMBEDDING_OLLAMA_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_OLLAMA_EMBEDDING_MODEL.to_string())
+}
+
+fn ollama_max_input_chars() -> usize {
+    std::env::var("JCODE_EMBEDDING_OLLAMA_MAX_CHARS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_OLLAMA_MAX_INPUT_CHARS)
+}
+
+fn ollama_num_ctx() -> usize {
+    std::env::var("JCODE_EMBEDDING_OLLAMA_NUM_CTX")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_OLLAMA_NUM_CTX)
+}
+
+fn truncate_for_ollama(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
+pub fn configured_model_label() -> String {
+    if let Ok(label) = std::env::var("JCODE_EMBEDDING_MODEL_LABEL") {
+        let label = label.trim();
+        if !label.is_empty() {
+            return label.to_string();
+        }
+    }
+    if use_ollama_embeddings() {
+        format!(
+            "ollama:{}:ctx{}:chars{}:v1",
+            ollama_embedding_model(),
+            ollama_num_ctx(),
+            ollama_max_input_chars()
+        )
+    } else {
+        LOCAL_EMBEDDING_MODEL_LABEL.to_string()
     }
 }
 
@@ -151,6 +227,7 @@ pub fn get_embedder() -> Result<Arc<Embedder>> {
 fn hash_text(text: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    configured_model_label().hash(&mut hasher);
     text.hash(&mut hasher);
     hasher.finish()
 }
@@ -177,9 +254,13 @@ pub fn embed(text: &str) -> Result<EmbeddingVec> {
         return Ok(result);
     }
 
-    let embedder = get_embedder()?;
     let started = Instant::now();
-    let result = embedder.embed(text);
+    let result = if use_ollama_embeddings() {
+        embed_with_ollama(text)
+    } else {
+        let embedder = get_embedder()?;
+        embedder.embed(text)
+    };
     let elapsed_ms = saturating_u64_from_u128(started.elapsed().as_millis());
 
     if let Ok(mut cache) = embedder_cache().lock() {
@@ -187,6 +268,7 @@ pub fn embed(text: &str) -> Result<EmbeddingVec> {
         cache.total_embed_ms = cache.total_embed_ms.saturating_add(elapsed_ms);
         cache.last_used_at = Some(Instant::now());
         if let Ok(ref emb) = result {
+            cache.last_embedding_dim = Some(emb.len());
             if cache.embedding_lru.len() >= EMBEDDING_CACHE_CAPACITY {
                 let oldest_key = cache
                     .embedding_lru
@@ -208,6 +290,92 @@ pub fn embed(text: &str) -> Result<EmbeddingVec> {
     }
 
     result
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaEmbedRequest<'a> {
+    model: &'a str,
+    input: &'a str,
+    truncate: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaEmbedResponse {
+    #[serde(default)]
+    embeddings: Vec<Vec<f32>>,
+    #[serde(default)]
+    embedding: Vec<f32>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+fn embed_with_ollama(text: &str) -> Result<EmbeddingVec> {
+    let model = ollama_embedding_model();
+    let url = format!("{}/api/embed", ollama_base_url());
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?;
+    let mut limits = vec![ollama_max_input_chars(), 1_000, 512, 256];
+    limits.sort_unstable_by(|left, right| right.cmp(left));
+    limits.dedup();
+    let mut last_context_error: Option<String> = None;
+    for max_chars in limits {
+        let input = truncate_for_ollama(text, max_chars);
+        match embed_with_ollama_input(&client, &url, &model, &input) {
+            Ok(embedding) => return Ok(embedding),
+            Err(error) if error.to_string().contains("context length") => {
+                last_context_error = Some(error.to_string());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    anyhow::bail!(
+        "Ollama embedding input exceeded context length even after truncation: {}",
+        last_context_error.unwrap_or_else(|| "unknown context-length error".to_string())
+    )
+}
+
+fn embed_with_ollama_input(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    model: &str,
+    input: &str,
+) -> Result<EmbeddingVec> {
+    let response = client
+        .post(url)
+        .json(&OllamaEmbedRequest {
+            model,
+            input,
+            truncate: true,
+            options: Some(json!({ "num_ctx": ollama_num_ctx() })),
+        })
+        .send()
+        .with_context(|| format!("failed to call Ollama embedding endpoint {url}"))?;
+    let status = response.status();
+    let body = response.text()?;
+    if !status.is_success() {
+        anyhow::bail!("Ollama embedding endpoint {url} returned {status}: {body}");
+    }
+    parse_ollama_embedding_response(&body)
+}
+
+fn parse_ollama_embedding_response(response: &str) -> Result<EmbeddingVec> {
+    let response: OllamaEmbedResponse =
+        serde_json::from_str(response).context("failed to decode Ollama embedding response")?;
+    if let Some(error) = response.error {
+        anyhow::bail!("Ollama embedding response error: {error}");
+    }
+    if let Some(embedding) = response.embeddings.into_iter().next()
+        && !embedding.is_empty()
+    {
+        return Ok(embedding);
+    }
+    if !response.embedding.is_empty() {
+        return Ok(response.embedding);
+    }
+    anyhow::bail!("Ollama embedding response did not include an embedding")
 }
 
 /// Unload the embedding model if it has been idle for at least `idle_for`.
@@ -347,6 +515,14 @@ pub fn stats() -> EmbedderStats {
                 .map(|(embedding, _)| embedding.len().saturating_mul(std::mem::size_of::<f32>()))
                 .sum::<usize>() as u64;
 
+            let embedding_dim = cache.last_embedding_dim.unwrap_or_else(|| {
+                if use_ollama_embeddings() {
+                    0
+                } else {
+                    embedding_dim()
+                }
+            });
+
             EmbedderStats {
                 loaded: cache.embedder.is_some(),
                 model_artifact_bytes,
@@ -363,7 +539,7 @@ pub fn stats() -> EmbedderStats {
                 cache_hits: cache.cache_hits,
                 cache_size: cache.embedding_lru.len(),
                 cache_bytes_estimate,
-                embedding_dim: embedding_dim(),
+                embedding_dim,
             }
         }
         Err(_) => EmbedderStats {
@@ -489,5 +665,38 @@ mod tests {
             *cache = EmbedderCache::default();
         }
         assert!(!maybe_unload_if_idle(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn test_parse_ollama_api_embed_response() {
+        let embedding = parse_ollama_embedding_response(
+            r#"{"model":"mxbai-embed-large:latest","embeddings":[[0.25,-0.5,0.75]]}"#,
+        )
+        .expect("parse /api/embed response");
+        assert_eq!(embedding, vec![0.25, -0.5, 0.75]);
+    }
+
+    #[test]
+    fn test_parse_legacy_ollama_api_embeddings_response() {
+        let embedding = parse_ollama_embedding_response(r#"{"embedding":[1.0,0.0,-1.0]}"#)
+            .expect("parse /api/embeddings-shaped response");
+        assert_eq!(embedding, vec![1.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn test_truncate_for_ollama_respects_char_boundaries() {
+        let input = "é".repeat(DEFAULT_OLLAMA_MAX_INPUT_CHARS + 10);
+        let truncated = truncate_for_ollama(&input, DEFAULT_OLLAMA_MAX_INPUT_CHARS);
+        assert_eq!(truncated.chars().count(), DEFAULT_OLLAMA_MAX_INPUT_CHARS);
+        assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    #[test]
+    fn test_parse_ollama_error_response() {
+        let error = parse_ollama_embedding_response(
+            r#"{"error":"the input length exceeds the context length"}"#,
+        )
+        .expect_err("error response should fail");
+        assert!(error.to_string().contains("context length"));
     }
 }

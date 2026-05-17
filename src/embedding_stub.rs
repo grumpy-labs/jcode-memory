@@ -118,6 +118,10 @@ pub fn embed(_text: &str) -> Result<EmbeddingVec> {
     anyhow::bail!("Embeddings feature not compiled in this build")
 }
 
+pub fn configured_model_label() -> String {
+    "jcode-local-embedding".to_string()
+}
+
 pub fn maybe_unload_if_idle(_idle_for: Duration) -> bool {
     false
 }
