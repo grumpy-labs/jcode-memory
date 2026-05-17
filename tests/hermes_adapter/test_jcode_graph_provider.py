@@ -6,6 +6,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -42,10 +43,25 @@ def _add_default_hermes_repo_to_path() -> bool:
 
 
 class FakeBrokerServer:
-    def __init__(self, *, context_items: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        context_items: list[dict] | None = None,
+        context_delay_seconds: float = 0.0,
+        hang_context_once: bool = False,
+        hang_turn_sync: bool = False,
+        turn_sync_error: str | None = None,
+        hang_transcript_sync: bool = False,
+    ) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.socket_path = str(Path(self._tmp.name) / "broker.sock")
         self.context_items = context_items
+        self.context_delay_seconds = context_delay_seconds
+        self.hang_context_once = hang_context_once
+        self._hung_context_requests = 0
+        self.hang_turn_sync = hang_turn_sync
+        self.turn_sync_error = turn_sync_error
+        self.hang_transcript_sync = hang_transcript_sync
         self.requests: list[dict] = []
         self._ready = threading.Event()
         self._stop = threading.Event()
@@ -91,6 +107,13 @@ class FakeBrokerServer:
                 if request["type"] == "subscribe":
                     self._write(handle, {"type": "done", "id": request_id})
                 elif request["type"] == "broker_context":
+                    if self.hang_context_once and self._hung_context_requests == 0:
+                        self._hung_context_requests += 1
+                        while not self._stop.wait(0.05):
+                            pass
+                        return
+                    if self.context_delay_seconds:
+                        time.sleep(self.context_delay_seconds)
                     self._write(
                         handle,
                         {
@@ -122,6 +145,20 @@ class FakeBrokerServer:
                         },
                     )
                 elif request["type"] == "broker_turn_sync":
+                    if self.hang_turn_sync:
+                        while not self._stop.wait(0.05):
+                            pass
+                        return
+                    if self.turn_sync_error:
+                        self._write(
+                            handle,
+                            {
+                                "type": "error",
+                                "id": request_id,
+                                "message": self.turn_sync_error,
+                            },
+                        )
+                        continue
                     self._write(
                         handle,
                         {
@@ -132,6 +169,10 @@ class FakeBrokerServer:
                         },
                     )
                 elif request["type"] == "broker_transcript_sync":
+                    if self.hang_transcript_sync:
+                        while not self._stop.wait(0.05):
+                            pass
+                        return
                     self._write(
                         handle,
                         {
@@ -148,6 +189,23 @@ class FakeBrokerServer:
     @staticmethod
     def _write(handle, event: dict) -> None:
         handle.write(json.dumps(event).encode("utf-8") + b"\n")
+
+
+def _wait_for_requests(
+    server: FakeBrokerServer,
+    request_type: str,
+    *,
+    count: int = 1,
+    timeout: float = 1.0,
+) -> list[dict]:
+    deadline = time.monotonic() + timeout
+    matches: list[dict] = []
+    while time.monotonic() < deadline:
+        matches = [request for request in server.requests if request["type"] == request_type]
+        if len(matches) >= count:
+            return matches
+        time.sleep(0.01)
+    return [request for request in server.requests if request["type"] == request_type]
 
 
 class BrokerSocketClientTests(unittest.TestCase):
@@ -250,7 +308,50 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
 
         self.assertEqual(
             _prefetch_focus_query(prompt),
-            "What Vault note contains this heading?\n\nAdvanced Tips: Make Ghostty Even Better",
+            "Advanced Tips: Make Ghostty Even Better",
+        )
+
+    def test_prefetch_focus_query_strips_real_vault_tool_frame_for_exact_sentence(self) -> None:
+        prompt = (
+            "Use jcode_broker_context first, before any file search or other tools, "
+            "to answer this from my real Vault:\n\n"
+            "What Vault note contains this exact sentence?\n\n"
+            "Keep Rob's preference: do not disable visible reasoning by default.\n\n"
+            "Please report:\n"
+            "1. The exact note path returned by jcode broker context.\n"
+            "2. The nearby heading or surrounding context."
+        )
+
+        self.assertEqual(
+            _prefetch_focus_query(prompt),
+            "Keep Rob's preference: do not disable visible reasoning by default.",
+        )
+
+    def test_prefetch_focus_query_strips_bare_report_tail_for_exact_sentence(self) -> None:
+        prompt = (
+            "Use jcode_broker_context first, before any file search, to answer this:\n\n"
+            "What Vault note contains this exact sentence?\n\n"
+            "freshness-lumen-cypress-20260514-1924 proves newly-created Vault note "
+            "ingestion through the jcode broker.\n\n"
+            "Report the exact path, broker kind, source span, retrieval mode, and exact_match."
+        )
+
+        self.assertEqual(
+            _prefetch_focus_query(prompt),
+            "freshness-lumen-cypress-20260514-1924 proves newly-created Vault note "
+            "ingestion through the jcode broker.",
+        )
+
+    def test_prefetch_focus_query_strips_generic_vault_note_question_frame(self) -> None:
+        prompt = (
+            "Which Vault note talks about improving a terminal emulator setup with "
+            "shell prompt styling, system monitor integration, and productivity tweaks?"
+        )
+
+        self.assertEqual(
+            _prefetch_focus_query(prompt),
+            "improving a terminal emulator setup with shell prompt styling, system monitor "
+            "integration, and productivity tweaks?",
         )
 
     def test_prefetch_intent_gate_skips_general_knowledge_prompt(self) -> None:
@@ -345,6 +446,77 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         self.assertIn("## jcode Broker Context", text)
         self.assertIn("[memory/project/memory] Project Memory", text)
         self.assertIn("[todo/session/todo] Wire Hermes adapter", text)
+
+    def test_provider_context_timeout_discards_client_and_reconnects_next_prefetch(self) -> None:
+        with FakeBrokerServer(hang_context_once=True) as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "timeout_seconds": 0.05,
+                }
+            )
+            provider.initialize("hermes_session")
+            first = provider.prefetch("project memory", session_id="hermes_session")
+            second = provider.prefetch("project memory", session_id="hermes_session")
+            provider.shutdown()
+
+        context_requests = [
+            request for request in server.requests if request["type"] == "broker_context"
+        ]
+        subscribe_requests = [
+            request for request in server.requests if request["type"] == "subscribe"
+        ]
+        self.assertEqual(first, "")
+        self.assertIn("## jcode Broker Context", second)
+        self.assertIn("Project Memory", second)
+        self.assertEqual(len(context_requests), 2)
+        self.assertGreaterEqual(len(subscribe_requests), 2)
+
+    def test_provider_context_timeout_log_includes_reconnect_diagnostics(self) -> None:
+        with FakeBrokerServer(hang_context_once=True) as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "timeout_seconds": 0.05,
+                }
+            )
+            provider.initialize("hermes_session")
+
+            with self.assertLogs(jcode_graph.__name__, level="DEBUG") as logs:
+                provider.prefetch("project memory", session_id="hermes_session")
+            provider.shutdown()
+
+        output = "\n".join(logs.output)
+        self.assertIn("op=broker_context", output)
+        self.assertIn("timeout_seconds=0.05", output)
+        self.assertIn(f"socket_path={server.socket_path}", output)
+        self.assertIn("working_dir=/tmp/project", output)
+        self.assertIn("resetting_client=true", output)
+
+    def test_provider_context_retrieval_can_use_longer_budget_than_sync_writes(self) -> None:
+        with FakeBrokerServer(context_delay_seconds=0.12) as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "timeout_seconds": 0.5,
+                    "turn_sync_timeout_seconds": 0.05,
+                    "transcript_sync_timeout_seconds": 0.05,
+                }
+            )
+            provider.initialize("hermes_session")
+
+            started = time.monotonic()
+            text = provider.prefetch("project memory", session_id="hermes_session")
+            elapsed = time.monotonic() - started
+            provider.shutdown()
+
+        self.assertGreaterEqual(elapsed, 0.1)
+        self.assertLess(elapsed, 0.5)
+        self.assertIn("## jcode Broker Context", text)
+        self.assertIn("Project Memory", text)
 
     def test_hermes_memory_manager_prefetch_injects_current_turn_context_without_tool_call(self) -> None:
         if not _add_default_hermes_repo_to_path():
@@ -513,6 +685,13 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         schemas = provider.get_tool_schemas()
         self.assertEqual(schemas[0]["name"], "jcode_broker_context")
 
+    def test_provider_exposes_turn_sync_timeout_config_schema(self) -> None:
+        provider = JcodeGraphMemoryProvider({"socket_path": os.devnull})
+        keys = {item["key"] for item in provider.get_config_schema()}
+        self.assertIn("timeout_seconds", keys)
+        self.assertIn("turn_sync_timeout_seconds", keys)
+        self.assertIn("transcript_sync_timeout_seconds", keys)
+
     def test_provider_availability_uses_configured_jcode_binary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fake_binary = Path(tmp) / "jcode"
@@ -541,13 +720,11 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
                 "Acknowledged and synced.",
                 session_id="hermes_session",
             )
+            sync_requests = _wait_for_requests(server, "broker_turn_sync")
             provider.shutdown()
 
-        sync_requests = [
-            request for request in server.requests if request["type"] == "broker_turn_sync"
-        ]
         self.assertEqual(len(sync_requests), 1)
-        self.assertIsNone(sync_requests[0]["session_id"])
+        self.assertEqual(sync_requests[0]["session_id"], "hermes_session")
         self.assertEqual(
             sync_requests[0]["user_content"],
             "Remember that Hermes can write through the broker.",
@@ -570,16 +747,17 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
             provider.initialize("hermes_session_a")
             provider.sync_turn("user a", "assistant a", session_id="hermes_session_a")
             provider.sync_turn("user b", "assistant b", session_id="hermes_session_b")
+            sync_requests = _wait_for_requests(server, "broker_turn_sync", count=2)
             provider.shutdown()
 
         subscribe_requests = [
             request for request in server.requests if request["type"] == "subscribe"
         ]
-        self.assertEqual(len(subscribe_requests), 2)
-        sync_requests = [
-            request for request in server.requests if request["type"] == "broker_turn_sync"
-        ]
-        self.assertEqual([request["user_content"] for request in sync_requests], ["user a", "user b"])
+        self.assertGreaterEqual(len(subscribe_requests), 2)
+        self.assertCountEqual(
+            [request["user_content"] for request in sync_requests],
+            ["user a", "user b"],
+        )
 
     def test_provider_pre_compress_syncs_transcript(self) -> None:
         with FakeBrokerServer() as server:
@@ -645,6 +823,7 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
                     "turn_buffer_limit": 2,
                     "turn_buffer_max_chars": 24,
                     "transcript_max_chars": 120,
+                    "sync_turns": False,
                 }
             )
             provider.initialize("hermes_session")
@@ -666,6 +845,84 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         self.assertLessEqual(len(transcript), 120)
         self.assertEqual(diagnostics["transcript_sync_count"], 1)
         self.assertLessEqual(diagnostics["last_transcript_chars"], 120)
+
+    def test_provider_transcript_timeout_uses_short_budget_without_poisoning_retrieval(self) -> None:
+        with FakeBrokerServer(hang_transcript_sync=True) as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "timeout_seconds": 1.0,
+                    "transcript_sync_timeout_seconds": 0.05,
+                }
+            )
+            provider.initialize("hermes_session")
+
+            started = time.monotonic()
+            result = provider.on_pre_compress(
+                [
+                    {"role": "user", "content": "Remember transcript timeout isolation."},
+                    {"role": "assistant", "content": "Transcript sync may hang."},
+                ]
+            )
+            elapsed = time.monotonic() - started
+            text = provider.prefetch("project memory", session_id="hermes_session")
+            provider.shutdown()
+
+        transcript_requests = [
+            request for request in server.requests if request["type"] == "broker_transcript_sync"
+        ]
+        context_requests = [
+            request for request in server.requests if request["type"] == "broker_context"
+        ]
+        self.assertEqual(result, "")
+        self.assertLess(elapsed, 0.3)
+        self.assertEqual(len(transcript_requests), 1)
+        self.assertEqual(len(context_requests), 1)
+        self.assertIn("## jcode Broker Context", text)
+        self.assertIn("Project Memory", text)
+
+    def test_provider_sync_turn_returns_immediately_when_broker_sync_hangs(self) -> None:
+        with FakeBrokerServer(hang_turn_sync=True) as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "timeout_seconds": 5,
+                    "turn_sync_timeout_seconds": 0.1,
+                }
+            )
+            provider.initialize("hermes_session")
+
+            started = time.monotonic()
+            provider.sync_turn("user", "assistant", session_id="hermes_session")
+            elapsed = time.monotonic() - started
+            sync_requests = _wait_for_requests(server, "broker_turn_sync")
+            provider.shutdown()
+
+        self.assertLess(elapsed, 0.25)
+        self.assertEqual(len(sync_requests), 1)
+        self.assertEqual(sync_requests[0]["session_id"], "hermes_session")
+
+    def test_provider_sync_turn_session_not_found_is_nonfatal(self) -> None:
+        with FakeBrokerServer(turn_sync_error="session not found: hermes_session") as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "turn_sync_timeout_seconds": 0.05,
+                }
+            )
+            provider.initialize("hermes_session")
+
+            provider.sync_turn("user", "assistant", session_id="hermes_session")
+            sync_requests = _wait_for_requests(server, "broker_turn_sync")
+            text = provider.prefetch("project memory", session_id="hermes_session")
+            provider.shutdown()
+
+        self.assertEqual(len(sync_requests), 1)
+        self.assertIn("## jcode Broker Context", text)
+        self.assertIn("Project Memory", text)
 
     def test_provider_context_tool_can_request_provenance_explicitly(self) -> None:
         with FakeBrokerServer() as server:
@@ -707,6 +964,37 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
             request for request in server.requests if request["type"] == "broker_context"
         ]
         self.assertEqual(context_requests[-1]["query"], "lazy context")
+
+    def test_provider_context_tool_sends_focused_query_to_broker(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                }
+            )
+            payload = provider.handle_tool_call(
+                "jcode_broker_context",
+                {
+                    "query": (
+                        "Which Vault note talks about improving a terminal emulator setup "
+                        "with shell prompt styling, system monitor integration, and "
+                        "productivity tweaks?"
+                    ),
+                    "limit": 4,
+                },
+            )
+            provider.shutdown()
+
+        self.assertEqual(json.loads(payload)["type"], "broker_context")
+        context_requests = [
+            request for request in server.requests if request["type"] == "broker_context"
+        ]
+        self.assertEqual(
+            context_requests[-1]["query"],
+            "improving a terminal emulator setup with shell prompt styling, system monitor "
+            "integration, and productivity tweaks?",
+        )
 
     def test_provider_can_disable_transcript_sync(self) -> None:
         with FakeBrokerServer() as server:

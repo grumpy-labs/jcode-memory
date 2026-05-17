@@ -37,6 +37,8 @@ DEFAULT_TURN_BUFFER_LIMIT = 12
 DEFAULT_TURN_BUFFER_MAX_CHARS = 2000
 DEFAULT_TOOL_INVENTORY_LIMIT = 8
 DEFAULT_STARTUP_TIMEOUT_SECONDS = 5.0
+DEFAULT_TURN_SYNC_TIMEOUT_SECONDS = 2.0
+DEFAULT_TRANSCRIPT_SYNC_TIMEOUT_SECONDS = 5.0
 
 _OBSIDIAN_OPENED_NOTE_RE = re.compile(
     r"<obsidian_opened_note>[\s\S]*?</obsidian_opened_note>", re.IGNORECASE
@@ -46,10 +48,17 @@ _RECALLED_CONTEXT_PREFIX_RE = re.compile(
     r"answer\s+only\s+from\s+recalled\s+context\s+already\s+provided\s+to\s+you\s*:\s*"
 )
 _ANSWER_THIS_PREFIX_RE = re.compile(
-    r"(?is)\buse\s+jcode_broker_context\b[\s\S]{0,240}?\banswer\s+this\s*:\s*"
+    r"(?is)\buse\s+jcode_broker_context\b[\s\S]{0,240}?"
+    r"\banswer\s+this(?:\s+from\s+(?:my\s+|the\s+)?(?:real\s+)?vault)?\s*:\s*"
+)
+_VAULT_NOTE_QUERY_PREFIX_RE = re.compile(
+    r"(?is)^\s*(?:what|which)\s+"
+    r"(?:(?:vault\s+)?note|file|note\s+in\s+(?:my\s+)?vault)\s+"
+    r"(?:contains|has|mentions|talks\s+about|discusses|covers|describes)\s+"
+    r"(?:this\s+)?(?:exact\s+)?(?:heading|sentence|phrase|text|topic)?\s*[:?]?\s*"
 )
 _TRAILING_REPORT_RE = re.compile(
-    r"(?is)(?:\n\s*)?(?:please\s+(?:report|answer)\b|include\s+the\s+note\s+path\b|"
+    r"(?is)(?:\n\s*)?(?:(?:please\s+)?(?:report|answer)\b|include\s+the\s+note\s+path\b|"
     r"if\s+the\s+recalled\s+context\s+does\s+not\s+contain\s+it\b|"
     r"then\s+verify\s+with\b)[\s\S]*$"
 )
@@ -193,6 +202,10 @@ class BrokerSocketClient:
         self._next_id = 1
         self._lock = threading.Lock()
         self._broker_session_id: Optional[str] = None
+
+    @property
+    def broker_session_id(self) -> Optional[str]:
+        return self._broker_session_id
 
     def connect(self) -> None:
         if self._sock is not None:
@@ -375,6 +388,14 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         self._startup_timeout = _config_float(
             self._config, "startup_timeout_seconds", DEFAULT_STARTUP_TIMEOUT_SECONDS
         )
+        self._turn_sync_timeout = _config_float(
+            self._config, "turn_sync_timeout_seconds", DEFAULT_TURN_SYNC_TIMEOUT_SECONDS
+        )
+        self._transcript_sync_timeout = _config_float(
+            self._config,
+            "transcript_sync_timeout_seconds",
+            DEFAULT_TRANSCRIPT_SYNC_TIMEOUT_SECONDS,
+        )
         self._broker_process: Optional[subprocess.Popen[Any]] = None
         self._recent_turns: Deque[Dict[str, str]] = deque(maxlen=max(0, self._turn_buffer_limit))
         self._diagnostics: Dict[str, Any] = {
@@ -452,17 +473,38 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             return None
         if self._client is None:
             return None
-        try:
-            event = self._client.broker_turn_sync(
-                session_id="",
-                user_content=user_content,
-                assistant_content=assistant_content,
-                source=str(self._config.get("source") or "hermes"),
-            )
-            self._diagnostics["turn_sync_count"] += 1
-            self._diagnostics["last_extraction_status"] = event.get("extraction_status")
-        except Exception as exc:
-            logger.debug("jcode broker_turn_sync failed: %s", exc)
+        broker_session_id = self._client.broker_session_id
+        sync_session_id = broker_session_id or session_id or self._session_id
+        user_snapshot = str(user_content or "")
+        assistant_snapshot = str(assistant_content or "")
+        source = str(self._config.get("source") or "hermes")
+
+        def _sync_worker() -> None:
+            client: Optional[BrokerSocketClient] = None
+            try:
+                client = self._new_client(timeout=self._turn_sync_timeout)
+                client.connect()
+                if broker_session_id:
+                    client._broker_session_id = broker_session_id
+                event = client.broker_turn_sync(
+                    session_id=sync_session_id,
+                    user_content=user_snapshot,
+                    assistant_content=assistant_snapshot,
+                    source=source,
+                )
+                self._diagnostics["turn_sync_count"] += 1
+                self._diagnostics["last_extraction_status"] = event.get("extraction_status")
+            except Exception as exc:
+                logger.debug("jcode broker_turn_sync failed: %s", exc)
+            finally:
+                if client is not None:
+                    client.close()
+
+        threading.Thread(
+            target=_sync_worker,
+            name="jcode-turn-sync",
+            daemon=True,
+        ).start()
         return None
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
@@ -479,8 +521,9 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         del kwargs
         if tool_name != "jcode_broker_context":
             return json.dumps({"error": f"unknown jcode_graph tool: {tool_name}"})
+        query = _prefetch_focus_query(str(args.get("query") or ""))
         event = self._fetch_context(
-            query=str(args.get("query") or ""),
+            query=query,
             limit=int(args.get("limit") or self._context_limit),
             include_provenance=_config_bool(args, "include_provenance", False),
         )
@@ -519,6 +562,23 @@ class JcodeGraphMemoryProvider(MemoryProvider):
                 "key": "socket_path",
                 "description": "Path to the jcode broker Unix socket",
                 "default": _default_socket_path(),
+            },
+            {
+                "key": "timeout_seconds",
+                "description": "Seconds to wait for broker socket responses, including cold DuckDB opens",
+                "default": "30.0",
+            },
+            {
+                "key": "turn_sync_timeout_seconds",
+                "description": "Short background timeout for hidden completed-turn sync writes",
+                "default": str(DEFAULT_TURN_SYNC_TIMEOUT_SECONDS),
+            },
+            {
+                "key": "transcript_sync_timeout_seconds",
+                "description": (
+                    "Short timeout for transcript sync writes so retrieval clients stay reusable"
+                ),
+                "default": str(DEFAULT_TRANSCRIPT_SYNC_TIMEOUT_SECONDS),
             },
             {
                 "key": "working_dir",
@@ -657,7 +717,18 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             self._diagnostics["last_prefetch_item_count"] = len(event.get("items") or [])
             return event
         except Exception as exc:
-            logger.debug("jcode broker_context failed: %s", exc)
+            logger.debug(
+                "jcode broker request failed op=broker_context timeout_seconds=%s "
+                "socket_path=%s working_dir=%s limit=%s query_chars=%s "
+                "include_provenance=%s resetting_client=true error=%s",
+                float(self._config.get("timeout_seconds", 2.0)),
+                self._socket_path,
+                self._working_dir,
+                limit,
+                len(query or ""),
+                include_provenance,
+                exc,
+            )
             if self._client is not None:
                 self._client.close()
                 self._client = None
@@ -672,9 +743,16 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         if not transcript:
             return None
         transcript = _truncate_text(transcript, self._transcript_max_chars)
+        broker_session_id = self._client.broker_session_id
+        sync_session_id = broker_session_id or self._session_id
+        client: Optional[BrokerSocketClient] = None
         try:
-            event = self._client.broker_transcript_sync(
-                session_id="",
+            client = self._new_client(timeout=self._transcript_sync_timeout)
+            client.connect()
+            if broker_session_id:
+                client._broker_session_id = broker_session_id
+            event = client.broker_transcript_sync(
+                session_id=sync_session_id,
                 transcript=transcript,
                 source=source,
             )
@@ -685,13 +763,16 @@ class JcodeGraphMemoryProvider(MemoryProvider):
                 self._recent_turns.clear()
         except Exception as exc:
             logger.debug("jcode broker_transcript_sync failed: %s", exc)
+        finally:
+            if client is not None:
+                client.close()
         return None
 
-    def _new_client(self) -> BrokerSocketClient:
+    def _new_client(self, *, timeout: Optional[float] = None) -> BrokerSocketClient:
         return BrokerSocketClient(
             self._socket_path,
             working_dir=str(self._working_dir) if self._working_dir else None,
-            timeout=float(self._config.get("timeout_seconds", 2.0)),
+            timeout=float(self._config.get("timeout_seconds", 2.0) if timeout is None else timeout),
         )
 
     def _ensure_session(self, session_id: str = "") -> None:
@@ -928,6 +1009,7 @@ def _prefetch_focus_query(query: str) -> str:
     text = _ANSWER_THIS_PREFIX_RE.sub("", text)
     text = _RECALLED_CONTEXT_PREFIX_RE.sub("", text)
     text = _TRAILING_REPORT_RE.sub("", text).strip()
+    text = _VAULT_NOTE_QUERY_PREFIX_RE.sub("", text).strip()
 
     negative = _NEGATIVE_INTENT_RE.search(text)
     if negative:
