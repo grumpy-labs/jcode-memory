@@ -714,7 +714,10 @@ class JcodeGraphMemoryProvider(MemoryProvider):
                 limit=limit,
                 include_provenance=include_provenance,
             )
-            self._diagnostics["last_prefetch_item_count"] = len(event.get("items") or [])
+            packet_count = _clio_packet_item_count(event.get("packet"))
+            self._diagnostics["last_prefetch_item_count"] = packet_count or len(
+                event.get("items") or []
+            )
             return event
         except Exception as exc:
             logger.debug(
@@ -893,6 +896,15 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             return False
 
     def _format_prefetch(self, event: Dict[str, Any], *, include_provenance: bool = False) -> str:
+        packet = event.get("packet")
+        if isinstance(packet, dict):
+            packet_text = self._format_clio_context_packet(
+                packet,
+                include_provenance=include_provenance,
+            )
+            if packet_text:
+                return packet_text
+
         raw_items = event.get("items") or []
         items = [
             item
@@ -950,6 +962,49 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             return text[: self._max_chars].rstrip() + "\n..."
         return text
 
+    def _format_clio_context_packet(
+        self,
+        packet: Dict[str, Any],
+        *,
+        include_provenance: bool = False,
+    ) -> str:
+        sections = [
+            ("Active Task", "active_task"),
+            ("Authority", "authority"),
+            ("Conflicts", "conflicts"),
+            ("Lineage", "lineage"),
+            ("Vault Evidence", "vault_evidence"),
+            ("Durable Memory", "durable_memory"),
+            ("Session Evidence", "session_evidence"),
+            ("Artifact Refs", "artifact_refs"),
+            ("Skill Hints", "skill_hints"),
+            ("Tool Hints", "tool_hints"),
+        ]
+        lines = ["## Clio Context Packet v1"]
+        rendered_count = 0
+
+        for title, key in sections:
+            raw_items = packet.get(key) or []
+            section_items = [
+                item
+                for item in raw_items
+                if isinstance(item, dict)
+                and (include_provenance or not _is_provenance_item(item))
+            ]
+            if not section_items:
+                continue
+            lines.append(f"### {title}")
+            for item in section_items:
+                lines.append(self._format_item_line(item))
+                rendered_count += 1
+
+        if rendered_count == 0:
+            return ""
+        text = "\n".join(lines)
+        if len(text) > self._max_chars:
+            return text[: self._max_chars].rstrip() + "\n..."
+        return text
+
     def _format_item_line(self, item: Dict[str, Any]) -> str:
         kind = item.get("kind") or "context"
         scope = item.get("scope") or "session"
@@ -965,11 +1020,23 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         metadata = item.get("metadata") or {}
         source = origin.get("tool") or item.get("source") or "broker"
         details: List[str] = []
+        if item.get("authority_class"):
+            details.append(f"authority={item['authority_class']}")
+        if item.get("workflow_status"):
+            details.append(f"status={item['workflow_status']}")
+        if item.get("slot"):
+            details.append(f"slot={item['slot']}")
         if origin.get("session_id"):
             details.append(f"session={origin['session_id']}")
         if origin.get("source") and origin.get("source") != source:
             details.append(f"source={origin['source']}")
-        item_source = item.get("source") or origin.get("uri") or origin.get("path")
+        item_source = (
+            item.get("source_uri")
+            or item.get("source")
+            or origin.get("uri")
+            or origin.get("path")
+            or item.get("source_path")
+        )
         if (
             item_source
             and item_source != source
@@ -980,6 +1047,10 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             )
         ):
             details.append(f"ref={item_source}")
+        if item.get("line_start") is not None and item.get("line_end") is not None:
+            details.append(f"lines={item['line_start']}-{item['line_end']}")
+        elif item.get("line_start") is not None:
+            details.append(f"line={item['line_start']}")
         if isinstance(metadata, dict):
             if metadata.get("line") is not None:
                 details.append(f"line={metadata['line']}")
@@ -991,6 +1062,8 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             details.append(f"rank={relevance['rank']}")
         if relevance.get("retrieval_mode"):
             details.append(f"mode={relevance['retrieval_mode']}")
+        if item.get("why_included"):
+            details.append(f"why={item['why_included']}")
         suffix = f" ({'; '.join(details)})" if details else ""
         line = f"- [{kind}/{scope}/{source}] {title}{suffix}"
         content = _truncate_text(str(content or "").strip(), self._item_max_chars)
@@ -1038,6 +1111,28 @@ def _prefetch_should_query_broker(query: str, focus_query: str) -> bool:
     if _SOURCE_LIKE_RE.search(combined):
         return True
     return False
+
+
+def _clio_packet_item_count(packet: Any) -> int:
+    if not isinstance(packet, dict):
+        return 0
+    total = 0
+    for key in (
+        "active_task",
+        "authority",
+        "lineage",
+        "vault_evidence",
+        "durable_memory",
+        "session_evidence",
+        "artifact_refs",
+        "conflicts",
+        "skill_hints",
+        "tool_hints",
+    ):
+        items = packet.get(key) or []
+        if isinstance(items, list):
+            total += sum(1 for item in items if isinstance(item, dict))
+    return total
 
 
 def _compact_query_text(text: str) -> str:

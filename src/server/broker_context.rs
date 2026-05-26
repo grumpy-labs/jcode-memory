@@ -6,7 +6,8 @@ use crate::memory_graph::EdgeKind;
 use crate::protocol::BrokerVaultRefreshCounts;
 use crate::protocol::{
     BrokerContextFragment, BrokerContextItem, BrokerContextOrigin, BrokerContextRelevance,
-    BrokerMemoryContextItem, BrokerMemoryExtractionStatus, ServerEvent,
+    BrokerMemoryContextItem, BrokerMemoryExtractionStatus, ClioContextPacketItem,
+    ClioContextPacketV1, ServerEvent,
 };
 use crate::todo::TodoItem;
 use anyhow::{Context, Result};
@@ -556,6 +557,12 @@ async fn broker_context_event(
     .await
     .context("broker Vault context task failed")??;
     let items = broker_context_items_with_vault_priority(context_items, vault_items);
+    let packet = clio_context_packet_from_items(&items);
+    let packet = if clio_context_packet_is_empty(&packet) {
+        None
+    } else {
+        Some(packet)
+    };
 
     Ok(ServerEvent::BrokerContext {
         id,
@@ -565,6 +572,7 @@ async fn broker_context_event(
         items,
         memories,
         side_panel,
+        packet,
     })
 }
 
@@ -1129,6 +1137,257 @@ fn broker_context_items_with_vault_priority(
 ) -> Vec<BrokerContextItem> {
     vault_items.extend(context_items);
     vault_items
+}
+
+fn clio_context_packet_from_items(items: &[BrokerContextItem]) -> ClioContextPacketV1 {
+    let mut packet = ClioContextPacketV1::default();
+
+    for item in items {
+        let packet_item = clio_context_packet_item(item);
+        match packet_item.slot.as_deref().unwrap_or("vault_evidence") {
+            "active_task" => packet.active_task.push(packet_item),
+            "authority" => packet.authority.push(packet_item),
+            "lineage" => packet.lineage.push(packet_item),
+            "durable_memory" => packet.durable_memory.push(packet_item),
+            "session_evidence" => packet.session_evidence.push(packet_item),
+            "artifact_refs" => packet.artifact_refs.push(packet_item),
+            "conflicts" => packet.conflicts.push(packet_item),
+            "skill_hints" => packet.skill_hints.push(packet_item),
+            "tool_hints" => packet.tool_hints.push(packet_item),
+            _ => packet.vault_evidence.push(packet_item),
+        }
+    }
+
+    packet
+}
+
+fn clio_context_packet_is_empty(packet: &ClioContextPacketV1) -> bool {
+    packet.active_task.is_empty()
+        && packet.authority.is_empty()
+        && packet.lineage.is_empty()
+        && packet.vault_evidence.is_empty()
+        && packet.durable_memory.is_empty()
+        && packet.session_evidence.is_empty()
+        && packet.artifact_refs.is_empty()
+        && packet.conflicts.is_empty()
+        && packet.skill_hints.is_empty()
+        && packet.tool_hints.is_empty()
+}
+
+fn clio_context_packet_item(item: &BrokerContextItem) -> ClioContextPacketItem {
+    let source_uri = clio_source_uri(item);
+    let source_path = clio_source_path(item, source_uri.as_deref());
+    let authority_class = clio_authority_class(item, source_path.as_deref());
+    let slot = clio_packet_slot(item, authority_class.as_str(), source_path.as_deref());
+    let (line_start, line_end) = clio_line_span(item);
+    let workflow_status = clio_workflow_status(authority_class.as_str(), source_path.as_deref());
+    let why_included = clio_why_included(
+        slot.as_str(),
+        authority_class.as_str(),
+        item.relevance.as_ref().and_then(|relevance| relevance.rank),
+    );
+    let conflict_group = if slot == "conflicts" {
+        Some("currentness".to_string())
+    } else {
+        None
+    };
+
+    ClioContextPacketItem {
+        item: item.clone(),
+        slot: Some(slot),
+        source_uri,
+        source_path,
+        line_start,
+        line_end,
+        authority_class: Some(authority_class),
+        workflow_status,
+        why_included: Some(why_included),
+        conflict_group,
+    }
+}
+
+fn clio_source_uri(item: &BrokerContextItem) -> Option<String> {
+    item.origin
+        .uri
+        .clone()
+        .or_else(|| json_string_field(&item.metadata, "uri"))
+        .or_else(|| {
+            item.source
+                .as_deref()
+                .filter(|source| source.starts_with("vault://") || source.starts_with("file://"))
+                .map(str::to_string)
+        })
+}
+
+fn clio_source_path(item: &BrokerContextItem, source_uri: Option<&str>) -> Option<String> {
+    item.origin
+        .path
+        .clone()
+        .or_else(|| json_string_field(&item.metadata, "path"))
+        .or_else(|| json_string_field(&item.metadata, "file_path"))
+        .or_else(|| json_string_field(&item.metadata, "source_path"))
+        .or_else(|| {
+            source_uri.and_then(|uri| {
+                uri.strip_prefix("vault://")
+                    .map(|path| path.split('#').next().unwrap_or(path).to_string())
+            })
+        })
+        .or_else(|| {
+            item.source.as_deref().and_then(|source| {
+                if source.starts_with('/') || source.contains(".md") {
+                    Some(source.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+fn clio_line_span(item: &BrokerContextItem) -> (Option<i64>, Option<i64>) {
+    let start = json_i64_field(&item.metadata, "start_line")
+        .or_else(|| json_i64_field(&item.metadata, "line_start"))
+        .or_else(|| json_i64_field(&item.metadata, "line"));
+    let end = json_i64_field(&item.metadata, "end_line")
+        .or_else(|| json_i64_field(&item.metadata, "line_end"))
+        .or_else(|| json_i64_field(&item.metadata, "line"));
+    (start, end)
+}
+
+fn clio_authority_class(item: &BrokerContextItem, source_path: Option<&str>) -> String {
+    let kind = item.kind.as_str();
+    if matches!(kind, "tool" | "skill") {
+        return "procedural_hint".to_string();
+    }
+    if kind == "memory" {
+        return "durable_memory".to_string();
+    }
+    if matches!(kind, "session_search_hit" | "conversation_search_hit") {
+        return "session_evidence".to_string();
+    }
+    if matches!(kind, "goal" | "todo") {
+        return "active_task_note".to_string();
+    }
+    if kind == "side_panel" {
+        return "artifact_ref".to_string();
+    }
+    if matches!(kind, "checkpoint" | "lineage" | "compression_checkpoint") {
+        return "lineage_checkpoint".to_string();
+    }
+
+    let path = source_path.unwrap_or_default();
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    if path.contains("/System/Clio/Core/") {
+        return "clio_core".to_string();
+    }
+    if matches!(
+        basename,
+        "CURRENT.md"
+            | "Master-Second-Brain-Execution-Plan.md"
+            | "Clio-Context-Engineering-Operating-Model.md"
+            | "jcode-Nervous-System-Broker-Parity-Plan.md"
+    ) {
+        return "current_project_authority".to_string();
+    }
+    if path.contains("TaskNotes/") {
+        return "active_task_note".to_string();
+    }
+    if path.contains("OpenClaw")
+        || path.contains("Honcho")
+        || path.contains("Archive")
+        || path.contains("backup")
+        || path.contains("rollback")
+        || path.contains("pre-super-session-adoption")
+        || path.contains("Super-Session-Fork")
+    {
+        return "historical_context".to_string();
+    }
+    if kind.starts_with("vault_") {
+        return "source_evidence".to_string();
+    }
+    "broker_context".to_string()
+}
+
+fn clio_packet_slot(
+    item: &BrokerContextItem,
+    authority_class: &str,
+    source_path: Option<&str>,
+) -> String {
+    match item.kind.as_str() {
+        "goal" | "todo" => "active_task".to_string(),
+        "memory" => "durable_memory".to_string(),
+        "session_search_hit" | "conversation_search_hit" => "session_evidence".to_string(),
+        "side_panel" => "artifact_refs".to_string(),
+        "skill" => "skill_hints".to_string(),
+        "tool" => "tool_hints".to_string(),
+        "checkpoint" | "lineage" | "compression_checkpoint" => "lineage".to_string(),
+        "conflict" => "conflicts".to_string(),
+        _ if matches!(
+            authority_class,
+            "current_project_authority" | "clio_core" | "active_task_note"
+        ) =>
+        {
+            "authority".to_string()
+        }
+        _ if authority_class == "historical_context"
+            && source_path
+                .map(|path| {
+                    path.contains("Super-Session-Fork")
+                        || path.contains("pre-super-session-adoption")
+                        || path.contains("rollback")
+                })
+                .unwrap_or(false) =>
+        {
+            "conflicts".to_string()
+        }
+        _ => "vault_evidence".to_string(),
+    }
+}
+
+fn clio_workflow_status(authority_class: &str, source_path: Option<&str>) -> Option<String> {
+    if matches!(
+        authority_class,
+        "current_project_authority" | "clio_core" | "active_task_note"
+    ) {
+        return Some("active".to_string());
+    }
+    if authority_class == "historical_context" {
+        return Some("historical".to_string());
+    }
+    source_path.and_then(|path| {
+        if path.contains("Archive") {
+            Some("archived".to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn clio_why_included(slot: &str, authority_class: &str, rank: Option<usize>) -> String {
+    let rank = rank.map(|rank| format!(" rank {rank}")).unwrap_or_default();
+    match slot {
+        "authority" => format!("current authority context; class={authority_class}{rank}"),
+        "conflicts" => format!("currentness/conflict note; class={authority_class}{rank}"),
+        "active_task" => format!("active task state; class={authority_class}{rank}"),
+        "lineage" => format!("super-session lineage evidence; class={authority_class}{rank}"),
+        "durable_memory" => format!("durable memory evidence; class={authority_class}{rank}"),
+        "session_evidence" => format!("session evidence; class={authority_class}{rank}"),
+        "artifact_refs" => format!("artifact reference; class={authority_class}{rank}"),
+        "skill_hints" => format!("procedural routing hint; class={authority_class}{rank}"),
+        "tool_hints" => format!("compact broker tool hint; class={authority_class}{rank}"),
+        _ => format!("source-backed evidence; class={authority_class}{rank}"),
+    }
+}
+
+fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|field| field.as_str())
+        .filter(|field| !field.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn json_i64_field(value: &serde_json::Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(|field| field.as_i64())
 }
 
 #[cfg(feature = "duckdb-storage")]
@@ -3216,6 +3475,94 @@ mod tests {
 
         assert_eq!(items[0], vault_item);
         assert_eq!(items[1].kind, "tool");
+    }
+
+    #[test]
+    fn clio_context_packet_routes_authority_conflicts_and_hints() {
+        let canonical_plan = BrokerContextItem {
+            id: "vault_chunk:canonical-plan".to_string(),
+            kind: "vault_chunk".to_string(),
+            scope: "vault".to_string(),
+            content_format: "markdown".to_string(),
+            title: Some("jcode Super-Session Context Broker Plan / 9".to_string()),
+            summary: Some("Clio Context Packet v1 is the active contract.".to_string()),
+            content: None,
+            tags: Vec::new(),
+            source: Some("vault://Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md#9".to_string()),
+            score: Some(0.99),
+            origin: BrokerContextOrigin {
+                tool: Some("duckdb_broker_store".to_string()),
+                uri: Some("vault://Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md#9".to_string()),
+                path: Some("Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md".to_string()),
+                ..Default::default()
+            },
+            relevance: Some(BrokerContextRelevance {
+                query: Some("context packet".to_string()),
+                retrieval_mode: Some("duckdb_broker_store_semantic".to_string()),
+                rank: Some(1),
+                ..Default::default()
+            }),
+            fragments: Vec::new(),
+            metadata: json!({"start_line": 1660, "end_line": 1712}),
+        };
+        let historical_fork = BrokerContextItem {
+            id: "vault_chunk:historical-fork".to_string(),
+            kind: "vault_chunk".to_string(),
+            scope: "vault".to_string(),
+            content_format: "markdown".to_string(),
+            title: Some("jcode Super-Session Context Broker Fork Plan / 9".to_string()),
+            summary: Some("The fork is preserved but no longer canonical.".to_string()),
+            content: None,
+            tags: Vec::new(),
+            source: Some("vault://Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan-Super-Session-Fork.md#9".to_string()),
+            score: Some(0.98),
+            origin: BrokerContextOrigin {
+                tool: Some("duckdb_broker_store".to_string()),
+                uri: Some("vault://Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan-Super-Session-Fork.md#9".to_string()),
+                path: Some("Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan-Super-Session-Fork.md".to_string()),
+                ..Default::default()
+            },
+            relevance: Some(BrokerContextRelevance {
+                query: Some("context packet".to_string()),
+                retrieval_mode: Some("duckdb_broker_store_semantic".to_string()),
+                rank: Some(2),
+                ..Default::default()
+            }),
+            fragments: Vec::new(),
+            metadata: json!({"start_line": 1660, "end_line": 1712}),
+        };
+
+        let packet = clio_context_packet_from_items(&[
+            canonical_plan.clone(),
+            historical_fork.clone(),
+            tool_broker_item("memory"),
+        ]);
+
+        assert_eq!(packet.version, "clio_context_packet_v1");
+        assert_eq!(packet.authority.len(), 1);
+        assert_eq!(packet.authority[0].item.id, canonical_plan.id);
+        assert_eq!(packet.authority[0].slot.as_deref(), Some("authority"));
+        assert_eq!(
+            packet.authority[0].authority_class.as_deref(),
+            Some("current_project_authority")
+        );
+        assert_eq!(packet.authority[0].line_start, Some(1660));
+        assert_eq!(packet.authority[0].line_end, Some(1712));
+        assert_eq!(packet.conflicts.len(), 1);
+        assert_eq!(packet.conflicts[0].item.id, historical_fork.id);
+        assert_eq!(
+            packet.conflicts[0].conflict_group.as_deref(),
+            Some("currentness")
+        );
+        assert_eq!(
+            packet.conflicts[0].authority_class.as_deref(),
+            Some("historical_context")
+        );
+        assert_eq!(packet.tool_hints.len(), 1);
+        assert_eq!(
+            packet.tool_hints[0].authority_class.as_deref(),
+            Some("procedural_hint")
+        );
     }
 
     #[cfg(feature = "duckdb-storage")]

@@ -128,6 +128,78 @@ pub struct BrokerContextItem {
     pub metadata: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClioContextPacketItem {
+    #[serde(flatten)]
+    pub item: BrokerContextItem,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_included: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_group: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClioContextPacketV1 {
+    #[serde(default = "default_clio_context_packet_version")]
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_task: Vec<ClioContextPacketItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authority: Vec<ClioContextPacketItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lineage: Vec<ClioContextPacketItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vault_evidence: Vec<ClioContextPacketItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub durable_memory: Vec<ClioContextPacketItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_evidence: Vec<ClioContextPacketItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<ClioContextPacketItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<ClioContextPacketItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_hints: Vec<ClioContextPacketItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_hints: Vec<ClioContextPacketItem>,
+}
+
+impl Default for ClioContextPacketV1 {
+    fn default() -> Self {
+        Self {
+            version: default_clio_context_packet_version(),
+            active_task: Vec::new(),
+            authority: Vec::new(),
+            lineage: Vec::new(),
+            vault_evidence: Vec::new(),
+            durable_memory: Vec::new(),
+            session_evidence: Vec::new(),
+            artifact_refs: Vec::new(),
+            conflicts: Vec::new(),
+            skill_hints: Vec::new(),
+            tool_hints: Vec::new(),
+        }
+    }
+}
+
+fn default_clio_context_packet_version() -> String {
+    "clio_context_packet_v1".to_string()
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct BrokerContextOrigin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1150,6 +1222,8 @@ pub enum ServerEvent {
         memories: Vec<BrokerMemoryContextItem>,
         #[serde(default, skip_serializing_if = "snapshot_is_empty")]
         side_panel: SidePanelSnapshot,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        packet: Option<ClioContextPacketV1>,
     },
 
     /// Response after an external turn has been synced into broker-managed memory.

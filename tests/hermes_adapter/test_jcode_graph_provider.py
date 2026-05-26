@@ -47,6 +47,7 @@ class FakeBrokerServer:
         self,
         *,
         context_items: list[dict] | None = None,
+        context_packet: dict | None = None,
         context_delay_seconds: float = 0.0,
         hang_context_once: bool = False,
         hang_turn_sync: bool = False,
@@ -56,6 +57,7 @@ class FakeBrokerServer:
         self._tmp = tempfile.TemporaryDirectory()
         self.socket_path = str(Path(self._tmp.name) / "broker.sock")
         self.context_items = context_items
+        self.context_packet = context_packet
         self.context_delay_seconds = context_delay_seconds
         self.hang_context_once = hang_context_once
         self._hung_context_requests = 0
@@ -114,9 +116,7 @@ class FakeBrokerServer:
                         return
                     if self.context_delay_seconds:
                         time.sleep(self.context_delay_seconds)
-                    self._write(
-                        handle,
-                        {
+                    event = {
                             "type": "broker_context",
                             "id": request_id,
                             "session_id": "ses_fake",
@@ -142,8 +142,10 @@ class FakeBrokerServer:
                                     "origin": {"tool": "todo"},
                                 },
                             ],
-                        },
-                    )
+                        }
+                    if self.context_packet is not None:
+                        event["packet"] = self.context_packet
+                    self._write(handle, event)
                 elif request["type"] == "broker_turn_sync":
                     if self.hang_turn_sync:
                         while not self._stop.wait(0.05):
@@ -679,6 +681,105 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         self.assertNotIn("RAW TRANSCRIPT SHOULD NOT APPEAR", text)
         self.assertLessEqual(diagnostics["last_prefetch_chars"], 700)
         self.assertEqual(diagnostics["last_prefetch_item_count"], len(items))
+
+    def test_provider_prefers_clio_context_packet_v1_when_present(self) -> None:
+        packet = {
+            "version": "clio_context_packet_v1",
+            "active_task": [
+                {
+                    "id": "goal_1",
+                    "kind": "goal",
+                    "scope": "session",
+                    "title": "Implement packet spine",
+                    "summary": "Active work is Clio Context Packet v1.",
+                    "slot": "active_task",
+                    "authority_class": "active_task_note",
+                    "why_included": "current active task",
+                }
+            ],
+            "authority": [
+                {
+                    "id": "vault_plan",
+                    "kind": "vault_chunk",
+                    "scope": "project",
+                    "title": "jcode Super-Session Context Broker Plan / §9",
+                    "summary": "Clio Context Packet v1 is mandatory.",
+                    "source_uri": "vault://Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md#9",
+                    "source_path": "Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md",
+                    "line_start": 1660,
+                    "line_end": 1712,
+                    "slot": "authority",
+                    "authority_class": "current_project_authority",
+                    "why_included": "current canonical plan beats historical fork",
+                }
+            ],
+            "conflicts": [
+                {
+                    "id": "conflict_1",
+                    "kind": "conflict",
+                    "scope": "project",
+                    "title": "Fork is historical",
+                    "summary": "The fork remains searchable but is no longer canonical.",
+                    "slot": "conflicts",
+                    "authority_class": "conflict_note",
+                    "why_included": "surface currentness conflict",
+                }
+            ],
+            "skill_hints": [
+                {
+                    "id": "skill_context",
+                    "kind": "skill",
+                    "scope": "project",
+                    "title": "context-engineering-collection",
+                    "summary": "Procedural routing hint only.",
+                    "slot": "skill_hints",
+                    "authority_class": "procedural_hint",
+                    "why_included": "route context-engineering work",
+                }
+            ],
+        }
+        fallback_items = [
+            {
+                "id": "mem_fallback",
+                "kind": "memory",
+                "scope": "project",
+                "title": "Fallback Memory",
+                "summary": "This should not drive packet formatting.",
+                "origin": {"tool": "memory"},
+            }
+        ]
+        with FakeBrokerServer(context_items=fallback_items, context_packet=packet) as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "context_limit": 8,
+                    "max_chars": 1200,
+                    "item_max_chars": 160,
+                }
+            )
+            provider.initialize("hermes_session")
+            text = provider.prefetch("broker packet spine", session_id="hermes_session")
+            diagnostics = provider.diagnostics()
+            provider.shutdown()
+
+        self.assertIn("## Clio Context Packet v1", text)
+        self.assertIn("### Active Task", text)
+        self.assertIn("### Authority", text)
+        self.assertIn("### Conflicts", text)
+        self.assertIn("### Skill Hints", text)
+        self.assertLess(text.index("### Active Task"), text.index("### Authority"))
+        self.assertLess(text.index("### Authority"), text.index("### Conflicts"))
+        self.assertIn("authority=current_project_authority", text)
+        self.assertIn("why=current canonical plan beats historical fork", text)
+        self.assertIn(
+            "ref=vault://Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/"
+            "jcode-Nervous-System-Broker-Parity-Plan.md#9",
+            text,
+        )
+        self.assertIn("lines=1660-1712", text)
+        self.assertNotIn("Fallback Memory", text)
+        self.assertEqual(diagnostics["last_prefetch_item_count"], 4)
 
     def test_provider_exposes_context_tool_schema(self) -> None:
         provider = JcodeGraphMemoryProvider({"socket_path": os.devnull})

@@ -733,6 +733,77 @@ fn test_broker_context_event_roundtrip() -> Result<()> {
                 updated_at_ms: 77,
             }],
         },
+        packet: Some(ClioContextPacketV1 {
+            active_task: vec![ClioContextPacketItem {
+                item: BrokerContextItem {
+                    id: "goal_packet_1".to_string(),
+                    kind: "goal".to_string(),
+                    scope: "session".to_string(),
+                    content_format: "plain_text".to_string(),
+                    title: Some("Implement packet spine".to_string()),
+                    summary: Some("Active task is Clio Context Packet v1.".to_string()),
+                    content: None,
+                    tags: Vec::new(),
+                    source: Some("ses_broker_456".to_string()),
+                    score: None,
+                    origin: BrokerContextOrigin {
+                        tool: Some("goal".to_string()),
+                        session_id: Some("ses_broker_456".to_string()),
+                        ..Default::default()
+                    },
+                    relevance: None,
+                    fragments: Vec::new(),
+                    metadata: serde_json::json!({"status": "active"}),
+                },
+                slot: Some("active_task".to_string()),
+                source_uri: None,
+                source_path: None,
+                line_start: None,
+                line_end: None,
+                authority_class: Some("active_task_note".to_string()),
+                workflow_status: None,
+                why_included: Some("current active goal".to_string()),
+                conflict_group: None,
+            }],
+            authority: vec![ClioContextPacketItem {
+                item: BrokerContextItem {
+                    id: "vault_authority_1".to_string(),
+                    kind: "vault_chunk".to_string(),
+                    scope: "project".to_string(),
+                    content_format: "markdown".to_string(),
+                    title: Some("jcode Super-Session Context Broker Plan / §9".to_string()),
+                    summary: Some("Clio Context Packet v1 is mandatory.".to_string()),
+                    content: None,
+                    tags: vec!["authority".to_string()],
+                    source: Some("vault://plan#9".to_string()),
+                    score: Some(0.99),
+                    origin: BrokerContextOrigin {
+                        tool: Some("vault".to_string()),
+                        path: Some("Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md".to_string()),
+                        uri: Some("vault://plan#9".to_string()),
+                        ..Default::default()
+                    },
+                    relevance: Some(BrokerContextRelevance {
+                        query: Some("context packet".to_string()),
+                        retrieval_mode: Some("duckdb_broker_store_semantic".to_string()),
+                        rank: Some(1),
+                        ..Default::default()
+                    }),
+                    fragments: Vec::new(),
+                    metadata: serde_json::json!({"source_kind": "vault_chunk"}),
+                },
+                slot: Some("authority".to_string()),
+                source_uri: Some("vault://plan#9".to_string()),
+                source_path: Some("Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md".to_string()),
+                line_start: Some(1660),
+                line_end: Some(1712),
+                authority_class: Some("current_project_authority".to_string()),
+                workflow_status: Some("active".to_string()),
+                why_included: Some("current canonical plan".to_string()),
+                conflict_group: None,
+            }],
+            ..Default::default()
+        }),
     };
     let json = encode_event(&event);
     assert!(json.contains("\"type\":\"broker_context\""));
@@ -745,6 +816,7 @@ fn test_broker_context_event_roundtrip() -> Result<()> {
         items,
         memories,
         side_panel,
+        packet,
     } = decoded
     else {
         return Err(anyhow!("expected BrokerContext event"));
@@ -806,6 +878,19 @@ fn test_broker_context_event_roundtrip() -> Result<()> {
     assert_eq!(
         side_panel.focused_page_id.as_deref(),
         Some("goal.project-memory")
+    );
+    let packet = packet.ok_or_else(|| anyhow!("missing Clio Context Packet v1"))?;
+    assert_eq!(packet.version, "clio_context_packet_v1");
+    assert_eq!(packet.active_task[0].slot.as_deref(), Some("active_task"));
+    assert_eq!(
+        packet.authority[0].authority_class.as_deref(),
+        Some("current_project_authority")
+    );
+    assert_eq!(packet.authority[0].line_start, Some(1660));
+    assert_eq!(packet.authority[0].line_end, Some(1712));
+    assert_eq!(
+        packet.authority[0].source_path.as_deref(),
+        Some("Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md")
     );
     Ok(())
 }
