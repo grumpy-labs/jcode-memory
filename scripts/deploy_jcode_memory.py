@@ -145,6 +145,27 @@ def git_archive_to_remote_command(
 
 def _ct1103_steps(sha: str, *, apply: bool, ct1103_host: str, proxmox_host: str) -> list[PlanStep]:
     release_dir = f"{CT1103_RELEASE_ROOT}/{sha}"
+    return _ct1103_steps_for_binary(
+        sha=sha,
+        apply=apply,
+        ct1103_host=ct1103_host,
+        proxmox_host=proxmox_host,
+        release_dir=release_dir,
+        install_source=f"{CT1103_CARGO_TARGET_DIR}/release/jcode",
+        prebuilt_binary=None,
+    )
+
+
+def _ct1103_steps_for_binary(
+    *,
+    sha: str,
+    apply: bool,
+    ct1103_host: str,
+    proxmox_host: str,
+    release_dir: str,
+    install_source: str,
+    prebuilt_binary: Path | None,
+) -> list[PlanStep]:
     steps = [
         PlanStep(
             "ct1103",
@@ -155,23 +176,52 @@ def _ct1103_steps(sha: str, *, apply: bool, ct1103_host: str, proxmox_host: str)
                 release_dir=release_dir,
             ),
         ),
-        PlanStep(
-            "ct1103",
-            "Build and test broker release on CT1103",
-            ssh_command(
-                ct1103_host,
-                "set -euo pipefail; "
-                'export PATH="$HOME/.cargo/bin:$PATH"; '
-                f"mkdir -p {_quote(CT1103_CARGO_TARGET_DIR)}; "
-                f"export CARGO_TARGET_DIR={_quote(CT1103_CARGO_TARGET_DIR)}; "
-                f"cd {_quote(release_dir)}; "
-                "cargo test -q -p jcode-protocol; "
-                "cargo test -q -p jcode-storage --features duckdb-storage-bundled; "
-                f"cargo test -q --features {CT1103_BROKER_FEATURES} --test e2e broker_runtime; "
-                f"cargo build -q --release --bin jcode --features {CT1103_BROKER_FEATURES}",
-            ),
-        ),
     ]
+    if prebuilt_binary is None:
+        steps.append(
+            PlanStep(
+                "ct1103",
+                "Build and test broker release on CT1103",
+                ssh_command(
+                    ct1103_host,
+                    "set -euo pipefail; "
+                    'export PATH="$HOME/.cargo/bin:$PATH"; '
+                    f"mkdir -p {_quote(CT1103_CARGO_TARGET_DIR)}; "
+                    f"export CARGO_TARGET_DIR={_quote(CT1103_CARGO_TARGET_DIR)}; "
+                    f"cd {_quote(release_dir)}; "
+                    "cargo test -q -p jcode-protocol; "
+                    "cargo test -q -p jcode-storage --features duckdb-storage-bundled; "
+                    f"cargo test -q --features {CT1103_BROKER_FEATURES} --test e2e broker_runtime; "
+                    f"cargo build -q --release --bin jcode --features {CT1103_BROKER_FEATURES}",
+                ),
+            )
+        )
+    else:
+        remote_prebuilt = f"{release_dir}/jcode-prebuilt"
+        steps.extend(
+            [
+                PlanStep(
+                    "local",
+                    "Verify prebuilt broker binary exists locally",
+                    f"test -f {_quote(prebuilt_binary)}",
+                ),
+                PlanStep(
+                    "ct1103",
+                    "Upload prebuilt broker binary to CT1103",
+                    f"scp {_quote(prebuilt_binary)} {_quote(ct1103_host + ':' + remote_prebuilt)}",
+                ),
+                PlanStep(
+                    "ct1103",
+                    "Verify prebuilt broker binary on CT1103",
+                    ssh_command(
+                        ct1103_host,
+                        f"chmod 0755 {_quote(remote_prebuilt)}; "
+                        f"{_quote(remote_prebuilt)} --version | grep -F {_quote(sha[:8])}",
+                    ),
+                ),
+            ]
+        )
+        install_source = remote_prebuilt
     if apply:
         steps.extend(
             [
@@ -180,7 +230,7 @@ def _ct1103_steps(sha: str, *, apply: bool, ct1103_host: str, proxmox_host: str)
                     "Install broker binary and restart CT1103 service",
                     ssh_command(
                         proxmox_host,
-                        f"pct exec 1103 -- install -m 0755 {_quote(CT1103_CARGO_TARGET_DIR + '/release/jcode')} "
+                        f"pct exec 1103 -- install -m 0755 {_quote(install_source)} "
                         f"{_quote(CT1103_BINARY)} && "
                         f"pct exec 1103 -- systemctl restart {CT1103_SERVICE} && "
                         f"pct exec 1103 -- systemctl is-active {CT1103_SERVICE}",
@@ -265,6 +315,7 @@ def build_plan(
     ct1103_host: str = DEFAULT_CT1103_HOST,
     ct1150_host: str = DEFAULT_CT1150_HOST,
     proxmox_host: str = DEFAULT_PROXMOX_HOST,
+    ct1103_prebuilt_binary: str | os.PathLike[str] | None = None,
 ) -> DeployPlan:
     sha = validate_sha(sha)
     if target not in {"ct1103", "ct1150", "all"}:
@@ -278,7 +329,31 @@ def build_plan(
 
     steps: list[PlanStep] = []
     if "ct1103" in target_names:
-        steps.extend(_ct1103_steps(sha, apply=apply, ct1103_host=ct1103_host, proxmox_host=proxmox_host))
+        if ct1103_prebuilt_binary is None:
+            steps.extend(
+                _ct1103_steps(
+                    sha,
+                    apply=apply,
+                    ct1103_host=ct1103_host,
+                    proxmox_host=proxmox_host,
+                )
+            )
+        else:
+            prebuilt = Path(ct1103_prebuilt_binary).expanduser()
+            if not prebuilt.is_absolute():
+                raise ValueError("--ct1103-prebuilt-binary must be an absolute path")
+            release_dir = f"{CT1103_RELEASE_ROOT}/{sha}"
+            steps.extend(
+                _ct1103_steps_for_binary(
+                    sha=sha,
+                    apply=apply,
+                    ct1103_host=ct1103_host,
+                    proxmox_host=proxmox_host,
+                    release_dir=release_dir,
+                    install_source=f"{release_dir}/jcode-prebuilt",
+                    prebuilt_binary=prebuilt,
+                )
+            )
     if "ct1150" in target_names:
         steps.extend(_ct1150_steps(sha, apply=apply, ct1150_host=ct1150_host, proxmox_host=proxmox_host))
 
@@ -341,6 +416,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--ct1103-host", default=DEFAULT_CT1103_HOST)
     parser.add_argument("--ct1150-host", default=DEFAULT_CT1150_HOST)
     parser.add_argument("--proxmox-host", default=DEFAULT_PROXMOX_HOST)
+    parser.add_argument(
+        "--ct1103-prebuilt-binary",
+        help=(
+            "Absolute path to a prebuilt Linux-compatible jcode broker binary. "
+            "When set for a ct1103 deploy, the script uploads and verifies this "
+            "binary instead of running the CT1103 Cargo build/test step."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -362,6 +445,7 @@ def main(argv: list[str] | None = None) -> int:
             ct1103_host=args.ct1103_host,
             ct1150_host=args.ct1150_host,
             proxmox_host=args.proxmox_host,
+            ct1103_prebuilt_binary=args.ct1103_prebuilt_binary,
         )
     except (subprocess.CalledProcessError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

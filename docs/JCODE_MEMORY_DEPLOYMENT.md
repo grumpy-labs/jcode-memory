@@ -43,6 +43,26 @@ fixes into one CT `1103` deploy when safe. Keep live-broker and
 installed-provider gates meaningful after the deploy, but do not pay the full
 remote build cost for every tiny iteration.
 
+When a Linux-compatible release binary has already been built and tested on a
+stronger or warmer build host, CT `1103` can skip its target-side Cargo build:
+
+```bash
+scripts/deploy_jcode_memory.py \
+  --target ct1103 \
+  --ct1103-prebuilt-binary /absolute/path/to/jcode-linux-x86_64 \
+  --allow-unpushed
+```
+
+The helper still stages the exact repo commit, uploads the binary into that
+release directory, verifies `jcode --version` contains the target commit hash
+on CT `1103`, and only installs it with `--apply`. Use this lane only after
+focused local/remote build checks have already proven the binary for the commit
+being deployed.
+
+Production embeddings remain `mxbai-embed-large:latest`. Do not change the
+embedding model or mix embeddings from different models in the same production
+index as part of deploy-loop speed work.
+
 ## Target Details
 
 ### CT1103 Broker
@@ -66,6 +86,17 @@ cargo build -q --release --bin jcode --features duckdb-storage-bundled,embedding
 The shared `CARGO_TARGET_DIR` is intentionally outside the per-SHA release
 directory so CT `1103` can reuse Cargo/DuckDB/embedding build artifacts across
 deploys while still staging and building the exact requested SHA.
+
+For the prebuilt-binary lane, the target-side Cargo step above is replaced with:
+
+```bash
+scp /absolute/path/to/jcode-linux-x86_64 \
+  jcode@10.1.10.103:/srv/hermes-jcode/releases/jcode-memory/<sha>/jcode-prebuilt
+ssh jcode@10.1.10.103 \
+  '/srv/hermes-jcode/releases/jcode-memory/<sha>/jcode-prebuilt --version | grep -F <short-sha>'
+```
+
+The final install path and service restart are unchanged.
 
 Only with `--apply`, it installs:
 

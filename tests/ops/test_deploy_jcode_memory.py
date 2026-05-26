@@ -61,6 +61,37 @@ class DeployJcodeMemoryTests(unittest.TestCase):
         self.assertIn("systemctl restart hermes-jcode-broker.service", apply_rendered)
         self.assertNotIn("systemctl restart hermes-jcode-broker.service", dry_rendered)
 
+    def test_ct1103_prebuilt_binary_plan_skips_target_cargo_build(self):
+        deploy = load_deploy_module()
+        sha = "589b2a3144d5b18a3044af3f103cad9b6112a629"
+        prebuilt = "/tmp/jcode-linux-x86_64"
+
+        dry_plan = deploy.build_plan(
+            target="ct1103",
+            sha=sha,
+            apply=False,
+            ct1103_prebuilt_binary=prebuilt,
+        )
+        apply_plan = deploy.build_plan(
+            target="ct1103",
+            sha=sha,
+            apply=True,
+            ct1103_prebuilt_binary=prebuilt,
+        )
+        dry_rendered = deploy.render_plan(dry_plan)
+        apply_rendered = deploy.render_plan(apply_plan)
+
+        self.assertIn("Upload prebuilt broker binary to CT1103", dry_rendered)
+        self.assertIn(prebuilt, dry_rendered)
+        self.assertIn("/srv/hermes-jcode/releases/jcode-memory/" + sha + "/jcode-prebuilt", dry_rendered)
+        self.assertIn("Verify prebuilt broker binary on CT1103", dry_rendered)
+        self.assertIn("grep -F 589b2a3", dry_rendered)
+        self.assertNotIn("cargo build -q --release --bin jcode", dry_rendered)
+        self.assertNotIn("cargo test -q -p jcode-storage", dry_rendered)
+        self.assertIn("/srv/hermes-jcode/releases/jcode-memory/" + sha + "/jcode-prebuilt", apply_rendered)
+        self.assertIn("/usr/local/bin/jcode-memory-broker", apply_rendered)
+        self.assertIn("systemctl restart hermes-jcode-broker.service", apply_rendered)
+
     def test_ct1150_plan_stages_compiles_installs_and_restarts_gateway_only_on_apply(self):
         deploy = load_deploy_module()
         sha = "589b2a3144d5b18a3044af3f103cad9b6112a629"

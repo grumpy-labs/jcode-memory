@@ -137,7 +137,7 @@ cargo run -q --bin jcode -- broker eval-context \
 Current expected gate counts:
 
 ```text
-fixture:            15/15
+fixture:            18/18
 live-broker:         5/5
 installed-provider:  7/7
 ```
@@ -179,6 +179,21 @@ This keeps the full target-side checks and release build, but avoids cold
 rebuilding bundled DuckDB and embedding dependencies for every small SHA.
 Do not deploy CT `1103` for docs, fixture-only, local-script, formatting, or
 analysis-only changes.
+
+If a Linux-compatible broker binary has already been built and checked on a
+stronger or warmer build host, use the prebuilt lane instead of paying the full
+CT `1103` Cargo build again:
+
+```bash
+scripts/deploy_jcode_memory.py \
+  --target ct1103 \
+  --ct1103-prebuilt-binary /absolute/path/to/jcode-linux-x86_64 \
+  --allow-unpushed
+```
+
+Only add `--apply` after reading the plan and confirming the SHA/binary pair.
+This is an inner-loop speed lane, not a reason to skip the post-deploy live
+broker and installed-provider gates.
 
 ## Roll Back
 
