@@ -1665,6 +1665,8 @@ fn lineage_entry_quality_score(entry: &MemoryEntry, query: Option<&str>) -> i32 
         entry.tags
     );
     let mut score = 0;
+    let placeholder_section_count = text.matches("not detected in transcript").count() as i32;
+    let sparse_handoff = placeholder_section_count >= 4;
 
     if text.contains("next action") {
         score += 50;
@@ -1681,8 +1683,14 @@ fn lineage_entry_quality_score(entry: &MemoryEntry, query: Option<&str>) -> i32 
     if text.contains("no artifact-trail lines detected") {
         score -= 50;
     }
-    if text.contains("not detected in transcript") {
+    if placeholder_section_count > 0 {
+        score -= placeholder_section_count * 5;
+    }
+    if sparse_handoff {
         score -= 60;
+    }
+    if text.contains("structured session-end handoff") && !sparse_handoff {
+        score += 80;
     }
 
     if let Some(query) = query {
@@ -4456,6 +4464,65 @@ mod tests {
         assert!(content.contains("Files:\n- Not detected in transcript."));
         assert!(content.contains("Source refs:\n- Source: hermes:session_end"));
         assert!(content.contains("- Provenance memory:"));
+    }
+
+    #[tokio::test]
+    async fn structured_session_end_handoff_outranks_companion_pre_compress_checkpoint() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let project_dir = _env.path().join("Hermes-Honcho-LangGraph-Second-Brain");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let manager = MemoryManager::new().with_project_dir(&project_dir);
+        let extractor = FakeTranscriptExtractor::new(Vec::new());
+        let transcript = "user: Active task: structured handoff provider gate amber-cascade-20260526.\n\
+                          assistant: Decision: keep builder broker-side. Command: cargo test -q context_eval. Failure: no blocker. Current state: structured handoff generated. Remaining work: deploy. Next action: run gates.";
+
+        for source in ["hermes:pre_compress", "hermes:session_end"] {
+            broker_transcript_sync_event_for_manager_with_gate(
+                201,
+                "session_companion_handoff".to_string(),
+                &manager,
+                transcript,
+                source,
+                TranscriptLineageContext {
+                    working_dir: Some(project_dir.to_string_lossy().as_ref()),
+                    surface_session_id: Some("companion_surface"),
+                    surface: Some("hermes"),
+                    ..Default::default()
+                },
+                false,
+                &extractor,
+            )
+            .await
+            .expect("sync companion transcript checkpoint");
+        }
+
+        let memory_results = collect_broker_memory_results(
+            Some(project_dir.to_string_lossy().as_ref()),
+            Some("structured session-end handoff provider gate amber-cascade-20260526"),
+            8,
+            false,
+        )
+        .expect("collect broker memory results");
+        let items: Vec<BrokerContextItem> = memory_results
+            .iter()
+            .map(|result| memory_broker_item(result, Some(project_dir.to_string_lossy().as_ref())))
+            .collect();
+        let packet = clio_context_packet_from_items(&items);
+        let first_lineage = packet.lineage.first().expect("lineage item");
+        let first_content = first_lineage.item.content.as_deref().unwrap_or_default();
+
+        assert_eq!(
+            first_lineage
+                .item
+                .metadata
+                .get("checkpoint_kind")
+                .and_then(|value| value.as_str()),
+            Some("session_end"),
+            "structured session-end handoff should outrank its pre-compress companion, got {first_content}"
+        );
+        assert!(first_content.contains("Structured session-end handoff:"));
+        assert!(first_content.contains("amber-cascade-20260526"));
     }
 
     #[tokio::test]
