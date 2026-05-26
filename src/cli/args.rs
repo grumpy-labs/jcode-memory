@@ -478,6 +478,10 @@ pub(crate) enum BrokerCommand {
         #[arg(long)]
         json: bool,
 
+        /// Probe source mode to evaluate: fixture or live-broker
+        #[arg(long, default_value = "fixture")]
+        mode: String,
+
         /// Append a JSONL run record to this file. Defaults to ~/.local/state/clio/context-evals/<suite>/runs.jsonl.
         #[arg(long)]
         log: Option<String>,

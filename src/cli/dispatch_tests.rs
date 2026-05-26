@@ -119,6 +119,57 @@ fn broker_server_mode_respects_explicit_socket() {
     assert_eq!(crate::server::socket_path(), custom_socket);
 }
 
+#[tokio::test]
+async fn broker_eval_context_live_mode_prefers_broker_socket_env() {
+    let _guard = crate::storage::lock_test_env();
+    let _socket = EnvVarGuard::remove("JCODE_SOCKET");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_DIR", temp.path());
+    let broker_socket = temp.path().join("configured-broker.sock");
+    let _broker_socket = EnvVarGuard::set("JCODE_BROKER_SOCKET", broker_socket.as_os_str());
+    let suite_path = temp.path().join("suite.json");
+    std::fs::write(
+        &suite_path,
+        r#"{
+          "name": "socket-env-regression",
+          "version": 1,
+          "minimum_pass_rate": 1.0,
+          "required_groups": ["lineage"],
+          "probes": [
+            {
+              "name": "missing_socket",
+              "group": "lineage",
+              "source": "live_broker",
+              "query": "lineage checkpoint",
+              "assertions": [{"type": "packet_version", "equals": "clio_context_packet_v1"}]
+            }
+          ]
+        }"#,
+    )
+    .expect("write suite");
+    let suite_path = suite_path.to_string_lossy().to_string();
+    let args = Args::try_parse_from([
+        "jcode",
+        "broker",
+        "eval-context",
+        "--suite-path",
+        suite_path.as_str(),
+        "--mode",
+        "live-broker",
+        "--no-log",
+    ])
+    .expect("parse eval-context");
+
+    let error = run_main(args)
+        .await
+        .expect_err("missing live broker should fail");
+
+    assert!(
+        format!("{error:#}").contains(&broker_socket.display().to_string()),
+        "error should mention JCODE_BROKER_SOCKET path, got: {error:#}"
+    );
+}
+
 #[cfg(feature = "duckdb-storage")]
 #[test]
 fn broker_ingest_vault_writes_normalized_duckdb_store() {

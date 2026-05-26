@@ -1,4 +1,5 @@
-use crate::protocol::{ClioContextPacketItem, ClioContextPacketV1};
+use crate::protocol::{ClioContextPacketItem, ClioContextPacketV1, ServerEvent};
+use crate::server::Client;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,9 +24,48 @@ struct ContextEvalProbe {
     group: String,
     #[serde(default)]
     description: String,
-    packet: ClioContextPacketV1,
+    #[serde(default = "default_probe_source")]
+    source: ContextEvalProbeSource,
+    #[serde(default)]
+    packet: Option<ClioContextPacketV1>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default = "default_probe_limit")]
+    limit: usize,
+    #[serde(default)]
+    include_provenance: bool,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    working_dir: Option<String>,
     #[serde(default)]
     assertions: Vec<ContextAssertion>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ContextEvalProbeSource {
+    Fixture,
+    LiveBroker,
+}
+
+impl ContextEvalProbeSource {
+    fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fixture" => Ok(Self::Fixture),
+            "live-broker" | "live_broker" => Ok(Self::LiveBroker),
+            other => anyhow::bail!(
+                "unknown context eval mode {other:?}; expected fixture or live-broker"
+            ),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fixture => "fixture",
+            Self::LiveBroker => "live_broker",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,7 +104,9 @@ struct ContextEvalReport {
     suite: String,
     version: u32,
     suite_path: String,
+    mode: String,
     timestamp: String,
+    provider: ContextEvalProviderReport,
     passed: bool,
     pass_rate: f64,
     required_pass_rate: f64,
@@ -90,8 +132,18 @@ struct ContextEvalProbeReport {
     name: String,
     group: String,
     description: String,
+    source: String,
     passed: bool,
     failures: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ContextEvalProviderReport {
+    kind: String,
+    socket_path: Option<String>,
+    working_dirs: Vec<String>,
+    git_hash: String,
+    version: String,
 }
 
 #[derive(Default)]
@@ -104,16 +156,26 @@ fn default_minimum_pass_rate() -> f64 {
     1.0
 }
 
-pub(crate) fn run_context_eval(
+fn default_probe_source() -> ContextEvalProbeSource {
+    ContextEvalProbeSource::Fixture
+}
+
+fn default_probe_limit() -> usize {
+    8
+}
+
+pub(crate) async fn run_context_eval(
     suite: String,
     suite_path: Option<String>,
     json: bool,
+    mode: String,
     log: Option<String>,
     no_log: bool,
 ) -> Result<()> {
+    let mode = ContextEvalProbeSource::parse(&mode)?;
     let suite_path = resolve_suite_path(&suite, suite_path.as_deref())?;
     let suite = load_suite(&suite_path)?;
-    let report = evaluate_suite(suite, &suite_path)?;
+    let report = evaluate_suite(suite, &suite_path, mode).await?;
 
     if !no_log {
         append_run_log(&report, log.as_deref())?;
@@ -163,9 +225,26 @@ fn load_suite(path: &Path) -> Result<ContextEvalSuite> {
         .with_context(|| format!("failed to parse context eval suite {}", path.display()))
 }
 
-fn evaluate_suite(suite: ContextEvalSuite, suite_path: &Path) -> Result<ContextEvalReport> {
+async fn evaluate_suite(
+    suite: ContextEvalSuite,
+    suite_path: &Path,
+    mode: ContextEvalProbeSource,
+) -> Result<ContextEvalReport> {
     if suite.probes.is_empty() {
         anyhow::bail!("context eval suite {} has no probes", suite.name);
+    }
+
+    let selected_probes: Vec<_> = suite
+        .probes
+        .into_iter()
+        .filter(|probe| probe.source == mode)
+        .collect();
+    if selected_probes.is_empty() {
+        anyhow::bail!(
+            "context eval suite {} has no probes for mode {}",
+            suite.name,
+            mode.as_str()
+        );
     }
 
     let required_groups = suite
@@ -173,11 +252,15 @@ fn evaluate_suite(suite: ContextEvalSuite, suite_path: &Path) -> Result<ContextE
         .iter()
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
-    let mut probe_reports = Vec::with_capacity(suite.probes.len());
+    let mut probe_reports = Vec::with_capacity(selected_probes.len());
     let mut groups: BTreeMap<String, GroupAccumulator> = BTreeMap::new();
+    let mut working_dirs = std::collections::BTreeSet::new();
 
-    for probe in suite.probes {
-        let failures = evaluate_probe(&probe)?;
+    for probe in selected_probes {
+        if let Some(working_dir) = &probe.working_dir {
+            working_dirs.insert(working_dir.clone());
+        }
+        let failures = evaluate_probe(&probe, mode).await?;
         let passed = failures.is_empty();
         let group = groups.entry(probe.group.clone()).or_default();
         group.probe_count += 1;
@@ -188,6 +271,7 @@ fn evaluate_suite(suite: ContextEvalSuite, suite_path: &Path) -> Result<ContextE
             name: probe.name,
             group: probe.group,
             description: probe.description,
+            source: probe.source.as_str().to_string(),
             passed,
             failures,
         });
@@ -231,7 +315,16 @@ fn evaluate_suite(suite: ContextEvalSuite, suite_path: &Path) -> Result<ContextE
         suite: suite.name,
         version: suite.version,
         suite_path: suite_path.display().to_string(),
+        mode: mode.as_str().to_string(),
         timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        provider: ContextEvalProviderReport {
+            kind: mode.as_str().to_string(),
+            socket_path: (mode == ContextEvalProbeSource::LiveBroker)
+                .then(|| crate::server::socket_path().display().to_string()),
+            working_dirs: working_dirs.into_iter().collect(),
+            git_hash: env!("JCODE_GIT_HASH").to_string(),
+            version: env!("JCODE_VERSION").to_string(),
+        },
         passed,
         pass_rate,
         required_pass_rate: suite.minimum_pass_rate,
@@ -243,14 +336,88 @@ fn evaluate_suite(suite: ContextEvalSuite, suite_path: &Path) -> Result<ContextE
     })
 }
 
-fn evaluate_probe(probe: &ContextEvalProbe) -> Result<Vec<String>> {
+async fn evaluate_probe(
+    probe: &ContextEvalProbe,
+    mode: ContextEvalProbeSource,
+) -> Result<Vec<String>> {
+    let packet = packet_for_probe(probe, mode).await?;
     let mut failures = Vec::new();
     for assertion in &probe.assertions {
-        if let Err(error) = evaluate_assertion(&probe.packet, assertion) {
+        if let Err(error) = evaluate_assertion(&packet, assertion) {
             failures.push(error);
         }
     }
     Ok(failures)
+}
+
+async fn packet_for_probe(
+    probe: &ContextEvalProbe,
+    mode: ContextEvalProbeSource,
+) -> Result<ClioContextPacketV1> {
+    match mode {
+        ContextEvalProbeSource::Fixture => probe
+            .packet
+            .clone()
+            .with_context(|| format!("fixture probe {} is missing packet", probe.name)),
+        ContextEvalProbeSource::LiveBroker => fetch_live_broker_packet(probe).await,
+    }
+}
+
+async fn fetch_live_broker_packet(probe: &ContextEvalProbe) -> Result<ClioContextPacketV1> {
+    let query = probe
+        .query
+        .as_ref()
+        .map(|query| query.trim())
+        .filter(|query| !query.is_empty())
+        .with_context(|| format!("live broker probe {} is missing query", probe.name))?;
+    let mut client = Client::connect().await.with_context(|| {
+        format!(
+            "failed to connect to broker socket {}",
+            crate::server::socket_path().display()
+        )
+    })?;
+    if probe.working_dir.is_some() || probe.session_id.is_some() {
+        client
+            .subscribe_with_info(
+                probe.working_dir.clone(),
+                None,
+                probe.session_id.clone(),
+                false,
+                false,
+            )
+            .await
+            .with_context(|| format!("failed to subscribe live broker probe {}", probe.name))?;
+    }
+    let event = client
+        .get_broker_context_with_options(
+            probe.session_id.clone(),
+            Some(query.to_string()),
+            probe.limit,
+            probe.include_provenance,
+        )
+        .await
+        .with_context(|| format!("failed live broker context probe {}", probe.name))?;
+    match event {
+        ServerEvent::BrokerContext {
+            packet: Some(packet),
+            ..
+        } => Ok(packet),
+        ServerEvent::BrokerContext { .. } => {
+            anyhow::bail!("live broker probe {} returned no packet", probe.name)
+        }
+        ServerEvent::Error { message, .. } => {
+            anyhow::bail!(
+                "live broker probe {} returned error: {}",
+                probe.name,
+                message
+            )
+        }
+        other => anyhow::bail!(
+            "live broker probe {} returned unexpected event {:?}",
+            probe.name,
+            other
+        ),
+    }
 }
 
 fn evaluate_assertion(
@@ -427,8 +594,9 @@ fn default_log_path(suite: &str) -> Result<PathBuf> {
 
 fn print_human_report(report: &ContextEvalReport) {
     println!(
-        "context eval {}: {} ({}/{} probes, pass_rate={:.2}, required={:.2})",
+        "context eval {} [{}]: {} ({}/{} probes, pass_rate={:.2}, required={:.2})",
         report.suite,
+        report.mode,
         if report.passed { "passed" } else { "failed" },
         report.passed_count,
         report.probe_count,
@@ -437,8 +605,9 @@ fn print_human_report(report: &ContextEvalReport) {
     );
     for probe in &report.probes {
         println!(
-            "- {} [{}]: {}",
+            "- {} [{}:{}]: {}",
             probe.name,
+            probe.source,
             probe.group,
             if probe.passed { "passed" } else { "failed" }
         );
@@ -459,6 +628,18 @@ mod tests {
         assert_eq!(
             get_dotted_value(&value, "metadata.logical_super_session_id"),
             Some(&json!("clio-super-session"))
+        );
+    }
+
+    #[test]
+    fn context_eval_mode_accepts_hyphen_or_underscore() {
+        assert_eq!(
+            ContextEvalProbeSource::parse("live-broker").unwrap(),
+            ContextEvalProbeSource::LiveBroker
+        );
+        assert_eq!(
+            ContextEvalProbeSource::parse("live_broker").unwrap(),
+            ContextEvalProbeSource::LiveBroker
         );
     }
 }

@@ -335,6 +335,37 @@
         {"type": "slot_field_equals", "slot": "authority", "field": "workflow_status", "equals": "active"},
         {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.logical_super_session_id", "contains": "clio-super-session"}
       ]
+    },
+    {
+      "name": "live_broker_current_plan_authority",
+      "group": "authority_conflict",
+      "source": "live_broker",
+      "description": "Live broker socket should retrieve the current canonical plan as authority for lineage/checkpoint state.",
+      "query": "bcb6143bad371ca96b4a58ce4d3cbaa1302ce8c1 deployed CT 1103 first broker-visible lineage checkpoint slice current canonical plan",
+      "limit": 8,
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "assertions": [
+        {"type": "packet_version", "equals": "clio_context_packet_v1"},
+        {"type": "slot_non_empty", "slot": "authority"},
+        {"type": "slot_field_contains", "slot": "authority", "field": "source_path", "contains": "jcode-Nervous-System-Broker-Parity-Plan.md"},
+        {"type": "slot_field_contains", "slot": "authority", "field": "content", "contains": "deployed on CT `1103`"}
+      ]
+    },
+    {
+      "name": "live_broker_lineage_checkpoint",
+      "group": "lineage",
+      "source": "live_broker",
+      "description": "Live broker socket should expose recent logical super-session checkpoints through packet lineage.",
+      "query": "live lineage checkpoint Next action CT1103 logical super-session",
+      "limit": 8,
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "assertions": [
+        {"type": "packet_version", "equals": "clio_context_packet_v1"},
+        {"type": "slot_non_empty", "slot": "lineage"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "kind", "contains": "compression_checkpoint"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.logical_super_session_id", "contains": "clio-super-session"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Next action"}
+      ]
     }
   ]
 }

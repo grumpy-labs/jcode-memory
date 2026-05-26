@@ -55,6 +55,18 @@ fn prepare_server_command_env(args: &Args, mode: ServerCommandMode) {
     }
 }
 
+fn prepare_broker_client_command_env(socket: Option<&str>) {
+    if let Some(socket) = socket {
+        server::set_socket_path(socket);
+    } else if std::env::var_os("JCODE_SOCKET").is_none() {
+        let broker_socket = std::env::var_os("JCODE_BROKER_SOCKET")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| crate::storage::runtime_dir().join("jcode-broker.sock"));
+        let broker_socket = broker_socket.to_string_lossy().to_string();
+        server::set_socket_path(&broker_socket);
+    }
+}
+
 fn use_no_model_broker_provider(args: &Args, mode: ServerCommandMode) -> bool {
     mode == ServerCommandMode::Broker
         && args.provider == ProviderChoice::Auto
@@ -522,10 +534,12 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             suite,
             suite_path,
             json,
+            mode,
             log,
             no_log,
         })) => {
-            context_eval::run_context_eval(suite, suite_path, json, log, no_log)?;
+            prepare_broker_client_command_env(args.socket.as_deref());
+            context_eval::run_context_eval(suite, suite_path, json, mode, log, no_log).await?;
         }
         Some(Command::Connect) => {
             tui_launch::run_client().await?;
