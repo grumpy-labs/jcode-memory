@@ -10,6 +10,7 @@ mod ambient;
 mod binary_integration;
 mod broker_runtime;
 mod burst_spawn;
+mod context_eval;
 mod provider_behavior;
 mod safety;
 mod session_flow;

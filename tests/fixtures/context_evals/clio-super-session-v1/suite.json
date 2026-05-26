@@ -1,0 +1,340 @@
+{
+  "name": "clio-super-session-v1",
+  "version": 1,
+  "minimum_pass_rate": 0.9,
+  "required_groups": ["authority_conflict"],
+  "probes": [
+    {
+      "name": "current_file_precedence",
+      "group": "authority_conflict",
+      "description": "The current canonical plan must outrank stale fork or historical memory.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "authority": [
+          {
+            "id": "vault:current-plan",
+            "kind": "vault_chunk",
+            "scope": "project",
+            "title": "jcode Super-Session Context Broker Plan",
+            "summary": "Current canonical plan controls active implementation.",
+            "source_path": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md",
+            "line_start": 1660,
+            "line_end": 1712,
+            "authority_class": "current_project_authority",
+            "workflow_status": "active",
+            "why_included": "current authority context; class=current_project_authority rank 1"
+          }
+        ],
+        "conflicts": [
+          {
+            "id": "vault:fork-plan",
+            "kind": "vault_chunk",
+            "scope": "project",
+            "title": "jcode Super-Session Context Broker Fork Plan",
+            "summary": "Historical fork preserved as conflict context after adoption.",
+            "source_path": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan-Super-Session-Fork.md",
+            "authority_class": "historical_context",
+            "workflow_status": "historical",
+            "conflict_group": "currentness"
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "packet_version", "equals": "clio_context_packet_v1"},
+        {"type": "slot_non_empty", "slot": "authority"},
+        {"type": "slot_field_contains", "slot": "authority", "field": "source_path", "contains": "jcode-Nervous-System-Broker-Parity-Plan.md"},
+        {"type": "slot_field_equals", "slot": "authority", "field": "workflow_status", "equals": "active"},
+        {"type": "slot_field_contains", "slot": "conflicts", "field": "source_path", "contains": "Super-Session-Fork.md"}
+      ]
+    },
+    {
+      "name": "operating_model_precedence",
+      "group": "authority_conflict",
+      "description": "Context contract authority must beat backend enthusiasm.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "authority": [
+          {
+            "id": "vault:operating-model",
+            "kind": "vault_chunk",
+            "scope": "project",
+            "title": "Clio Context Engineering Operating Model",
+            "summary": "The context contract controls packet slots and source-backed evidence.",
+            "source_path": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/Clio-Context-Engineering-Operating-Model.md",
+            "line_start": 40,
+            "line_end": 89,
+            "authority_class": "current_project_authority",
+            "workflow_status": "active"
+          }
+        ],
+        "tool_hints": [
+          {
+            "id": "tool:jcode_graph",
+            "kind": "tool",
+            "scope": "broker",
+            "title": "jcode_graph",
+            "summary": "Provider implementation detail; not a source of truth.",
+            "authority_class": "procedural_hint"
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_field_contains", "slot": "authority", "field": "source_path", "contains": "Clio-Context-Engineering-Operating-Model.md"},
+        {"type": "slot_field_equals", "slot": "authority", "field": "authority_class", "equals": "current_project_authority"},
+        {"type": "slot_forbids_field_contains", "slot": "authority", "field": "summary", "contains": "DuckDB is the goal"}
+      ]
+    },
+    {
+      "name": "artifact_trail_preservation",
+      "group": "lineage",
+      "description": "Compression/checkpoint context preserves paths, commands, failures, decisions, and next actions.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "lineage": [
+          {
+            "id": "checkpoint:2026-05-25-packet-deploy",
+            "kind": "compression_checkpoint",
+            "scope": "logical_super_session",
+            "title": "Packet deploy checkpoint",
+            "summary": "Decision: keep jcode with gates. Command: scripts/deploy_jcode_memory.py --target ct1103 --allow-unpushed --apply. Failure: missing embeddings feature. Next action: run eval probes.",
+            "source_path": "/Users/rob/Vault/System/Clio/Session-Summaries/2026-05-25-packet-deploy.md",
+            "metadata": {"logical_super_session_id": "clio-super-session"}
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_non_empty", "slot": "lineage"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "summary", "contains": "scripts/deploy_jcode_memory.py"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "summary", "contains": "missing embeddings feature"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.logical_super_session_id", "contains": "clio-super-session"}
+      ]
+    },
+    {
+      "name": "broker_provenance",
+      "group": "provenance",
+      "description": "Every retrieved context item must name a source note/session/span.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "vault_evidence": [
+          {
+            "id": "vault:source-span",
+            "kind": "vault_chunk",
+            "scope": "project",
+            "title": "Source-backed paragraph",
+            "summary": "Exact source span for a broker decision.",
+            "source_path": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md",
+            "line_start": 1718,
+            "line_end": 1732,
+            "authority_class": "source_evidence",
+            "relevance": {"retrieval_mode": "duckdb_broker_store", "rank": 1, "exact_match": true}
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_field_contains", "slot": "vault_evidence", "field": "source_path", "contains": "/Users/rob/Vault/"},
+        {"type": "slot_field_equals", "slot": "vault_evidence", "field": "line_start", "equals": 1718},
+        {"type": "slot_field_equals", "slot": "vault_evidence", "field": "relevance.exact_match", "equals": true}
+      ]
+    },
+    {
+      "name": "conflict_surfacing",
+      "group": "authority_conflict",
+      "description": "Clio should name disagreement instead of silently choosing old context.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "authority": [
+          {
+            "id": "vault:current",
+            "kind": "vault_chunk",
+            "scope": "project",
+            "title": "CURRENT.md",
+            "summary": "Current authority says packet spine is live.",
+            "source_path": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md",
+            "authority_class": "current_project_authority",
+            "workflow_status": "active"
+          }
+        ],
+        "conflicts": [
+          {
+            "id": "memory:stale-honcho",
+            "kind": "memory",
+            "scope": "global",
+            "title": "Stale Honcho note",
+            "summary": "Older memory says Honcho provider is the main context path.",
+            "source_path": "/Users/rob/.openclaw/workspace/MEMORY.md",
+            "authority_class": "historical_context",
+            "workflow_status": "historical",
+            "conflict_group": "currentness"
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_non_empty", "slot": "conflicts"},
+        {"type": "slot_field_equals", "slot": "conflicts", "field": "conflict_group", "equals": "currentness"},
+        {"type": "slot_field_contains", "slot": "conflicts", "field": "summary", "contains": "Older memory"}
+      ]
+    },
+    {
+      "name": "retrieval_scope_exact",
+      "group": "retrieval",
+      "description": "Exact text recall should use exact source spans and avoid unrelated historical distractors.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "vault_evidence": [
+          {
+            "id": "vault:exact-recall",
+            "kind": "vault_chunk",
+            "scope": "project",
+            "title": "Locked exact recall",
+            "summary": "Exact text uses the source span, not a broad memory summary.",
+            "source_path": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md",
+            "line_start": 188,
+            "line_end": 196,
+            "relevance": {"retrieval_mode": "duckdb_broker_store", "rank": 1, "exact_match": true}
+          }
+        ],
+        "durable_memory": [
+          {
+            "id": "memory:preference",
+            "kind": "memory",
+            "scope": "global",
+            "summary": "Rob prefers durable project files for continuity.",
+            "authority_class": "durable_memory"
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_field_equals", "slot": "vault_evidence", "field": "relevance.exact_match", "equals": true},
+        {"type": "slot_field_contains", "slot": "vault_evidence", "field": "source_path", "contains": "jcode-Nervous-System-Broker-Parity-Plan.md"},
+        {"type": "slot_forbids_field_contains", "slot": "durable_memory", "field": "summary", "contains": "OpenClaw is current"}
+      ]
+    },
+    {
+      "name": "tool_output_masking",
+      "group": "budget",
+      "description": "Bulky tool output should stay behind references, not become normal prompt sludge.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "artifact_refs": [
+          {
+            "id": "artifact:deploy-log",
+            "kind": "side_panel",
+            "scope": "session",
+            "title": "Deploy log",
+            "summary": "Full log stored as an artifact reference; packet carries only the pointer and outcome.",
+            "source_path": "/Users/rob/.local/state/clio/context-evals/clio-super-session-v1/runs.jsonl",
+            "content": "artifact_ref:deploy-log-20260525"
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_non_empty", "slot": "artifact_refs"},
+        {"type": "slot_field_max_chars", "slot": "artifact_refs", "field": "content", "max_chars": 80},
+        {"type": "slot_forbids_field_contains", "slot": "artifact_refs", "field": "content", "contains": "Total output lines:"}
+      ]
+    },
+    {
+      "name": "skill_routing",
+      "group": "routing",
+      "description": "Context questions should load skill hints without dumping the entire skill corpus.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "skill_hints": [
+          {
+            "id": "skill:context-engineering-collection",
+            "kind": "skill",
+            "scope": "project",
+            "title": "context-engineering-collection",
+            "summary": "Collection-level map for context, memory, harness, and evaluation work.",
+            "source_path": "/Users/rob/.codex/skills/context-engineering-collection/SKILL.md",
+            "authority_class": "procedural_hint"
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_non_empty", "slot": "skill_hints"},
+        {"type": "slot_field_contains", "slot": "skill_hints", "field": "title", "contains": "context-engineering-collection"},
+        {"type": "slot_field_max_chars", "slot": "skill_hints", "field": "summary", "max_chars": 160}
+      ]
+    },
+    {
+      "name": "super_session_lineage",
+      "group": "lineage",
+      "description": "Compressed/resumed work should retrieve prior task state through logical lineage.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "active_task": [
+          {
+            "id": "goal:super-session-plan",
+            "kind": "goal",
+            "scope": "logical_super_session",
+            "title": "Complete Super-session fork plan",
+            "summary": "Continue implementing the approved super-session context and memory system.",
+            "metadata": {"logical_super_session_id": "clio-super-session"}
+          }
+        ],
+        "lineage": [
+          {
+            "id": "lineage:resume",
+            "kind": "lineage",
+            "scope": "logical_super_session",
+            "title": "Resume lineage",
+            "summary": "Search logical lineage before broad historical session search.",
+            "metadata": {"logical_super_session_id": "clio-super-session", "resume_of": "019e5a7c-19fc-7cf3-a50b-5530c64b0697"}
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_field_contains", "slot": "active_task", "field": "metadata.logical_super_session_id", "contains": "clio-super-session"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.resume_of", "contains": "019e5a7c"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "summary", "contains": "Search logical lineage"}
+      ]
+    },
+    {
+      "name": "provider_gate",
+      "group": "provider_gate",
+      "description": "The incumbent provider must satisfy authority, conflict, provenance, routing, budget, and lineage gates.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "authority": [
+          {
+            "id": "vault:gate-authority",
+            "kind": "vault_chunk",
+            "scope": "project",
+            "title": "Provider gate authority",
+            "summary": "jcode_graph remains incumbent only while the context contract passes.",
+            "source_path": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md",
+            "authority_class": "current_project_authority",
+            "workflow_status": "active"
+          }
+        ],
+        "conflicts": [
+          {
+            "id": "vault:gate-conflict",
+            "kind": "vault_chunk",
+            "scope": "project",
+            "summary": "Historical fork is conflict context, not current authority.",
+            "source_path": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan-Super-Session-Fork.md",
+            "conflict_group": "currentness"
+          }
+        ],
+        "lineage": [
+          {
+            "id": "lineage:gate",
+            "kind": "compression_checkpoint",
+            "scope": "logical_super_session",
+            "summary": "Gate run belongs to clio-super-session.",
+            "metadata": {"logical_super_session_id": "clio-super-session"}
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_non_empty", "slot": "authority"},
+        {"type": "slot_non_empty", "slot": "conflicts"},
+        {"type": "slot_non_empty", "slot": "lineage"},
+        {"type": "slot_field_equals", "slot": "authority", "field": "workflow_status", "equals": "active"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.logical_super_session_id", "contains": "clio-super-session"}
+      ]
+    }
+  ]
+}

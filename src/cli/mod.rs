@@ -1,6 +1,7 @@
 pub mod args;
 pub mod auth_test;
 pub mod commands;
+pub mod context_eval;
 pub mod debug;
 pub mod dispatch;
 pub mod hot_exec;

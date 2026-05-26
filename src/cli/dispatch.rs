@@ -19,6 +19,7 @@ use crate::{
 };
 
 use super::{commands, debug, login, output, provider_init, selfdev, terminal, tui_launch};
+use crate::cli::context_eval;
 use provider_init::ProviderChoice;
 
 const BROKER_TOOL_PROFILE: &str = "broker";
@@ -516,6 +517,15 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             json,
         })) => {
             run_broker_query_vault(db, query, limit, semantic, model, json)?;
+        }
+        Some(Command::Broker(BrokerCommand::EvalContext {
+            suite,
+            suite_path,
+            json,
+            log,
+            no_log,
+        })) => {
+            context_eval::run_context_eval(suite, suite_path, json, log, no_log)?;
         }
         Some(Command::Connect) => {
             tui_launch::run_client().await?;

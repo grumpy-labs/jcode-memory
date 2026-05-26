@@ -463,6 +463,29 @@ pub(crate) enum BrokerCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Run locked context-contract probes for broker packet quality gates
+    EvalContext {
+        /// Named locked suite under tests/fixtures/context_evals/<suite>/suite.json
+        #[arg(long, default_value = "clio-super-session-v1")]
+        suite: String,
+
+        /// Explicit suite JSON path
+        #[arg(long)]
+        suite_path: Option<String>,
+
+        /// Emit JSON report
+        #[arg(long)]
+        json: bool,
+
+        /// Append a JSONL run record to this file. Defaults to ~/.local/state/clio/context-evals/<suite>/runs.jsonl.
+        #[arg(long)]
+        log: Option<String>,
+
+        /// Do not write a JSONL run record
+        #[arg(long)]
+        no_log: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
