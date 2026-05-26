@@ -92,6 +92,14 @@ class DeployJcodeMemoryTests(unittest.TestCase):
         self.assertIn("/usr/local/bin/jcode-memory-broker", apply_rendered)
         self.assertIn("systemctl restart hermes-jcode-broker.service", apply_rendered)
 
+    def test_use_local_binary_is_alias_for_ct1103_prebuilt_binary(self):
+        deploy = load_deploy_module()
+        prebuilt = "/tmp/jcode-linux-x86_64"
+
+        args = deploy.parse_args(["--target", "ct1103", "--use-local-binary", prebuilt])
+
+        self.assertEqual(args.ct1103_prebuilt_binary, prebuilt)
+
     def test_ct1150_plan_stages_compiles_installs_and_restarts_gateway_only_on_apply(self):
         deploy = load_deploy_module()
         sha = "589b2a3144d5b18a3044af3f103cad9b6112a629"

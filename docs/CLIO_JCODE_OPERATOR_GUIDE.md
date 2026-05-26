@@ -187,9 +187,12 @@ CT `1103` Cargo build again:
 ```bash
 scripts/deploy_jcode_memory.py \
   --target ct1103 \
-  --ct1103-prebuilt-binary /absolute/path/to/jcode-linux-x86_64 \
+  --use-local-binary /absolute/path/to/jcode-linux-x86_64 \
   --allow-unpushed
 ```
+
+`--use-local-binary` is the short operator alias for
+`--ct1103-prebuilt-binary`.
 
 Only add `--apply` after reading the plan and confirming the SHA/binary pair.
 This is an inner-loop speed lane, not a reason to skip the post-deploy live

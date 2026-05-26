@@ -49,7 +49,7 @@ stronger or warmer build host, CT `1103` can skip its target-side Cargo build:
 ```bash
 scripts/deploy_jcode_memory.py \
   --target ct1103 \
-  --ct1103-prebuilt-binary /absolute/path/to/jcode-linux-x86_64 \
+  --use-local-binary /absolute/path/to/jcode-linux-x86_64 \
   --allow-unpushed
 ```
 
@@ -58,6 +58,10 @@ release directory, verifies `jcode --version` contains the target commit hash
 on CT `1103`, and only installs it with `--apply`. Use this lane only after
 focused local/remote build checks have already proven the binary for the commit
 being deployed.
+
+`--use-local-binary` is an operator-friendly alias for
+`--ct1103-prebuilt-binary`; both flags feed the same guarded prebuilt-binary
+deploy path.
 
 Production embeddings remain `mxbai-embed-large:latest`. Do not change the
 embedding model or mix embeddings from different models in the same production

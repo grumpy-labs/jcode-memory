@@ -341,7 +341,7 @@ def build_plan(
         else:
             prebuilt = Path(ct1103_prebuilt_binary).expanduser()
             if not prebuilt.is_absolute():
-                raise ValueError("--ct1103-prebuilt-binary must be an absolute path")
+                raise ValueError("--ct1103-prebuilt-binary/--use-local-binary must be an absolute path")
             release_dir = f"{CT1103_RELEASE_ROOT}/{sha}"
             steps.extend(
                 _ct1103_steps_for_binary(
@@ -418,6 +418,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--proxmox-host", default=DEFAULT_PROXMOX_HOST)
     parser.add_argument(
         "--ct1103-prebuilt-binary",
+        "--use-local-binary",
+        dest="ct1103_prebuilt_binary",
         help=(
             "Absolute path to a prebuilt Linux-compatible jcode broker binary. "
             "When set for a ct1103 deploy, the script uploads and verifies this "
