@@ -487,6 +487,43 @@
       ]
     },
     {
+      "name": "live_broker_exact_ghostty_heading",
+      "group": "retrieval",
+      "source": "live_broker",
+      "description": "Live broker socket should preserve the Ghostty exact-heading/source-span regression baseline.",
+      "query": "Advanced Tips: Make Ghostty Even Better",
+      "limit": 8,
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "assertions": [
+        {"type": "packet_version", "equals": "clio_context_packet_v1"},
+        {"type": "slot_non_empty", "slot": "authority"},
+        {"type": "slot_first_field_contains", "slot": "authority", "field": "source_path", "contains": "Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off.md"},
+        {"type": "slot_first_field_equals", "slot": "authority", "field": "line_start", "equals": 199},
+        {"type": "slot_first_field_equals", "slot": "authority", "field": "line_end", "equals": 200},
+        {"type": "slot_first_field_equals", "slot": "authority", "field": "relevance.rank", "equals": 1},
+        {"type": "slot_first_field_equals", "slot": "authority", "field": "relevance.retrieval_mode", "equals": "duckdb_broker_store"},
+        {"type": "slot_first_field_equals", "slot": "authority", "field": "relevance.exact_match", "equals": true}
+      ]
+    },
+    {
+      "name": "live_broker_current_relationship_neighborhood",
+      "group": "retrieval",
+      "source": "live_broker",
+      "description": "Live broker socket should expose relationship-neighborhood rows for the current project CURRENT.md without hiding stale OpenClaw backlinks.",
+      "query": "What links or backlinks relate to Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md?",
+      "limit": 12,
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "assertions": [
+        {"type": "packet_version", "equals": "clio_context_packet_v1"},
+        {"type": "slot_non_empty", "slot": "authority"},
+        {"type": "slot_first_field_equals", "slot": "authority", "field": "kind", "equals": "vault_relationship"},
+        {"type": "slot_first_field_equals", "slot": "authority", "field": "metadata.relationship", "equals": "backlink"},
+        {"type": "slot_first_field_equals", "slot": "authority", "field": "metadata.target_path", "equals": "Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md"},
+        {"type": "slot_first_field_equals", "slot": "authority", "field": "relevance.retrieval_mode", "equals": "duckdb_broker_store_relationship"},
+        {"type": "slot_field_contains", "slot": "conflicts", "field": "source_path", "contains": "Projects/OpenClaw-Stack/CURRENT.md"}
+      ]
+    },
+    {
       "name": "installed_provider_current_plan_authority",
       "group": "authority_conflict",
       "source": "installed_provider",
