@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1055,10 +1056,19 @@ fn default_log_path(suite: &str) -> Result<PathBuf> {
 }
 
 fn print_human_report(report: &ContextEvalReport) {
-    println!(
-        "context eval {} [{}]: {} ({}/{} probes, pass_rate={:.2}, required={:.2}, duration_ms={})",
-        report.suite,
-        report.mode,
+    print!("{}", human_report(report));
+}
+
+fn human_report(report: &ContextEvalReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        &mut out,
+        "context eval review: {} [{}]",
+        report.suite, report.mode
+    );
+    let _ = writeln!(
+        &mut out,
+        "Outcome: {} ({}/{} probes, pass_rate={:.2}, required={:.2}, duration_ms={})",
         if report.passed { "passed" } else { "failed" },
         report.passed_count,
         report.probe_count,
@@ -1066,20 +1076,119 @@ fn print_human_report(report: &ContextEvalReport) {
         report.required_pass_rate,
         report.duration_ms
     );
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "Provider/config under test");
+    let _ = writeln!(&mut out, "- kind: {}", report.provider.kind);
+    let _ = writeln!(&mut out, "- version: {}", report.provider.version);
+    let _ = writeln!(&mut out, "- git_hash: {}", report.provider.git_hash);
+    let _ = writeln!(
+        &mut out,
+        "- socket: {}",
+        report.provider.socket_path.as_deref().unwrap_or("n/a")
+    );
+    let _ = writeln!(
+        &mut out,
+        "- working_dirs: {}",
+        if report.provider.working_dirs.is_empty() {
+            "[]".to_string()
+        } else {
+            report.provider.working_dirs.join(", ")
+        }
+    );
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "Probe pass/fail table");
     for probe in &report.probes {
-        println!(
-            "- {} [{}:{}]: {} (duration_ms={}, packet_items={}, packet_chars={})",
+        let _ = writeln!(
+            &mut out,
+            "- {} {:<7} group={} duration_ms={} packet_items={} packet_chars={}",
+            if probe.passed { "PASS" } else { "FAIL" },
             probe.name,
-            probe.source,
             probe.group,
-            if probe.passed { "passed" } else { "failed" },
             probe.duration_ms,
             probe.packet_budget.total_items,
             probe.packet_budget.serialized_chars
         );
-        for failure in &probe.failures {
-            println!("  - {failure}");
+    }
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "Top failures");
+    let failed: Vec<_> = report.probes.iter().filter(|probe| !probe.passed).collect();
+    if failed.is_empty() {
+        let _ = writeln!(&mut out, "- none");
+    } else {
+        for probe in failed.into_iter().take(5) {
+            let first_failure = probe
+                .failures
+                .first()
+                .map(String::as_str)
+                .unwrap_or("probe failed without detailed failure text");
+            let _ = writeln!(
+                &mut out,
+                "- {} [{}]: {} ({})",
+                probe.name,
+                probe.group,
+                first_failure,
+                classify_failure(first_failure)
+            );
         }
+    }
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "Recommendation");
+    let _ = writeln!(&mut out, "- {}", review_recommendation(report));
+    out
+}
+
+fn classify_failure(failure: &str) -> &'static str {
+    if failure.contains("max_duration_ms") {
+        "latency_or_ux"
+    } else if failure.contains("max_total_items")
+        || failure.contains("max_serialized_chars")
+        || failure.contains("max_slot_items")
+        || failure.contains("max_slot_serialized_chars")
+    {
+        "budget_or_rendering"
+    } else if failure.contains("source_path")
+        || failure.contains("line_start")
+        || failure.contains("line_end")
+        || failure.contains("span")
+        || failure.contains("provenance")
+    {
+        "source_trace_or_retrieval"
+    } else if failure.contains("json field")
+        || failure.contains("prefetch")
+        || failure.contains("installed-provider")
+    {
+        "provider_adapter_or_rendering"
+    } else if failure.contains("slot") || failure.contains("packet version") {
+        "context_contract_structure"
+    } else {
+        "provider_or_probe"
+    }
+}
+
+fn review_recommendation(report: &ContextEvalReport) -> &'static str {
+    if report.passed {
+        return "continue with jcode as incumbent for this mode; no remediation needed.";
+    }
+    let required_group_failed = report
+        .group_results
+        .values()
+        .any(|group| group.required && !group.passed);
+    let classes = report
+        .probes
+        .iter()
+        .flat_map(|probe| probe.failures.iter())
+        .map(|failure| classify_failure(failure))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    if required_group_failed
+        || classes.contains("source_trace_or_retrieval")
+        || classes.contains("context_contract_structure")
+    {
+        "run one focused jcode remediation pass before deeper investment; if the same gate repeats, start the provider bake-off."
+    } else if classes.contains("latency_or_ux") || classes.contains("budget_or_rendering") {
+        "treat this as blocking UX/context-budget work before adoption; remediate once, then rerun the locked suite."
+    } else {
+        "review whether this is a provider bug or bad probe; update the probe only with a progress-log note."
     }
 }
 
@@ -1243,5 +1352,83 @@ mod tests {
                 "probe \"budget_probe\" slot \"authority\" serialized 1201 chars, over max_slot_serialized_chars 1200".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn human_report_includes_review_sections_and_failure_classification() {
+        let report = ContextEvalReport {
+            suite: "clio-super-session-v1".to_string(),
+            version: 1,
+            suite_path: "/tmp/suite.json".to_string(),
+            mode: "live_broker".to_string(),
+            timestamp: "2026-05-26T00:00:00Z".to_string(),
+            duration_ms: 123,
+            provider: ContextEvalProviderReport {
+                kind: "live_broker".to_string(),
+                socket_path: Some("/tmp/jcode.sock".to_string()),
+                working_dirs: vec!["/tmp/project".to_string()],
+                git_hash: "abc12345".to_string(),
+                version: "v0.test".to_string(),
+            },
+            passed: false,
+            pass_rate: 0.5,
+            required_pass_rate: 0.9,
+            probe_count: 2,
+            passed_count: 1,
+            failed_count: 1,
+            group_results: BTreeMap::from([(
+                "latency".to_string(),
+                ContextEvalGroupReport {
+                    passed: false,
+                    required: false,
+                    pass_rate: 0.0,
+                    probe_count: 1,
+                    passed_count: 0,
+                    failed_count: 1,
+                },
+            )]),
+            probes: vec![
+                ContextEvalProbeReport {
+                    name: "fast_probe".to_string(),
+                    group: "lineage".to_string(),
+                    description: "Fast path".to_string(),
+                    source: "live_broker".to_string(),
+                    duration_ms: 10,
+                    packet_budget: ContextPacketBudgetReport {
+                        total_items: 1,
+                        serialized_chars: 100,
+                        slot_item_counts: BTreeMap::new(),
+                        slot_serialized_chars: BTreeMap::new(),
+                    },
+                    passed: true,
+                    failures: Vec::new(),
+                },
+                ContextEvalProbeReport {
+                    name: "slow_probe".to_string(),
+                    group: "latency".to_string(),
+                    description: "Slow path".to_string(),
+                    source: "live_broker".to_string(),
+                    duration_ms: 101,
+                    packet_budget: ContextPacketBudgetReport {
+                        total_items: 2,
+                        serialized_chars: 200,
+                        slot_item_counts: BTreeMap::new(),
+                        slot_serialized_chars: BTreeMap::new(),
+                    },
+                    passed: false,
+                    failures: vec![
+                        "probe \"slow_probe\" took 101ms, over max_duration_ms 100".to_string(),
+                    ],
+                },
+            ],
+        };
+
+        let rendered = human_report(&report);
+
+        assert!(rendered.contains("Provider/config under test"));
+        assert!(rendered.contains("Probe pass/fail table"));
+        assert!(rendered.contains("Top failures"));
+        assert!(rendered.contains("latency_or_ux"));
+        assert!(rendered.contains("Recommendation"));
     }
 }
