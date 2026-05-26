@@ -458,6 +458,9 @@
         {"type": "packet_version", "equals": "clio_context_packet_v1"},
         {"type": "slot_non_empty", "slot": "authority"},
         {"type": "slot_field_contains", "slot": "authority", "field": "source_path", "contains": "jcode-Nervous-System-Broker-Parity-Plan.md"},
+        {"type": "slot_field_equals", "slot": "authority", "field": "workflow_status", "equals": "active"},
+        {"type": "slot_field_contains", "slot": "authority", "field": "metadata.frontmatter_json", "contains": "workflow_status"},
+        {"type": "slot_field_contains", "slot": "authority", "field": "metadata.frontmatter_json", "contains": "dateModified"},
         {"type": "slot_field_contains", "slot": "authority", "field": "content", "contains": "deployed on CT `1103`"}
       ]
     },
@@ -571,6 +574,10 @@
       "assertions": [
         {"type": "json_field_equals", "field": "prefetch_has_context", "equals": true},
         {"type": "json_field_contains", "field": "prefetch", "contains": "jcode-Nervous-System-Broker-Parity-Plan.md"},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "status=active"},
+        {"type": "json_field_contains", "field": "tool_items.0.source_path", "contains": "jcode-Nervous-System-Broker-Parity-Plan.md"},
+        {"type": "json_field_contains", "field": "tool_items.0.metadata.frontmatter_json", "contains": "workflow_status"},
+        {"type": "json_field_contains", "field": "tool_items.0.metadata.frontmatter_json", "contains": "dateModified"},
         {"type": "json_field_equals", "field": "default_prefetch_has_raw_provenance", "equals": false},
         {"type": "json_field_equals", "field": "tool_event_type", "equals": "broker_context"},
         {"type": "json_field_min", "field": "tool_item_count", "min": 1}
