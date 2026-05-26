@@ -91,9 +91,20 @@ def main() -> int:
             "jcode_broker_context",
             {"query": args.query, "limit": args.limit},
         )
+        raw_terms = [
+            term
+            for term in (
+                args.sync_user,
+                args.sync_assistant,
+                args.transcript_user,
+                args.transcript_assistant,
+            )
+            if term
+        ]
+        provenance_query = _provenance_query(args.query, raw_terms=raw_terms)
         provenance_payload = provider.handle_tool_call(
             "jcode_broker_context",
-            {"query": args.query, "limit": args.limit, "include_provenance": True},
+            {"query": provenance_query, "limit": args.limit, "include_provenance": True},
         )
         diagnostics = _diagnostics(provider)
     finally:
@@ -106,16 +117,6 @@ def main() -> int:
         item
         for item in (provenance_tool.get("items") or [])
         if isinstance(item, dict) and _is_provenance_item(item)
-    ]
-    raw_terms = [
-        term
-        for term in (
-            args.sync_user,
-            args.sync_assistant,
-            args.transcript_user,
-            args.transcript_assistant,
-        )
-        if term
     ]
     provenance_blob = json.dumps(provenance_items, sort_keys=True)
     result = {
@@ -133,6 +134,7 @@ def main() -> int:
         ],
         "tool_item_count": len(items),
         "provenance_tool_event_type": provenance_tool.get("type"),
+        "provenance_tool_query": provenance_query,
         "provenance_tool_item_count": len(provenance_tool.get("items") or []),
         "provenance_tool_provenance_count": len(provenance_items),
         "provenance_tool_memory_contents": [
@@ -219,6 +221,14 @@ def _messages(user: str | None, assistant: str | None) -> list[dict[str, str]]:
     if assistant:
         messages.append({"role": "assistant", "content": assistant})
     return messages
+
+
+def _provenance_query(default_query: str, *, raw_terms: list[str]) -> str:
+    """Use the synced marker itself when proving hidden provenance retrieval."""
+    for term in raw_terms:
+        if term.strip():
+            return term.strip()
+    return default_query
 
 
 def _diagnostics(provider) -> dict:

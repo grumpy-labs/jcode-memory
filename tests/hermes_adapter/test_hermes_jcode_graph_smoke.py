@@ -22,6 +22,16 @@ def load_smoke_module():
 
 
 class HermesJcodeGraphSmokeTests(unittest.TestCase):
+    def test_provenance_query_prefers_synced_raw_term(self) -> None:
+        smoke = load_smoke_module()
+
+        query = smoke._provenance_query(
+            "Clio current context packet provider gate",
+            raw_terms=["unique synced smoke marker"],
+        )
+
+        self.assertEqual(query, "unique synced smoke marker")
+
     def test_derived_store_proof_finds_live_sidecar_memories(self) -> None:
         smoke = load_smoke_module()
         with tempfile.TemporaryDirectory() as temp_dir:
