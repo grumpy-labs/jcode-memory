@@ -94,6 +94,23 @@ The smoke output should show:
 - `provenance_tool_contains_synced_text: true`
 - non-zero `turn_sync_count` and `transcript_sync_count` diagnostics
 
+For the non-Vault restraint gate, use an ordinary prompt for `--query`, a
+context-bearing prompt for `--tool-query`, and `--expect-no-prefetch`. This
+passes only when normal prefetch injects no context while the explicit
+`jcode_broker_context` tool still reaches the broker:
+
+```bash
+HERMES_HOME="$HOME/.hermes" \
+HERMES_AGENT_REPO="$HOME/.hermes/hermes-agent" \
+JCODE_BROKER_SOCKET="$HOME/.jcode-memory/runtime/jcode-broker.sock" \
+"$HOME/.hermes/hermes-agent/.venv/bin/python" scripts/hermes_jcode_graph_smoke.py \
+  --working-dir "$HOME/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain" \
+  --query "Answer in one concise sentence: what makes a cup of tea relaxing?" \
+  --tool-query "Clio current context packet provider gate" \
+  --expect-no-prefetch \
+  --json
+```
+
 Not implemented yet:
 
 - Graph database persistence.

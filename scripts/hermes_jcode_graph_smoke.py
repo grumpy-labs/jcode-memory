@@ -37,6 +37,18 @@ def main() -> int:
     parser.add_argument("--socket", help="jcode broker socket path")
     parser.add_argument("--working-dir", default=os.getcwd())
     parser.add_argument("--session-id", default="hermes_jcode_graph_smoke")
+    parser.add_argument(
+        "--tool-query",
+        help="Optional explicit jcode_broker_context query; defaults to --query.",
+    )
+    parser.add_argument(
+        "--expect-no-prefetch",
+        action="store_true",
+        help=(
+            "Pass only when normal provider prefetch injects no context while the "
+            "explicit broker tool remains available."
+        ),
+    )
     parser.add_argument("--sync-user", help="Optional user turn to sync before prefetch")
     parser.add_argument("--sync-assistant", help="Optional assistant turn to sync before prefetch")
     parser.add_argument("--transcript-user", help="Optional user message for transcript hooks")
@@ -87,9 +99,11 @@ def main() -> int:
             provider.on_session_end(transcript_messages)
 
         text = provider.prefetch(args.query, session_id=args.session_id)
+        prefetch_diagnostics = _diagnostics(provider)
+        tool_query = args.tool_query or args.query
         tool_payload = provider.handle_tool_call(
             "jcode_broker_context",
-            {"query": args.query, "limit": args.limit},
+            {"query": tool_query, "limit": args.limit},
         )
         raw_terms = [
             term
@@ -101,7 +115,7 @@ def main() -> int:
             )
             if term
         ]
-        provenance_query = _provenance_query(args.query, raw_terms=raw_terms)
+        provenance_query = _provenance_query(tool_query, raw_terms=raw_terms)
         provenance_payload = provider.handle_tool_call(
             "jcode_broker_context",
             {"query": provenance_query, "limit": args.limit, "include_provenance": True},
@@ -124,8 +138,10 @@ def main() -> int:
         "prefetch_has_context": bool(text.strip()),
         "prefetch_chars": len(text),
         "prefetch": text,
+        "prefetch_diagnostics": prefetch_diagnostics,
         "default_prefetch_has_raw_provenance": any(term in text for term in raw_terms),
         "tool_event_type": tool.get("type"),
+        "tool_query": tool_query,
         "tool_item_kinds": [item.get("kind") for item in items if isinstance(item, dict)],
         "tool_memory_contents": [
             item.get("content")
@@ -160,11 +176,13 @@ def main() -> int:
         print(f"provider: {result['provider']}")
         print(f"prefetch_has_context: {result['prefetch_has_context']}")
         print(f"prefetch_chars: {result['prefetch_chars']}")
+        print(f"expect_no_prefetch: {args.expect_no_prefetch}")
         print(
             "default_prefetch_has_raw_provenance: "
             f"{result['default_prefetch_has_raw_provenance']}"
         )
         print(f"tool_event_type: {result['tool_event_type']}")
+        print(f"tool_query: {result['tool_query']}")
         print(f"tool_item_kinds: {', '.join(result['tool_item_kinds'])}")
         print(f"provenance_tool_event_type: {result['provenance_tool_event_type']}")
         print(f"provenance_tool_item_count: {result['provenance_tool_item_count']}")
@@ -185,33 +203,7 @@ def main() -> int:
             print()
             print(text)
 
-    success = bool(result["prefetch_has_context"] and result["tool_item_count"])
-    if args.sync_user or args.sync_assistant:
-        success = success and diagnostics.get("turn_sync_count", 0) >= 1
-    if args.transcript_user or args.transcript_assistant:
-        success = success and diagnostics.get("transcript_sync_count", 0) >= 2
-    if args.require_derived_store_proof:
-        proof = result["derived_store_proof"]
-        success = (
-            success
-            and proof["hidden_provenance_count"] > 0
-            and proof["derived_memory_count"] > 0
-            and proof["derived_from_edge_count"] > 0
-            and proof["hidden_provenance_contains_synced_text"]
-        )
-    if raw_terms:
-        provenance_proved = result["provenance_tool_contains_synced_text"]
-        if args.require_derived_store_proof:
-            provenance_proved = (
-                provenance_proved
-                or result["derived_store_proof"]["hidden_provenance_contains_synced_text"]
-            )
-        success = (
-            success
-            and not result["default_prefetch_has_raw_provenance"]
-            and provenance_proved
-        )
-    return 0 if success else 1
+    return 0 if _smoke_success(result, args) else 1
 
 
 def _messages(user: str | None, assistant: str | None) -> list[dict[str, str]]:
@@ -229,6 +221,50 @@ def _provenance_query(default_query: str, *, raw_terms: list[str]) -> str:
         if term.strip():
             return term.strip()
     return default_query
+
+
+def _smoke_success(result: dict[str, Any], args: argparse.Namespace) -> bool:
+    diagnostics = result.get("diagnostics") or {}
+    prefetch_diagnostics = result.get("prefetch_diagnostics") or diagnostics
+    if getattr(args, "expect_no_prefetch", False):
+        success = bool(
+            not result.get("prefetch_has_context")
+            and int(result.get("prefetch_chars") or 0) == 0
+            and int(prefetch_diagnostics.get("last_prefetch_item_count") or 0) == 0
+            and result.get("tool_event_type") == "broker_context"
+            and int(result.get("tool_item_count") or 0) > 0
+        )
+    else:
+        success = bool(result.get("prefetch_has_context") and result.get("tool_item_count"))
+
+    if getattr(args, "sync_user", None) or getattr(args, "sync_assistant", None):
+        success = success and diagnostics.get("turn_sync_count", 0) >= 1
+    if getattr(args, "transcript_user", None) or getattr(args, "transcript_assistant", None):
+        success = success and diagnostics.get("transcript_sync_count", 0) >= 2
+    if getattr(args, "require_derived_store_proof", False):
+        proof = result["derived_store_proof"]
+        success = (
+            success
+            and proof["hidden_provenance_count"] > 0
+            and proof["derived_memory_count"] > 0
+            and proof["derived_from_edge_count"] > 0
+            and proof["hidden_provenance_contains_synced_text"]
+        )
+
+    raw_terms = result.get("raw_terms_checked") or []
+    if raw_terms:
+        provenance_proved = result["provenance_tool_contains_synced_text"]
+        if getattr(args, "require_derived_store_proof", False):
+            provenance_proved = (
+                provenance_proved
+                or result["derived_store_proof"]["hidden_provenance_contains_synced_text"]
+            )
+        success = (
+            success
+            and not result["default_prefetch_has_raw_provenance"]
+            and provenance_proved
+        )
+    return success
 
 
 def _diagnostics(provider) -> dict:
