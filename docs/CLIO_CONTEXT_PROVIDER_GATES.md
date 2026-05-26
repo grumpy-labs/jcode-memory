@@ -101,8 +101,9 @@ Use `--no-log` for local scratch runs. Omit it when the run should append to:
   backed.
 - Live broker CURRENT relationship-neighborhood retrieval exposes relationship
   rows and conflict notes.
-- Installed-provider mode proves current-plan authority, exact Ghostty source
-  span, CURRENT relationship rows, non-Vault restraint, and hidden sync.
+- Installed-provider mode proves current-plan authority, current-correction
+  precedence over checkpoint evidence, exact Ghostty source span, CURRENT
+  relationship rows, non-Vault restraint, and hidden sync.
 - The full initial suite passes at least 90%.
 - Probe duration and packet budget caps pass.
 
@@ -111,7 +112,7 @@ As of the current context-gate suite, the latest expected results are:
 ```text
 fixture:            14/14
 live-broker:         5/5
-installed-provider:  5/5
+installed-provider:  6/6
 ```
 
 ## Failure Policy

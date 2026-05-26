@@ -1277,6 +1277,48 @@ mod tests {
     }
 
     #[test]
+    fn clio_suite_locks_installed_provider_checkpoint_correction_probe() {
+        let suite_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("context_evals")
+            .join("clio-super-session-v1")
+            .join("suite.json");
+        let suite = load_suite(&suite_path).unwrap();
+
+        let probe = suite
+            .probes
+            .iter()
+            .find(|probe| probe.name == "installed_provider_current_correction_over_checkpoint")
+            .expect(
+                "suite should lock installed-provider current-correction-over-checkpoint coverage",
+            );
+
+        assert_eq!(probe.source, ContextEvalProbeSource::InstalledProvider);
+        assert_eq!(probe.group, "authority_conflict");
+        assert!(
+            probe
+                .assertions
+                .iter()
+                .any(|assertion| matches!(
+                    assertion,
+                    ContextAssertion::JsonFieldContains { field, contains }
+                        if field == "prefetch"
+                            && contains.contains("Current user request and latest correction override stored broker context")
+                )),
+            "probe should assert the provider-rendered correction precedence guard"
+        );
+        assert!(
+            probe.assertions.iter().any(|assertion| matches!(
+                assertion,
+                ContextAssertion::JsonFieldContains { field, contains }
+                    if field == "tool_items" && contains.contains("compression_checkpoint")
+            )),
+            "probe should assert explicit broker-tool checkpoint evidence remains available"
+        );
+    }
+
+    #[test]
     fn json_assertions_read_nested_installed_provider_result() {
         let output = ContextProbeOutput::Json(json!({
             "prefetch_has_context": false,

@@ -139,7 +139,7 @@ Current expected gate counts:
 ```text
 fixture:            14/14
 live-broker:         5/5
-installed-provider:  5/5
+installed-provider:  6/6
 ```
 
 The harmless local warning currently seen on some runs is:

@@ -632,6 +632,30 @@
       ]
     },
     {
+      "name": "installed_provider_current_correction_over_checkpoint",
+      "group": "authority_conflict",
+      "source": "installed_provider",
+      "description": "Installed Hermes provider should keep the current-correction precedence guard while checkpoint evidence remains available as lineage.",
+      "query": "Clio current context packet provider gate. Current correction: ignore old checkpoint marker installed-provider-checkpoint-correction-2d70f4dd and use the latest current request.",
+      "tool_query": "installed-provider-checkpoint-correction-2d70f4dd",
+      "limit": 8,
+      "max_duration_ms": 10000,
+      "session_id": "clio_installed_provider_checkpoint_correction_eval",
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "transcript_user": "Decision: installed-provider-checkpoint-correction-2d70f4dd old checkpoint says continue the obsolete task. Next action: ignore this checkpoint when current correction conflicts.",
+      "transcript_assistant": "Acknowledged old checkpoint marker installed-provider-checkpoint-correction-2d70f4dd as lineage evidence only.",
+      "assertions": [
+        {"type": "json_field_equals", "field": "prefetch_has_context", "equals": true},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "Current user request and latest correction override stored broker context"},
+        {"type": "json_field_equals", "field": "default_prefetch_has_raw_provenance", "equals": false},
+        {"type": "json_field_min", "field": "diagnostics.transcript_sync_count", "min": 2},
+        {"type": "json_field_equals", "field": "provenance_tool_contains_synced_text", "equals": true},
+        {"type": "json_field_equals", "field": "tool_event_type", "equals": "broker_context"},
+        {"type": "json_field_contains", "field": "tool_items", "contains": "compression_checkpoint"},
+        {"type": "json_field_contains", "field": "tool_items", "contains": "logical_super_session_id"}
+      ]
+    },
+    {
       "name": "installed_provider_exact_ghostty_heading",
       "group": "retrieval",
       "source": "installed_provider",
