@@ -257,6 +257,29 @@ class BrokerSocketClientTests(unittest.TestCase):
         )
         self.assertEqual(transcript_requests[0]["source"], "hermes:session_end")
 
+    def test_client_syncs_runtime_summary_to_broker(self) -> None:
+        with FakeBrokerServer() as server:
+            client = BrokerSocketClient(server.socket_path, working_dir="/tmp/project")
+            event = client.broker_transcript_sync(
+                session_id="hermes_session",
+                transcript="user: transcript remains provenance",
+                source="hermes:pre_compress",
+                surface_session_id="hermes_surface_session",
+                surface="hermes",
+                runtime_summary="Hermes runtime summary: continue from the true compressor output.",
+            )
+            client.close()
+
+        self.assertEqual(event["type"], "broker_transcript_synced")
+        transcript_requests = [
+            request for request in server.requests if request["type"] == "broker_transcript_sync"
+        ]
+        self.assertEqual(len(transcript_requests), 1)
+        self.assertEqual(
+            transcript_requests[0]["runtime_summary"],
+            "Hermes runtime summary: continue from the true compressor output.",
+        )
+
 
 class RuntimePathTests(unittest.TestCase):
     def test_default_socket_prefers_jcode_runtime_dir(self) -> None:
@@ -1098,6 +1121,39 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         self.assertEqual(transcript_requests[0]["surface_session_id"], "hermes_session")
         self.assertEqual(transcript_requests[0]["surface"], "hermes")
         self.assertNotIn("parent_segment_id", transcript_requests[0])
+
+    def test_provider_compression_summary_syncs_runtime_summary(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                }
+            )
+            provider.initialize("hermes_session")
+            result = provider.on_compression_summary(
+                "Hermes runtime summary\n## Active Task\n- preserve real compression output",
+                messages=[
+                    {"role": "user", "content": "Transcript stays hidden behind provenance."},
+                    {"role": "assistant", "content": "Runtime summary is the checkpoint body."},
+                ],
+            )
+            provider.shutdown()
+
+        self.assertIsNone(result)
+        transcript_requests = [
+            request for request in server.requests if request["type"] == "broker_transcript_sync"
+        ]
+        self.assertEqual(len(transcript_requests), 1)
+        self.assertEqual(transcript_requests[0]["source"], "hermes:pre_compress")
+        self.assertEqual(
+            transcript_requests[0]["runtime_summary"],
+            "Hermes runtime summary\n## Active Task\n- preserve real compression output",
+        )
+        self.assertIn(
+            "user: Transcript stays hidden behind provenance.",
+            transcript_requests[0]["transcript"],
+        )
 
     def test_provider_session_switch_sends_parent_lineage_on_transcript_sync(self) -> None:
         with FakeBrokerServer() as server:

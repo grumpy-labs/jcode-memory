@@ -294,6 +294,7 @@ class BrokerSocketClient:
         surface_session_id: str = "",
         parent_segment_id: str = "",
         surface: str = "",
+        runtime_summary: str = "",
     ) -> Dict[str, Any]:
         with self._lock:
             self.connect()
@@ -310,6 +311,8 @@ class BrokerSocketClient:
                 request["parent_segment_id"] = parent_segment_id
             if surface:
                 request["surface"] = surface
+            if runtime_summary:
+                request["runtime_summary"] = runtime_summary
             request_id = self._send(request)
             return self._read_response(request_id, "broker_transcript_synced")
 
@@ -528,6 +531,23 @@ class JcodeGraphMemoryProvider(MemoryProvider):
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         self._sync_transcript(messages, source="hermes:pre_compress")
         return ""
+
+    def on_compression_summary(
+        self,
+        summary: str,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        **kwargs: Any,
+    ) -> None:
+        del kwargs
+        runtime_summary = str(summary or "").strip()
+        if not runtime_summary:
+            return None
+        self._sync_transcript(
+            messages or [],
+            source="hermes:pre_compress",
+            runtime_summary=runtime_summary,
+        )
+        return None
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         self._sync_transcript(messages, source="hermes:session_end")
@@ -785,15 +805,24 @@ class JcodeGraphMemoryProvider(MemoryProvider):
                 self._client = None
             return None
 
-    def _sync_transcript(self, messages: List[Dict[str, Any]], *, source: str) -> None:
+    def _sync_transcript(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        source: str,
+        runtime_summary: str = "",
+    ) -> None:
         if not self._sync_transcripts:
             return None
         if self._client is None:
             return None
         transcript = _messages_to_transcript(messages) or self._recent_turns_to_transcript()
+        if not transcript and runtime_summary:
+            transcript = runtime_summary
         if not transcript:
             return None
         transcript = _truncate_text(transcript, self._transcript_max_chars)
+        runtime_summary = str(runtime_summary or "").strip()
         broker_session_id = self._client.broker_session_id
         sync_session_id = broker_session_id or self._session_id
         client: Optional[BrokerSocketClient] = None
@@ -809,6 +838,7 @@ class JcodeGraphMemoryProvider(MemoryProvider):
                 surface_session_id=self._session_id,
                 parent_segment_id=self._parent_session_id,
                 surface=self._surface,
+                runtime_summary=runtime_summary,
             )
             self._diagnostics["transcript_sync_count"] += 1
             self._diagnostics["last_transcript_chars"] = len(transcript)

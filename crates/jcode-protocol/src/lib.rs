@@ -417,6 +417,8 @@ pub enum Request {
         parent_segment_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_summary: Option<String>,
     },
 
     /// Refresh the configured DuckDB Vault index from a Vault path.

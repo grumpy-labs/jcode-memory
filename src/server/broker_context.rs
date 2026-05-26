@@ -136,6 +136,7 @@ pub(super) async fn handle_broker_transcript_sync(
     surface_session_id: Option<String>,
     parent_segment_id: Option<String>,
     surface: Option<String>,
+    runtime_summary: Option<String>,
     fallback_session_id: Option<&str>,
     sessions: &SessionAgents,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
@@ -148,6 +149,7 @@ pub(super) async fn handle_broker_transcript_sync(
         surface_session_id.as_deref(),
         parent_segment_id.as_deref(),
         surface.as_deref(),
+        runtime_summary.as_deref(),
         fallback_session_id,
         sessions,
     )
@@ -410,6 +412,7 @@ async fn broker_transcript_sync_event(
     surface_session_id: Option<&str>,
     requested_parent_segment_id: Option<&str>,
     surface: Option<&str>,
+    runtime_summary: Option<&str>,
     fallback_session_id: Option<&str>,
     sessions: &SessionAgents,
 ) -> Result<ServerEvent> {
@@ -468,6 +471,7 @@ async fn broker_transcript_sync_event(
         transcript,
         source,
         lineage_context,
+        runtime_summary,
         crate::memory::memory_sidecar_enabled(),
         &extractor,
     )
@@ -493,6 +497,7 @@ where
         transcript,
         source,
         TranscriptLineageContext::default(),
+        None,
         true,
         extractor,
     )
@@ -506,6 +511,7 @@ async fn broker_transcript_sync_event_for_manager_with_gate<E>(
     transcript: &str,
     source: &str,
     lineage_context: TranscriptLineageContext<'_>,
+    runtime_summary: Option<&str>,
     extraction_enabled: bool,
     extractor: &E,
 ) -> Result<ServerEvent>
@@ -536,6 +542,7 @@ where
         source,
         lineage_context,
         transcript,
+        runtime_summary,
         &provenance_id,
     )?;
 
@@ -705,6 +712,7 @@ fn store_lineage_checkpoint_memory(
     source: &str,
     lineage_context: TranscriptLineageContext<'_>,
     transcript: &str,
+    runtime_summary: Option<&str>,
     provenance_id: &str,
 ) -> Result<Option<String>> {
     let Some(checkpoint_kind) = checkpoint_kind_from_source(source) else {
@@ -733,10 +741,24 @@ fn store_lineage_checkpoint_memory(
     let branch_reason = checkpoint_branch_reason(checkpoint_kind);
     let active_project_path = active_project_path_for_working_dir(working_dir);
     let active_plan_path = active_plan_path_for_working_dir(working_dir);
-    let summary = if checkpoint_kind == "session_end" {
-        structured_session_end_handoff(transcript, source, provenance_id)
+    let runtime_summary = runtime_summary
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty());
+    let (summary, summary_source) = if let Some(runtime_summary) = runtime_summary {
+        (
+            compact_runtime_summary_checkpoint(runtime_summary),
+            "hermes_runtime",
+        )
+    } else if checkpoint_kind == "session_end" {
+        (
+            structured_session_end_handoff(transcript, source, provenance_id),
+            "broker_generated",
+        )
     } else {
-        compact_transcript_checkpoint(transcript)
+        (
+            compact_transcript_checkpoint(transcript),
+            "transcript_compact",
+        )
     };
     let mut content = format!(
         "{title}\n\
@@ -760,6 +782,7 @@ fn store_lineage_checkpoint_memory(
     }
     content.push_str(&format!(
         "Source: {source}\n\
+         Summary source: {summary_source}\n\
          Provenance memory: {provenance_id}\n\n\
          Checkpoint summary:\n{summary}"
     ));
@@ -768,6 +791,7 @@ fn store_lineage_checkpoint_memory(
         BROKER_CHECKPOINT_TAG.to_string(),
         format!("checkpoint-kind:{checkpoint_kind}"),
         format!("surface:{surface}"),
+        format!("summary-source:{summary_source}"),
         format!("branch-reason:{branch_reason}"),
         format!("logical-super-session:{logical_super_session_id}"),
         format!("session-segment:{session_segment_id}"),
@@ -889,6 +913,22 @@ fn compact_transcript_checkpoint(transcript: &str) -> String {
     } else {
         joined.chars().take(1_200).collect()
     }
+}
+
+fn compact_runtime_summary_checkpoint(summary: &str) -> String {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return "Hermes runtime summary was empty after trimming.".to_string();
+    }
+    if trimmed.chars().count() <= 2_400 {
+        return trimmed.to_string();
+    }
+
+    let mut clipped: String = trimmed.chars().take(2_400).collect();
+    clipped.push_str(
+        "\n[Runtime summary clipped at 2400 chars; full transcript remains behind provenance.]",
+    );
+    clipped
 }
 
 fn checkpoint_line_has_artifact_signal(line: &str) -> bool {
@@ -3624,6 +3664,8 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
             json!(tag_value(&memory.tags, "session-segment:").unwrap_or_default());
         metadata["checkpoint_kind"] =
             json!(tag_value(&memory.tags, "checkpoint-kind:").unwrap_or_default());
+        metadata["summary_source"] =
+            json!(tag_value(&memory.tags, "summary-source:").unwrap_or_default());
         metadata["surface"] = json!(tag_value(&memory.tags, "surface:").unwrap_or_default());
         metadata["branch_reason"] =
             json!(tag_value(&memory.tags, "branch-reason:").unwrap_or_default());
@@ -4334,6 +4376,7 @@ mod tests {
                 surface: Some("hermes"),
                 segment_timing: Some(&segment_timing),
             },
+            None,
             false,
             &extractor,
         )
@@ -4482,6 +4525,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_compression_summary_becomes_lineage_checkpoint_body() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let project_dir = _env.path().join("Hermes-Honcho-LangGraph-Second-Brain");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let manager = MemoryManager::new().with_project_dir(&project_dir);
+        let extractor = FakeTranscriptExtractor::new(Vec::new());
+        let runtime_summary = "Hermes runtime summary\n\
+            ## Active Task\n\
+            - runtime-compression-marker-20260526 preserve the true compressor output\n\
+            ## Next Action\n\
+            - continue from the runtime summary, not the compact transcript fallback";
+
+        broker_transcript_sync_event_for_manager_with_gate(
+            198,
+            "session_runtime_summary".to_string(),
+            &manager,
+            "User: transcript-only-marker should not be the checkpoint body.\n\
+             Assistant: Next action is transcript fallback only.",
+            "hermes:pre_compress",
+            TranscriptLineageContext {
+                working_dir: Some(project_dir.to_string_lossy().as_ref()),
+                surface_session_id: Some("hermes_runtime_surface"),
+                surface: Some("hermes"),
+                ..Default::default()
+            },
+            Some(runtime_summary),
+            false,
+            &extractor,
+        )
+        .await
+        .expect("sync runtime summary transcript");
+
+        let memory_results = collect_broker_memory_results(
+            Some(project_dir.to_string_lossy().as_ref()),
+            Some("runtime-compression-marker-20260526 true compressor output"),
+            8,
+            false,
+        )
+        .expect("collect broker memory results");
+        let items: Vec<BrokerContextItem> = memory_results
+            .iter()
+            .map(|result| memory_broker_item(result, Some(project_dir.to_string_lossy().as_ref())))
+            .collect();
+        let packet = clio_context_packet_from_items(&items);
+        let checkpoint = packet
+            .lineage
+            .iter()
+            .find(|item| item.item.kind == "compression_checkpoint")
+            .expect("runtime summary checkpoint should reach packet lineage");
+        let content = checkpoint.item.content.as_deref().unwrap_or_default();
+
+        assert!(
+            content.contains("runtime-compression-marker-20260526"),
+            "lineage checkpoint should use runtime summary body, got {content}"
+        );
+        assert!(
+            !content.contains("transcript-only-marker"),
+            "runtime summary should replace compact transcript fallback, got {content}"
+        );
+        assert_eq!(
+            checkpoint
+                .item
+                .metadata
+                .get("summary_source")
+                .and_then(|value| value.as_str()),
+            Some("hermes_runtime")
+        );
+    }
+
+    #[tokio::test]
     async fn session_end_transcript_sync_builds_structured_handoff_checkpoint() {
         let _guard = crate::storage::lock_test_env();
         let _env = TestHome::new();
@@ -4509,6 +4623,7 @@ mod tests {
                 surface: Some("hermes"),
                 ..Default::default()
             },
+            None,
             false,
             &extractor,
         )
@@ -4603,6 +4718,7 @@ mod tests {
                 working_dir: Some(project_dir.to_string_lossy().as_ref()),
                 ..Default::default()
             },
+            None,
             false,
             &extractor,
         )
@@ -4667,6 +4783,7 @@ mod tests {
                     surface: Some("hermes"),
                     ..Default::default()
                 },
+                None,
                 false,
                 &extractor,
             )
@@ -4721,6 +4838,7 @@ mod tests {
                 working_dir: Some(project_dir.to_string_lossy().as_ref()),
                 ..Default::default()
             },
+            None,
             false,
             &extractor,
         )
@@ -4738,6 +4856,7 @@ mod tests {
                     working_dir: Some(project_dir.to_string_lossy().as_ref()),
                     ..Default::default()
                 },
+                None,
                 false,
                 &extractor,
             )
@@ -4792,6 +4911,7 @@ mod tests {
                 working_dir: Some(project_dir.to_string_lossy().as_ref()),
                 ..Default::default()
             },
+            None,
             false,
             &extractor,
         )
