@@ -43,6 +43,8 @@ struct ContextEvalProbe {
     #[serde(default)]
     max_duration_ms: Option<u64>,
     #[serde(default)]
+    packet_budget_limits: ContextPacketBudgetLimits,
+    #[serde(default)]
     session_id: Option<String>,
     #[serde(default)]
     working_dir: Option<String>,
@@ -189,6 +191,18 @@ struct ContextPacketBudgetReport {
     slot_serialized_chars: BTreeMap<String, usize>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ContextPacketBudgetLimits {
+    #[serde(default)]
+    max_total_items: Option<usize>,
+    #[serde(default)]
+    max_serialized_chars: Option<usize>,
+    #[serde(default)]
+    max_slot_items: BTreeMap<String, usize>,
+    #[serde(default)]
+    max_slot_serialized_chars: BTreeMap<String, usize>,
+}
+
 #[derive(Debug, Serialize)]
 struct ContextEvalProviderReport {
     kind: String,
@@ -322,6 +336,11 @@ async fn evaluate_suite(
             probe.max_duration_ms,
             duration_ms,
         ));
+        failures.extend(budget_failures(
+            &probe.name,
+            &probe.packet_budget_limits,
+            &evaluation.packet_budget,
+        ));
         let passed = failures.is_empty();
         let group = groups.entry(probe.group.clone()).or_default();
         group.probe_count += 1;
@@ -450,6 +469,53 @@ fn duration_failures(name: &str, max_duration_ms: Option<u64>, duration_ms: u64)
     } else {
         Vec::new()
     }
+}
+
+fn budget_failures(
+    name: &str,
+    limits: &ContextPacketBudgetLimits,
+    report: &ContextPacketBudgetReport,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    if let Some(max_total_items) = limits.max_total_items {
+        if report.total_items > max_total_items {
+            failures.push(format!(
+                "probe {name:?} packet has {} items, over max_total_items {max_total_items}",
+                report.total_items
+            ));
+        }
+    }
+    if let Some(max_serialized_chars) = limits.max_serialized_chars {
+        if report.serialized_chars > max_serialized_chars {
+            failures.push(format!(
+                "probe {name:?} packet serialized {} chars, over max_serialized_chars {max_serialized_chars}",
+                report.serialized_chars
+            ));
+        }
+    }
+    for (slot, max_slot_items) in &limits.max_slot_items {
+        match report.slot_item_counts.get(slot) {
+            Some(count) if count > max_slot_items => failures.push(format!(
+                "probe {name:?} slot {slot:?} has {count} items, over max_slot_items {max_slot_items}"
+            )),
+            Some(_) => {}
+            None => failures.push(format!(
+                "probe {name:?} slot {slot:?} has no item-count budget data"
+            )),
+        }
+    }
+    for (slot, max_slot_serialized_chars) in &limits.max_slot_serialized_chars {
+        match report.slot_serialized_chars.get(slot) {
+            Some(count) if count > max_slot_serialized_chars => failures.push(format!(
+                "probe {name:?} slot {slot:?} serialized {count} chars, over max_slot_serialized_chars {max_slot_serialized_chars}"
+            )),
+            Some(_) => {}
+            None => failures.push(format!(
+                "probe {name:?} slot {slot:?} has no serialized-char budget data"
+            )),
+        }
+    }
+    failures
 }
 
 fn packet_budget_report(packet: &ClioContextPacketV1) -> Result<ContextPacketBudgetReport> {
@@ -1147,5 +1213,35 @@ mod tests {
             vec!["probe \"slow_probe\" took 101ms, over max_duration_ms 100".to_string()]
         );
         assert!(duration_failures("unbounded_probe", None, 10_000).is_empty());
+    }
+
+    #[test]
+    fn budget_failures_trip_for_total_and_slot_caps() {
+        let mut slot_item_counts = BTreeMap::new();
+        slot_item_counts.insert("authority".to_string(), 4);
+        let mut slot_serialized_chars = BTreeMap::new();
+        slot_serialized_chars.insert("authority".to_string(), 1_201);
+        let report = ContextPacketBudgetReport {
+            total_items: 12,
+            serialized_chars: 9_001,
+            slot_item_counts,
+            slot_serialized_chars,
+        };
+        let limits = ContextPacketBudgetLimits {
+            max_total_items: Some(10),
+            max_serialized_chars: Some(9_000),
+            max_slot_items: BTreeMap::from([("authority".to_string(), 3)]),
+            max_slot_serialized_chars: BTreeMap::from([("authority".to_string(), 1_200)]),
+        };
+
+        assert_eq!(
+            budget_failures("budget_probe", &limits, &report),
+            vec![
+                "probe \"budget_probe\" packet has 12 items, over max_total_items 10".to_string(),
+                "probe \"budget_probe\" packet serialized 9001 chars, over max_serialized_chars 9000".to_string(),
+                "probe \"budget_probe\" slot \"authority\" has 4 items, over max_slot_items 3".to_string(),
+                "probe \"budget_probe\" slot \"authority\" serialized 1201 chars, over max_slot_serialized_chars 1200".to_string(),
+            ]
+        );
     }
 }

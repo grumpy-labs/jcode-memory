@@ -447,6 +447,12 @@
       "query": "bcb6143bad371ca96b4a58ce4d3cbaa1302ce8c1 deployed CT 1103 first broker-visible lineage checkpoint slice current canonical plan",
       "limit": 8,
       "max_duration_ms": 8000,
+      "packet_budget_limits": {
+        "max_total_items": 25,
+        "max_serialized_chars": 30000,
+        "max_slot_items": {"authority": 4, "lineage": 4, "tool_hints": 12},
+        "max_slot_serialized_chars": {"authority": 18000, "lineage": 6000, "tool_hints": 5000}
+      },
       "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
       "assertions": [
         {"type": "packet_version", "equals": "clio_context_packet_v1"},
@@ -463,6 +469,12 @@
       "query": "live lineage checkpoint Next action CT1103 logical super-session",
       "limit": 8,
       "max_duration_ms": 5000,
+      "packet_budget_limits": {
+        "max_total_items": 25,
+        "max_serialized_chars": 30000,
+        "max_slot_items": {"authority": 4, "lineage": 4, "tool_hints": 12},
+        "max_slot_serialized_chars": {"authority": 18000, "lineage": 6000, "tool_hints": 5000}
+      },
       "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
       "assertions": [
         {"type": "packet_version", "equals": "clio_context_packet_v1"},
@@ -480,6 +492,12 @@
       "query": "improving a terminal emulator setup with shell prompt styling, system monitor integration, and productivity tweaks?",
       "limit": 8,
       "max_duration_ms": 5000,
+      "packet_budget_limits": {
+        "max_total_items": 25,
+        "max_serialized_chars": 28000,
+        "max_slot_items": {"authority": 4, "lineage": 4, "tool_hints": 12},
+        "max_slot_serialized_chars": {"authority": 15000, "lineage": 6000, "tool_hints": 5000}
+      },
       "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
       "assertions": [
         {"type": "packet_version", "equals": "clio_context_packet_v1"},
@@ -497,6 +515,12 @@
       "query": "Advanced Tips: Make Ghostty Even Better",
       "limit": 8,
       "max_duration_ms": 5000,
+      "packet_budget_limits": {
+        "max_total_items": 25,
+        "max_serialized_chars": 24000,
+        "max_slot_items": {"authority": 4, "lineage": 4, "tool_hints": 12},
+        "max_slot_serialized_chars": {"authority": 11000, "lineage": 6000, "tool_hints": 5000}
+      },
       "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
       "assertions": [
         {"type": "packet_version", "equals": "clio_context_packet_v1"},
@@ -517,6 +541,12 @@
       "query": "What links or backlinks relate to Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md?",
       "limit": 12,
       "max_duration_ms": 5000,
+      "packet_budget_limits": {
+        "max_total_items": 30,
+        "max_serialized_chars": 45000,
+        "max_slot_items": {"authority": 4, "conflicts": 6, "vault_evidence": 8, "tool_hints": 12},
+        "max_slot_serialized_chars": {"authority": 8000, "conflicts": 14000, "vault_evidence": 19000, "tool_hints": 5000}
+      },
       "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
       "assertions": [
         {"type": "packet_version", "equals": "clio_context_packet_v1"},
