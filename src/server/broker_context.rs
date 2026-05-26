@@ -351,7 +351,11 @@ async fn broker_turn_sync_event(
         &session_id,
         source,
         content,
-        vec!["broker-turn-sync".to_string(), format!("{source}-turn")],
+        vec![
+            "broker-turn-sync".to_string(),
+            format!("{source}-turn"),
+            format!("session-segment:{session_id}"),
+        ],
     )?;
 
     Ok(ServerEvent::BrokerTurnSynced {
@@ -3461,9 +3465,13 @@ fn summarize_content(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::Agent;
+    use crate::provider::no_model::NoModelProvider;
     use crate::sidecar::ExtractedMemory;
+    use crate::tool::Registry;
     use std::ffi::OsString;
     use std::path::Path;
+    use std::sync::Arc;
     use std::sync::Mutex;
 
     #[cfg(feature = "duckdb-storage")]
@@ -3966,6 +3974,67 @@ mod tests {
             }),
             "foreign logical super-session checkpoint should be filtered out, got {:?}",
             packet.lineage
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_sync_provenance_links_to_session_segment() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let project_dir = _env.path().join("Hermes-Honcho-LangGraph-Second-Brain");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let session_id = "turn_segment_session";
+        let provider: Arc<dyn crate::provider::Provider> = Arc::new(NoModelProvider::broker());
+        let registry = Registry::empty();
+        let mut session =
+            crate::session::Session::create_with_id(session_id.to_string(), None, None);
+        session.working_dir = Some(project_dir.to_string_lossy().to_string());
+        let mut agent = Agent::new_with_session(provider, registry, session, None);
+        agent.set_working_dir(project_dir.to_string_lossy().as_ref());
+        let agent = Arc::new(tokio::sync::Mutex::new(agent));
+        let sessions: SessionAgents = Arc::new(tokio::sync::RwLock::new(HashMap::from([(
+            session_id.to_string(),
+            agent,
+        )])));
+
+        let event = broker_turn_sync_event(
+            102,
+            Some(session_id.to_string()),
+            "Rob asked about lineage.",
+            "Clio should preserve turn provenance.",
+            Some("hermes"),
+            None,
+            &sessions,
+        )
+        .await
+        .expect("sync broker turn");
+
+        let ServerEvent::BrokerTurnSynced { memory_ids, .. } = event else {
+            panic!("expected broker turn synced event");
+        };
+        let manager = MemoryManager::new().with_project_dir(&project_dir);
+        let all_memories = manager
+            .list_all_scoped(MemoryScope::All)
+            .expect("list memories");
+        let turn_memory = manager
+            .list_all_scoped(MemoryScope::All)
+            .expect("list memories")
+            .into_iter()
+            .find(|memory| memory.id == memory_ids[0])
+            .unwrap_or_else(|| {
+                panic!(
+                    "turn provenance memory id {:?} not found in {:?}",
+                    memory_ids, all_memories
+                )
+            });
+
+        assert!(
+            turn_memory
+                .tags
+                .iter()
+                .any(|tag| tag == "session-segment:turn_segment_session"),
+            "turn provenance should carry session-segment tag, got {:?}",
+            turn_memory.tags
         );
     }
 
