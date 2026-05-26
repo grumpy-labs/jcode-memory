@@ -186,6 +186,54 @@ def _config_float(config: Dict[str, Any], key: str, default: float) -> float:
         return default
 
 
+def _normalize_surface(value: Any) -> str:
+    surface = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not surface:
+        return ""
+    aliases = {
+        "api": "openwebui",
+        "api_server": "openwebui",
+        "open_webui": "openwebui",
+        "openwebui": "openwebui",
+        "discord": "discord",
+        "cli": "hermes",
+        "tui": "hermes",
+        "local": "hermes",
+        "hermes_cli": "hermes",
+        "hermes_tui": "hermes",
+        "hermes": "hermes",
+        "zed": "zed",
+        "codex": "codex",
+        "obsidian": "obsidian",
+        "obsidian_sidebar": "obsidian",
+    }
+    return aliases.get(surface, re.sub(r"[^a-z0-9_]+", "_", surface).strip("_"))
+
+
+def _normalize_branch_reason(value: Any, *, reset: bool = False) -> str:
+    if reset:
+        return "manual_reset"
+    reason = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "branch": "fork",
+        "fork": "fork",
+        "resume": "resume",
+        "compression": "compression",
+        "compress": "compression",
+        "context_compression": "compression",
+        "surface": "surface_switch",
+        "surface_switch": "surface_switch",
+        "platform_switch": "surface_switch",
+        "handoff": "handoff",
+        "session_end": "handoff",
+        "manual_reset": "manual_reset",
+        "reset": "manual_reset",
+        "new": "manual_reset",
+        "new_session": "manual_reset",
+    }
+    return aliases.get(reason, "")
+
+
 class BrokerSocketClient:
     """Small newline-JSON client for the jcode Unix socket protocol."""
 
@@ -294,6 +342,7 @@ class BrokerSocketClient:
         surface_session_id: str = "",
         parent_segment_id: str = "",
         surface: str = "",
+        branch_reason: str = "",
         runtime_summary: str = "",
     ) -> Dict[str, Any]:
         with self._lock:
@@ -311,6 +360,8 @@ class BrokerSocketClient:
                 request["parent_segment_id"] = parent_segment_id
             if surface:
                 request["surface"] = surface
+            if branch_reason:
+                request["branch_reason"] = branch_reason
             if runtime_summary:
                 request["runtime_summary"] = runtime_summary
             request_id = self._send(request)
@@ -372,7 +423,9 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         self._client: Optional[BrokerSocketClient] = None
         self._session_id = ""
         self._parent_session_id = ""
-        self._surface = str(self._config.get("surface") or "hermes").strip() or "hermes"
+        self._configured_surface = str(self._config.get("surface") or "").strip()
+        self._surface = _normalize_surface(self._configured_surface) or "hermes"
+        self._branch_reason = ""
         self._working_dir = self._config.get("working_dir") or os.getcwd()
         self._context_limit = int(self._config.get("context_limit", DEFAULT_CONTEXT_LIMIT))
         self._max_chars = int(self._config.get("max_chars", DEFAULT_MAX_CHARS))
@@ -442,6 +495,17 @@ class JcodeGraphMemoryProvider(MemoryProvider):
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         self._session_id = session_id
+        if not self._configured_surface:
+            self._surface = (
+                _normalize_surface(
+                    kwargs.get("surface")
+                    or kwargs.get("platform")
+                    or kwargs.get("client")
+                    or kwargs.get("client_name")
+                )
+                or self._surface
+                or "hermes"
+            )
         self._working_dir = (
             self._config.get("working_dir")
             or kwargs.get("working_dir")
@@ -560,11 +624,13 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         reset: bool = False,
         reason: str = "",
     ) -> None:
-        del reason
         next_session_id = str(new_session_id or "").strip()
         if not next_session_id:
             return None
         parent = str(parent_session_id or "").strip()
+        self._branch_reason = _normalize_branch_reason(reason, reset=reset) or (
+            "manual_reset" if reset else self._branch_reason
+        )
         if parent:
             self._parent_session_id = parent
         elif reset:
@@ -838,6 +904,7 @@ class JcodeGraphMemoryProvider(MemoryProvider):
                 surface_session_id=self._session_id,
                 parent_segment_id=self._parent_session_id,
                 surface=self._surface,
+                branch_reason=self._branch_reason_for_source(source),
                 runtime_summary=runtime_summary,
             )
             self._diagnostics["transcript_sync_count"] += 1
@@ -850,7 +917,15 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         finally:
             if client is not None:
                 client.close()
-        return None
+
+    def _branch_reason_for_source(self, source: str) -> str:
+        if source == "hermes:session_end":
+            return "handoff"
+        if self._branch_reason:
+            return self._branch_reason
+        if source == "hermes:pre_compress":
+            return "compression"
+        return ""
 
     def _new_client(self, *, timeout: Optional[float] = None) -> BrokerSocketClient:
         return BrokerSocketClient(

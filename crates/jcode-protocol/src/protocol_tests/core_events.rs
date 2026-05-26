@@ -150,6 +150,7 @@ fn test_broker_transcript_sync_roundtrip_has_extraction_status() -> Result<()> {
         surface_session_id: Some("hermes_surface_456".to_string()),
         parent_segment_id: Some("hermes_parent_123".to_string()),
         surface: Some("hermes".to_string()),
+        branch_reason: Some("resume".to_string()),
         runtime_summary: Some(
             "Hermes runtime summary: active task is preserving true compression context."
                 .to_string(),
@@ -165,6 +166,7 @@ fn test_broker_transcript_sync_roundtrip_has_extraction_status() -> Result<()> {
         surface_session_id,
         parent_segment_id,
         surface,
+        branch_reason,
         runtime_summary,
         ..
     } = decoded
@@ -177,6 +179,7 @@ fn test_broker_transcript_sync_roundtrip_has_extraction_status() -> Result<()> {
     assert_eq!(surface_session_id.as_deref(), Some("hermes_surface_456"));
     assert_eq!(parent_segment_id.as_deref(), Some("hermes_parent_123"));
     assert_eq!(surface.as_deref(), Some("hermes"));
+    assert_eq!(branch_reason.as_deref(), Some("resume"));
     assert_eq!(
         runtime_summary.as_deref(),
         Some("Hermes runtime summary: active task is preserving true compression context.")

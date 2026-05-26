@@ -1245,6 +1245,128 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         self.assertEqual(transcript_requests[0]["surface_session_id"], "hermes_session_b")
         self.assertEqual(transcript_requests[0]["parent_segment_id"], "hermes_session_a")
         self.assertEqual(transcript_requests[0]["surface"], "hermes")
+        self.assertEqual(transcript_requests[0]["branch_reason"], "resume")
+
+    def test_provider_normalizes_branch_reason_on_transcript_sync(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                }
+            )
+            provider.initialize("hermes_session_a")
+            provider.on_session_switch(
+                "hermes_session_b",
+                parent_session_id="hermes_session_a",
+                reason="branch",
+            )
+            provider.on_pre_compress([{"role": "user", "content": "Forked work."}])
+            provider.shutdown()
+
+        transcript_requests = [
+            request for request in server.requests if request["type"] == "broker_transcript_sync"
+        ]
+        self.assertEqual(len(transcript_requests), 1)
+        self.assertEqual(transcript_requests[0]["branch_reason"], "fork")
+
+    def test_provider_marks_reset_as_manual_reset_on_transcript_sync(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                }
+            )
+            provider.initialize("hermes_session_a")
+            provider.on_session_switch("hermes_session_b", reset=True, reason="new")
+            provider.on_pre_compress([{"role": "user", "content": "Fresh workstream."}])
+            provider.shutdown()
+
+        transcript_requests = [
+            request for request in server.requests if request["type"] == "broker_transcript_sync"
+        ]
+        self.assertEqual(len(transcript_requests), 1)
+        self.assertNotIn("parent_segment_id", transcript_requests[0])
+        self.assertEqual(transcript_requests[0]["branch_reason"], "manual_reset")
+
+    def test_provider_preserves_surface_switch_branch_reason(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                }
+            )
+            provider.initialize("hermes_session_a")
+            provider.on_session_switch(
+                "hermes_session_b",
+                parent_session_id="hermes_session_a",
+                reason="surface_switch",
+            )
+            provider.on_pre_compress([{"role": "user", "content": "Moved surfaces."}])
+            provider.shutdown()
+
+        transcript_requests = [
+            request for request in server.requests if request["type"] == "broker_transcript_sync"
+        ]
+        self.assertEqual(len(transcript_requests), 1)
+        self.assertEqual(transcript_requests[0]["branch_reason"], "surface_switch")
+
+    def test_provider_uses_initialize_platform_as_surface(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                }
+            )
+            provider.initialize("discord_session", platform="discord")
+            provider.on_pre_compress([{"role": "user", "content": "Discord work."}])
+            provider.shutdown()
+
+        transcript_requests = [
+            request for request in server.requests if request["type"] == "broker_transcript_sync"
+        ]
+        self.assertEqual(len(transcript_requests), 1)
+        self.assertEqual(transcript_requests[0]["surface"], "discord")
+
+    def test_provider_maps_api_server_platform_to_openwebui_surface(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                }
+            )
+            provider.initialize("api_session", platform="api_server")
+            provider.on_pre_compress([{"role": "user", "content": "OpenWebUI work."}])
+            provider.shutdown()
+
+        transcript_requests = [
+            request for request in server.requests if request["type"] == "broker_transcript_sync"
+        ]
+        self.assertEqual(len(transcript_requests), 1)
+        self.assertEqual(transcript_requests[0]["surface"], "openwebui")
+
+    def test_configured_surface_overrides_initialize_platform(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "surface": "zed",
+                }
+            )
+            provider.initialize("zed_session", platform="discord")
+            provider.on_pre_compress([{"role": "user", "content": "Zed work."}])
+            provider.shutdown()
+
+        transcript_requests = [
+            request for request in server.requests if request["type"] == "broker_transcript_sync"
+        ]
+        self.assertEqual(len(transcript_requests), 1)
+        self.assertEqual(transcript_requests[0]["surface"], "zed")
 
     def test_provider_session_end_syncs_transcript(self) -> None:
         with FakeBrokerServer() as server:

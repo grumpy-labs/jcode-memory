@@ -64,6 +64,7 @@ struct TranscriptLineageContext<'a> {
     surface_session_id: Option<&'a str>,
     parent_segment_id: Option<&'a str>,
     surface: Option<&'a str>,
+    branch_reason: Option<&'a str>,
     segment_timing: Option<&'a LineageSegmentTiming>,
 }
 
@@ -136,6 +137,7 @@ pub(super) async fn handle_broker_transcript_sync(
     surface_session_id: Option<String>,
     parent_segment_id: Option<String>,
     surface: Option<String>,
+    branch_reason: Option<String>,
     runtime_summary: Option<String>,
     fallback_session_id: Option<&str>,
     sessions: &SessionAgents,
@@ -149,6 +151,7 @@ pub(super) async fn handle_broker_transcript_sync(
         surface_session_id.as_deref(),
         parent_segment_id.as_deref(),
         surface.as_deref(),
+        branch_reason.as_deref(),
         runtime_summary.as_deref(),
         fallback_session_id,
         sessions,
@@ -412,6 +415,7 @@ async fn broker_transcript_sync_event(
     surface_session_id: Option<&str>,
     requested_parent_segment_id: Option<&str>,
     surface: Option<&str>,
+    branch_reason: Option<&str>,
     runtime_summary: Option<&str>,
     fallback_session_id: Option<&str>,
     sessions: &SessionAgents,
@@ -457,11 +461,15 @@ async fn broker_transcript_sync_event(
         .map(str::trim)
         .filter(|parent| !parent.is_empty());
     let parent_segment_id = requested_parent_segment_id.or(snapshot_parent_segment_id);
+    let branch_reason = branch_reason
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty());
     let lineage_context = TranscriptLineageContext {
         working_dir: working_dir.as_deref(),
         surface_session_id,
         parent_segment_id,
         surface,
+        branch_reason,
         segment_timing: segment_timing.as_ref(),
     };
     broker_transcript_sync_event_for_manager_with_gate(
@@ -738,7 +746,10 @@ fn store_lineage_checkpoint_memory(
     let segment_timing = lineage_context.segment_timing;
     let logical_super_session_id = logical_super_session_id(working_dir, session_segment_id);
     let title = checkpoint_title(checkpoint_kind);
-    let branch_reason = checkpoint_branch_reason(checkpoint_kind);
+    let branch_reason = lineage_context
+        .branch_reason
+        .and_then(normalize_branch_reason)
+        .unwrap_or_else(|| checkpoint_branch_reason(checkpoint_kind).to_string());
     let active_project_path = active_project_path_for_working_dir(working_dir);
     let active_plan_path = active_plan_path_for_working_dir(working_dir);
     let runtime_summary = runtime_summary
@@ -850,6 +861,19 @@ fn checkpoint_branch_reason(checkpoint_kind: &str) -> &'static str {
         "compression" => "compression",
         "session_end" => "handoff",
         _ => "manual_reset",
+    }
+}
+
+fn normalize_branch_reason(reason: &str) -> Option<String> {
+    let normalized = reason.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    match normalized.as_str() {
+        "branch" | "fork" => Some("fork".to_string()),
+        "resume" => Some("resume".to_string()),
+        "compression" | "compress" | "context_compression" => Some("compression".to_string()),
+        "surface_switch" | "surface" | "platform_switch" => Some("surface_switch".to_string()),
+        "handoff" | "session_end" => Some("handoff".to_string()),
+        "manual_reset" | "reset" | "new" | "new_session" => Some("manual_reset".to_string()),
+        _ => None,
     }
 }
 
@@ -4374,6 +4398,7 @@ mod tests {
                 surface_session_id: Some(surface_session_id),
                 parent_segment_id: Some(parent_segment_id),
                 surface: Some("hermes"),
+                branch_reason: Some("resume"),
                 segment_timing: Some(&segment_timing),
             },
             None,
@@ -4449,7 +4474,7 @@ mod tests {
                         .metadata
                         .get("branch_reason")
                         .and_then(|value| value.as_str())
-                        == Some("compression")
+                        == Some("resume")
                     && item
                         .item
                         .metadata
@@ -4522,6 +4547,30 @@ mod tests {
             "lineage packet should make current-plan precedence explicit, got {:?}",
             packet.lineage
         );
+    }
+
+    #[test]
+    fn normalize_branch_reason_covers_lineage_segment_values() {
+        assert_eq!(normalize_branch_reason("resume").as_deref(), Some("resume"));
+        assert_eq!(normalize_branch_reason("branch").as_deref(), Some("fork"));
+        assert_eq!(normalize_branch_reason("fork").as_deref(), Some("fork"));
+        assert_eq!(
+            normalize_branch_reason("surface-switch").as_deref(),
+            Some("surface_switch")
+        );
+        assert_eq!(
+            normalize_branch_reason("manual reset").as_deref(),
+            Some("manual_reset")
+        );
+        assert_eq!(
+            normalize_branch_reason("compression").as_deref(),
+            Some("compression")
+        );
+        assert_eq!(
+            normalize_branch_reason("handoff").as_deref(),
+            Some("handoff")
+        );
+        assert_eq!(normalize_branch_reason("surprise").as_deref(), None);
     }
 
     #[tokio::test]

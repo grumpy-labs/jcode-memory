@@ -199,6 +199,7 @@ async fn handle_lightweight_control_request(
             surface_session_id,
             parent_segment_id,
             surface,
+            branch_reason,
             runtime_summary,
         } => {
             handle_broker_transcript_sync(
@@ -209,6 +210,7 @@ async fn handle_lightweight_control_request(
                 surface_session_id,
                 parent_segment_id,
                 surface,
+                branch_reason,
                 runtime_summary,
                 None,
                 sessions,
@@ -1785,6 +1787,7 @@ pub(super) async fn handle_client(
                 surface_session_id,
                 parent_segment_id,
                 surface,
+                branch_reason,
                 runtime_summary,
             } => {
                 handle_broker_transcript_sync(
@@ -1795,6 +1798,7 @@ pub(super) async fn handle_client(
                     surface_session_id,
                     parent_segment_id,
                     surface,
+                    branch_reason,
                     runtime_summary,
                     Some(&client_session_id),
                     &sessions,

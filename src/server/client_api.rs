@@ -301,6 +301,7 @@ impl Client {
             surface_session_id: None,
             parent_segment_id: None,
             surface: None,
+            branch_reason: None,
             runtime_summary: None,
         };
         let json = serde_json::to_string(&request)? + "\n";
