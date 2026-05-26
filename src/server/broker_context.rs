@@ -1957,6 +1957,12 @@ fn clio_authority_class(item: &BrokerContextItem, source_path: Option<&str>) -> 
     if kind == "memory" {
         return "durable_memory".to_string();
     }
+    if matches!(kind, "session_search_hit" | "conversation_search_hit")
+        && clio_session_item_is_generated_helper(item)
+        && !clio_item_query_allows_generated_helper_context(item)
+    {
+        return "generated_session_helper".to_string();
+    }
     if matches!(kind, "session_search_hit" | "conversation_search_hit") {
         return "session_evidence".to_string();
     }
@@ -1996,6 +2002,10 @@ fn clio_authority_class(item: &BrokerContextItem, source_path: Option<&str>) -> 
 }
 
 fn clio_packet_slot(item: &BrokerContextItem, authority_class: &str) -> String {
+    if authority_class == "generated_session_helper" {
+        return "conflicts".to_string();
+    }
+
     match item.kind.as_str() {
         "current_user_input" | "current_correction" | "selected_text" | "explicit_file_ref"
         | "current_file_ref" => "active_task".to_string(),
@@ -2030,6 +2040,9 @@ fn clio_workflow_status(
 ) -> Option<String> {
     if authority_class == "historical_context" {
         return Some("historical".to_string());
+    }
+    if authority_class == "generated_session_helper" {
+        return Some("helper".to_string());
     }
     if let Some(status) = clio_metadata_workflow_status(item) {
         return Some(status);
@@ -2109,6 +2122,13 @@ fn clio_item_query_allows_historical_context(item: &BrokerContextItem) -> bool {
         .is_some_and(query_allows_historical_context)
 }
 
+fn clio_item_query_allows_generated_helper_context(item: &BrokerContextItem) -> bool {
+    item.relevance
+        .as_ref()
+        .and_then(|relevance| relevance.query.as_deref())
+        .is_some_and(query_allows_generated_helper_context)
+}
+
 fn query_allows_historical_context(query: &str) -> bool {
     let query = query.to_ascii_lowercase();
     [
@@ -2132,6 +2152,70 @@ fn query_allows_historical_context(query: &str) -> bool {
     .any(|needle| query.contains(needle))
 }
 
+fn query_allows_generated_helper_context(query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    [
+        "api_server",
+        "generated title",
+        "generated tag",
+        "helper session",
+        "metadata helper",
+        "openwebui helper",
+        "runtime behavior",
+        "session title",
+        "surface helper",
+        "title helper",
+        "tag helper",
+        "follow-up",
+        "followup",
+        "ui behavior",
+    ]
+    .iter()
+    .any(|needle| query.contains(needle))
+}
+
+fn clio_session_item_is_generated_helper(item: &BrokerContextItem) -> bool {
+    if !matches!(
+        item.kind.as_str(),
+        "session_search_hit" | "conversation_search_hit"
+    ) {
+        return false;
+    }
+
+    let mut haystack = String::new();
+    for value in [
+        item.title.as_deref(),
+        item.summary.as_deref(),
+        item.content.as_deref(),
+        json_string_field(&item.metadata, "source").as_deref(),
+        json_string_field(&item.metadata, "session_title").as_deref(),
+        json_string_field(&item.metadata, "result_kind").as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        haystack.push('\n');
+        haystack.push_str(&value.to_ascii_lowercase());
+    }
+
+    [
+        "generate a concise title",
+        "generate title",
+        "generated title",
+        "title helper",
+        "generate tags",
+        "generated tags",
+        "tag helper",
+        "suggest follow-up",
+        "suggest followup",
+        "follow-up helper",
+        "followup helper",
+        "metadata helper",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle))
+}
+
 fn clio_conflict_group(item: &BrokerContextItem, source_path: Option<&str>) -> String {
     let path = source_path.unwrap_or_default().to_ascii_lowercase();
     let basename = path.rsplit('/').next().unwrap_or(&path);
@@ -2146,6 +2230,9 @@ fn clio_conflict_group(item: &BrokerContextItem, source_path: Option<&str>) -> S
     {
         text_haystack.push('\n');
         text_haystack.push_str(&value.to_ascii_lowercase());
+    }
+    if clio_session_item_is_generated_helper(item) {
+        return "generated_helper_session".to_string();
     }
     let source_truth_haystack = format!("{path}\n{text_haystack}");
     if source_truth_haystack.contains("source of truth")
@@ -5476,6 +5563,65 @@ mod tests {
             packet.conflicts[0].conflict_group.as_deref(),
             Some("session_lineage")
         );
+    }
+
+    #[test]
+    fn clio_context_packet_demotes_generated_helper_sessions_unless_query_asks_about_helpers() {
+        let helper_session = BrokerContextItem {
+            id: "session:openwebui-title-helper".to_string(),
+            kind: "session_search_hit".to_string(),
+            scope: "session".to_string(),
+            content_format: "markdown".to_string(),
+            title: Some("assistant match in OpenWebUI title helper".to_string()),
+            summary: Some("assistant search hit from generated title helper".to_string()),
+            content: Some("Generate a concise title for this conversation.".to_string()),
+            tags: Vec::new(),
+            source: Some("session://api-title-helper/message/1".to_string()),
+            score: Some(0.72),
+            origin: BrokerContextOrigin {
+                tool: Some("session_search".to_string()),
+                uri: Some("session://api-title-helper/message/1".to_string()),
+                path: Some("/Users/rob/.hermes/sessions/api-title-helper.json".to_string()),
+                ..Default::default()
+            },
+            relevance: Some(BrokerContextRelevance {
+                query: Some("current Clio context task state".to_string()),
+                retrieval_mode: Some("session_search".to_string()),
+                rank: Some(1),
+                ..Default::default()
+            }),
+            fragments: Vec::new(),
+            metadata: json!({
+                "source": "api_server",
+                "session_title": "Generate title",
+                "result_kind": "message"
+            }),
+        };
+
+        let packet = clio_context_packet_from_items(&[helper_session.clone()]);
+
+        assert!(packet.session_evidence.is_empty());
+        assert_eq!(packet.conflicts.len(), 1);
+        assert_eq!(
+            packet.conflicts[0].authority_class.as_deref(),
+            Some("generated_session_helper")
+        );
+        assert_eq!(
+            packet.conflicts[0].conflict_group.as_deref(),
+            Some("generated_helper_session")
+        );
+
+        let mut helper_query = helper_session;
+        helper_query.relevance = Some(BrokerContextRelevance {
+            query: Some("inspect OpenWebUI title helper session behavior".to_string()),
+            retrieval_mode: Some("session_search".to_string()),
+            rank: Some(1),
+            ..Default::default()
+        });
+        let packet = clio_context_packet_from_items(&[helper_query]);
+
+        assert_eq!(packet.session_evidence.len(), 1);
+        assert!(packet.conflicts.is_empty());
     }
 
     #[test]

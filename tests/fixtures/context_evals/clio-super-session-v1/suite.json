@@ -175,6 +175,35 @@
       ]
     },
     {
+      "name": "generated_helper_session_demoted",
+      "group": "authority_conflict",
+      "description": "Generated title/follow-up/tag helper sessions should not become normal current-task evidence unless the query asks about helper behavior.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "conflicts": [
+          {
+            "id": "session:openwebui-title-helper",
+            "kind": "session_search_hit",
+            "scope": "session",
+            "title": "assistant match in OpenWebUI title helper",
+            "summary": "Generated title helper session matched a current-context query.",
+            "source_path": "/Users/rob/.hermes/sessions/api-title-helper.json",
+            "authority_class": "generated_session_helper",
+            "workflow_status": "helper",
+            "conflict_group": "generated_helper_session",
+            "why_included": "currentness/conflict note; prefer current authority/current correction; mention uncertainty if this conflict affects the answer"
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_non_empty", "slot": "conflicts"},
+        {"type": "slot_field_equals", "slot": "conflicts", "field": "authority_class", "equals": "generated_session_helper"},
+        {"type": "slot_field_equals", "slot": "conflicts", "field": "workflow_status", "equals": "helper"},
+        {"type": "slot_field_equals", "slot": "conflicts", "field": "conflict_group", "equals": "generated_helper_session"},
+        {"type": "slot_forbids_field_contains", "slot": "session_evidence", "field": "title", "contains": "title helper"}
+      ]
+    },
+    {
       "name": "current_correction_over_old_checkpoint",
       "group": "authority_conflict",
       "description": "Current user correction should outrank old checkpoint or session-resume state.",
