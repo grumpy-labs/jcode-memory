@@ -104,6 +104,17 @@ def ssh_command(host: str, remote_command: str) -> str:
     return f"ssh {_quote(host)} {_quote('bash -lc ' + _quote(remote_command))}"
 
 
+def retrying_curl_health_command(url: str, *, attempts: int = 15, delay_seconds: int = 2) -> str:
+    return (
+        "set -euo pipefail; "
+        f"for attempt in $(seq 1 {attempts}); do "
+        f"if curl -fsS {_quote(url)}; then exit 0; fi; "
+        f'if [ "$attempt" -lt {attempts} ]; then sleep {delay_seconds}; fi; '
+        "done; "
+        "exit 1"
+    )
+
+
 def git_archive_to_remote_command(
     *,
     sha: str,
@@ -235,7 +246,7 @@ def _ct1150_steps(sha: str, *, apply: bool, ct1150_host: str, proxmox_host: str)
                 PlanStep(
                     "ct1150",
                     "Verify CT1150 gateway health",
-                    ssh_command(ct1150_host, f"curl -fsS {_quote(CT1150_HEALTH_URL)}"),
+                    ssh_command(ct1150_host, retrying_curl_health_command(CT1150_HEALTH_URL)),
                 ),
             ]
         )

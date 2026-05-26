@@ -71,6 +71,8 @@ class DeployJcodeMemoryTests(unittest.TestCase):
         self.assertIn("/home/claw/.hermes/plugins/jcode_graph", apply_rendered)
         self.assertIn("systemctl restart hermes-clio-gateway.service", apply_rendered)
         self.assertIn("curl -fsS http://127.0.0.1:8642/health", apply_rendered)
+        self.assertIn("for attempt in", apply_rendered)
+        self.assertIn("sleep 2", apply_rendered)
         self.assertNotIn("systemctl restart hermes-clio-gateway.service", dry_rendered)
 
 
