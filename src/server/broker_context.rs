@@ -3210,6 +3210,12 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
             metadata["ended_at"] = json!(timestamp);
         }
     }
+    let packet_tags = memory_packet_tags(&memory.tags, is_lineage_checkpoint);
+    let packet_content = if is_lineage_checkpoint {
+        compact_lineage_checkpoint_packet_content(&memory.content)
+    } else {
+        memory.content.clone()
+    };
     BrokerContextItem {
         id: memory.id.clone(),
         kind: kind.to_string(),
@@ -3217,8 +3223,8 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
         content_format: "plain_text".to_string(),
         title: Some(memory.category.clone()),
         summary: Some(summarize_content(&memory.content)),
-        content: Some(memory.content.clone()),
-        tags: memory.tags.clone(),
+        content: Some(packet_content),
+        tags: packet_tags,
         source: memory.source.clone(),
         score,
         origin: BrokerContextOrigin {
@@ -3231,6 +3237,35 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
         fragments: Vec::new(),
         metadata,
     }
+}
+
+fn memory_packet_tags(tags: &[String], is_lineage_checkpoint: bool) -> Vec<String> {
+    if !is_lineage_checkpoint {
+        return tags.to_vec();
+    }
+
+    tags.iter()
+        .filter(|tag| {
+            !tag.starts_with("active-project-path:")
+                && !tag.starts_with("active-plan-path:")
+                && !tag.starts_with("started-at:")
+                && !tag.starts_with("ended-at:")
+        })
+        .cloned()
+        .collect()
+}
+
+fn compact_lineage_checkpoint_packet_content(content: &str) -> String {
+    content
+        .lines()
+        .filter(|line| {
+            !line.starts_with("Active project path:")
+                && !line.starts_with("Active plan path:")
+                && !line.starts_with("Started at:")
+                && !line.starts_with("Ended at:")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn side_panel_broker_item(
@@ -3951,6 +3986,29 @@ mod tests {
             }),
             "lineage packet should contain compact checkpoint item with surface/branch/project/timing metadata, got {:?}",
             packet.lineage
+        );
+        let lineage_item = packet
+            .lineage
+            .iter()
+            .find(|item| item.item.kind == "compression_checkpoint")
+            .expect("lineage checkpoint packet item");
+        assert!(
+            lineage_item.item.tags.iter().all(|tag| {
+                !tag.starts_with("active-project-path:")
+                    && !tag.starts_with("active-plan-path:")
+                    && !tag.starts_with("started-at:")
+                    && !tag.starts_with("ended-at:")
+            }),
+            "bulky lineage metadata should stay out of packet tags, got {:?}",
+            lineage_item.item.tags
+        );
+        let content = lineage_item.item.content.as_deref().unwrap_or_default();
+        assert!(
+            !content.contains("Active project path:")
+                && !content.contains("Active plan path:")
+                && !content.contains("Started at:")
+                && !content.contains("Ended at:"),
+            "bulky lineage metadata should stay in metadata, not packet content: {content}"
         );
         assert!(
             packet.lineage.iter().any(|item| item
