@@ -2011,6 +2011,9 @@ fn clio_packet_slot(item: &BrokerContextItem, authority_class: &str) -> String {
     ) {
         return "conflicts".to_string();
     }
+    if item.kind == "vault_task" && clio_vault_task_is_open(item) {
+        return "active_task".to_string();
+    }
 
     match item.kind.as_str() {
         "current_user_input" | "current_correction" | "selected_text" | "explicit_file_ref"
@@ -2192,6 +2195,21 @@ fn clio_session_item_is_stale_for_current_query(item: &BrokerContextItem) -> boo
     ]
     .iter()
     .any(|needle| haystack.contains(needle))
+}
+
+fn clio_vault_task_is_open(item: &BrokerContextItem) -> bool {
+    if item.kind != "vault_task" {
+        return false;
+    }
+    if json_bool_field(&item.metadata, "checked") == Some(false) {
+        return true;
+    }
+    item.tags.iter().any(|tag| {
+        matches!(
+            tag.trim().to_ascii_lowercase().as_str(),
+            "open" | "todo" | "pending"
+        )
+    })
 }
 
 fn query_allows_historical_context(query: &str) -> bool {
@@ -2388,6 +2406,10 @@ fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
 
 fn json_i64_field(value: &serde_json::Value, key: &str) -> Option<i64> {
     value.get(key).and_then(|field| field.as_i64())
+}
+
+fn json_bool_field(value: &serde_json::Value, key: &str) -> Option<bool> {
+    value.get(key).and_then(|field| field.as_bool())
 }
 
 #[cfg(feature = "duckdb-storage")]
@@ -5395,6 +5417,69 @@ mod tests {
                 && item.workflow_status.as_deref() == Some("active")
         }));
         assert!(packet.vault_evidence.is_empty());
+    }
+
+    #[test]
+    fn clio_context_packet_routes_open_vault_tasks_to_active_task() {
+        let open_task = BrokerContextItem {
+            id: "vault_task:active-plan-row".to_string(),
+            kind: "vault_task".to_string(),
+            scope: "vault".to_string(),
+            content_format: "plain_text".to_string(),
+            title: Some("Active plan checklist row / task".to_string()),
+            summary: Some("open task".to_string()),
+            content: Some("Run installed-provider gate after deploy.".to_string()),
+            tags: vec![
+                "vault".to_string(),
+                "vault_task".to_string(),
+                "open".to_string(),
+            ],
+            source: Some("vault://TaskNotes/Clio Context Contract.md#L42".to_string()),
+            score: Some(0.95),
+            origin: BrokerContextOrigin {
+                tool: Some("duckdb_broker_store".to_string()),
+                uri: Some("vault://TaskNotes/Clio Context Contract.md#L42".to_string()),
+                path: Some("TaskNotes/Clio Context Contract.md".to_string()),
+                ..Default::default()
+            },
+            relevance: Some(BrokerContextRelevance {
+                query: Some("current active plan checklist".to_string()),
+                retrieval_mode: Some("duckdb_broker_store".to_string()),
+                rank: Some(1),
+                ..Default::default()
+            }),
+            fragments: Vec::new(),
+            metadata: json!({"source_kind": "vault_task", "checked": false, "line": 42}),
+        };
+        let mut completed_task = open_task.clone();
+        completed_task.id = "vault_task:done-plan-row".to_string();
+        completed_task.summary = Some("completed task".to_string());
+        completed_task.tags = vec![
+            "vault".to_string(),
+            "vault_task".to_string(),
+            "completed".to_string(),
+        ];
+        completed_task.metadata = json!({"source_kind": "vault_task", "checked": true, "line": 41});
+
+        let packet = clio_context_packet_from_items(&[open_task.clone(), completed_task.clone()]);
+
+        assert_eq!(packet.active_task.len(), 1);
+        assert_eq!(packet.active_task[0].item.id, open_task.id);
+        assert_eq!(
+            packet.active_task[0].authority_class.as_deref(),
+            Some("active_task_note")
+        );
+        assert_eq!(
+            packet.active_task[0].workflow_status.as_deref(),
+            Some("active")
+        );
+        assert!(
+            packet
+                .authority
+                .iter()
+                .any(|item| item.item.id == completed_task.id),
+            "completed task rows may remain source context but should not be active task state"
+        );
     }
 
     #[test]

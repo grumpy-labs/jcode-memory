@@ -286,6 +286,38 @@
       ]
     },
     {
+      "name": "active_plan_checklist_to_active_task",
+      "group": "authority_conflict",
+      "description": "Open Vault checklist rows from active plans should be visible as active task state.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "active_task": [
+          {
+            "id": "vault_task:active-plan-row",
+            "kind": "vault_task",
+            "scope": "vault",
+            "title": "Active plan checklist row / task",
+            "summary": "open task",
+            "content": "Run installed-provider gate after deploy.",
+            "source_path": "TaskNotes/Clio Context Contract.md",
+            "line_start": 42,
+            "line_end": 42,
+            "authority_class": "active_task_note",
+            "workflow_status": "active",
+            "metadata": {"checked": false, "line": 42},
+            "why_included": "active task state; class=active_task_note rank 1"
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_non_empty", "slot": "active_task"},
+        {"type": "slot_field_equals", "slot": "active_task", "field": "kind", "equals": "vault_task"},
+        {"type": "slot_field_equals", "slot": "active_task", "field": "authority_class", "equals": "active_task_note"},
+        {"type": "slot_field_equals", "slot": "active_task", "field": "workflow_status", "equals": "active"},
+        {"type": "slot_field_equals", "slot": "active_task", "field": "metadata.checked", "equals": false}
+      ]
+    },
+    {
       "name": "historical_note_demoted_for_current_state_query",
       "group": "authority_conflict",
       "description": "Current-state prompts should route stale provider notes into conflicts instead of normal evidence.",
