@@ -1962,10 +1962,7 @@ fn clio_why_included(slot: &str, authority_class: &str, rank: Option<usize>) -> 
              mention uncertainty if this conflict affects the answer; class={authority_class}{rank}"
         ),
         "active_task" => format!("active task state; class={authority_class}{rank}"),
-        "lineage" => format!(
-            "super-session lineage evidence; current plan files override checkpoint content; \
-             class={authority_class}{rank}"
-        ),
+        "lineage" => "lineage; current plan files override checkpoint content".to_string(),
         "durable_memory" => format!("durable memory evidence; class={authority_class}{rank}"),
         "session_evidence" => format!("session evidence; class={authority_class}{rank}"),
         "artifact_refs" => format!("artifact reference; class={authority_class}{rank}"),
@@ -4964,6 +4961,17 @@ mod tests {
             packet.conflicts[0].conflict_group.as_deref(),
             Some("session_lineage")
         );
+    }
+
+    #[test]
+    fn clio_lineage_why_included_stays_compact() {
+        let why = clio_why_included("lineage", "lineage_checkpoint", Some(3));
+
+        assert_eq!(
+            why,
+            "lineage; current plan files override checkpoint content"
+        );
+        assert!(why.len() <= 56, "lineage why_included is too bulky: {why}");
     }
 
     #[test]
