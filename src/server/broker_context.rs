@@ -1562,6 +1562,35 @@ fn scoped_memory_search_hits(
 ) -> Result<Vec<BrokerMemorySearchHit>> {
     let query = query.map(str::trim).filter(|query| !query.is_empty());
     if let Some(query) = query {
+        let mut exact_entries = manager.search_scoped(query, scope)?;
+        sort_entries_by_updated_at(&mut exact_entries);
+        if !exact_entries.is_empty() {
+            let mut seen = HashSet::new();
+            let mut hits: Vec<BrokerMemorySearchHit> = exact_entries
+                .into_iter()
+                .filter(|entry| seen.insert(entry.id.clone()))
+                .map(|entry| BrokerMemorySearchHit {
+                    entry,
+                    score: None,
+                    retrieval_mode: Some("keyword_exact"),
+                })
+                .collect();
+            if hits.len() < limit {
+                for semantic_hit in
+                    semantic_cascade_hits(manager, scope, query, query_embedding, limit)?
+                {
+                    if seen.insert(semantic_hit.entry.id.clone()) {
+                        hits.push(semantic_hit);
+                    }
+                    if hits.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            hits.truncate(limit);
+            return Ok(hits);
+        }
+
         let semantic_hits = semantic_cascade_hits(manager, scope, query, query_embedding, limit)?;
         if !semantic_hits.is_empty() {
             return Ok(semantic_hits);
@@ -4306,6 +4335,87 @@ mod tests {
         });
     }
 
+    #[test]
+    fn exact_lineage_keyword_match_beats_semantic_memory_hits() {
+        with_temp_home(|home| {
+            let project_dir = home.join("Hermes-Honcho-LangGraph-Second-Brain");
+            std::fs::create_dir_all(&project_dir).expect("create project dir");
+            let manager = MemoryManager::new().with_project_dir(&project_dir);
+            let marker = "live-branch-reason-marker-20260526-verified-fork-surface";
+
+            for idx in 0..2 {
+                let entry = MemoryEntry::new(
+                    MemoryCategory::Custom("checkpoint".to_string()),
+                    format!(
+                        "Structured session-end handoff\nDecision: keep going {idx}\nVerification: passed\nCommand: cargo test\nNext action: continue"
+                    ),
+                )
+                .with_tags(vec![
+                    BROKER_LINEAGE_TAG.to_string(),
+                    BROKER_CHECKPOINT_TAG.to_string(),
+                    "logical-super-session:clio-super-session".to_string(),
+                    format!("session-segment:quality-{idx}"),
+                ]);
+                manager
+                    .remember_project(entry)
+                    .expect("store high-quality checkpoint");
+            }
+
+            let exact_checkpoint = MemoryEntry::new(
+                MemoryCategory::Custom("checkpoint".to_string()),
+                format!(
+                    "Hermes compression checkpoint\nCheckpoint summary:\nStored marker {marker}"
+                ),
+            )
+            .with_tags(vec![
+                BROKER_LINEAGE_TAG.to_string(),
+                BROKER_CHECKPOINT_TAG.to_string(),
+                "logical-super-session:clio-super-session".to_string(),
+                "session-segment:exact-marker".to_string(),
+                "surface:discord".to_string(),
+                "branch-reason:fork".to_string(),
+            ]);
+            let exact_id = manager
+                .remember_project(exact_checkpoint)
+                .expect("store exact checkpoint");
+
+            let mut semantic_memory = MemoryEntry::new(
+                MemoryCategory::Fact,
+                "A semantically similar but lexically unrelated memory result.",
+            );
+            semantic_memory.embedding = Some(vec![1.0, 0.0, 0.0]);
+            manager
+                .remember_project(semantic_memory)
+                .expect("store semantic memory");
+
+            let query_embedding = [1.0, 0.0, 0.0];
+            let results = collect_broker_memory_results_with_query_embedding(
+                Some(project_dir.to_string_lossy().as_ref()),
+                marker,
+                &query_embedding,
+                4,
+                false,
+            )
+            .expect("collect broker memory results");
+
+            assert!(
+                results.iter().any(|result| result.memory.id == exact_id
+                    && result.memory.content.contains(marker)
+                    && result
+                        .relevance
+                        .as_ref()
+                        .and_then(|relevance| relevance.retrieval_mode.as_deref())
+                        == Some("keyword_exact")
+                    && result
+                        .relevance
+                        .as_ref()
+                        .and_then(|relevance| relevance.exact_match)
+                        == Some(true)),
+                "exact non-embedded lineage checkpoint should not be skipped by semantic hits: {results:?}"
+            );
+        });
+    }
+
     #[tokio::test]
     async fn transcript_sync_with_fake_extractor_returns_derived_memory_event_and_context() {
         let _guard = crate::storage::lock_test_env();
@@ -5186,7 +5296,7 @@ mod tests {
                 })
                 .expect("fallback keyword hit");
             let relevance = hit.relevance.as_ref().expect("relevance metadata");
-            assert_eq!(relevance.retrieval_mode.as_deref(), Some("keyword"));
+            assert_eq!(relevance.retrieval_mode.as_deref(), Some("keyword_exact"));
             assert_eq!(relevance.rank, Some(1));
             assert!(relevance.matched_terms.contains(&"broker".to_string()));
             assert!(relevance.matched_terms.contains(&"retrieval".to_string()));

@@ -145,6 +145,10 @@ enum ContextAssertion {
         field: String,
         min: f64,
     },
+    JsonFieldMax {
+        field: String,
+        max: f64,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -956,6 +960,19 @@ fn evaluate_assertion(
                 ))
             }
         }
+        ContextAssertion::JsonFieldMax { field, max } => {
+            let value = output_json_field_value(output, field)?;
+            let number = value
+                .as_f64()
+                .ok_or_else(|| format!("json field {field:?} is not numeric: {value}"))?;
+            if number <= *max {
+                Ok(())
+            } else {
+                Err(format!(
+                    "json field {field:?} is {number}, above maximum {max}"
+                ))
+            }
+        }
     }
 }
 
@@ -1333,6 +1350,43 @@ mod tests {
     }
 
     #[test]
+    fn clio_suite_locks_live_exact_lineage_marker_probe() {
+        let suite_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("context_evals")
+            .join("clio-super-session-v1")
+            .join("suite.json");
+        let suite = load_suite(&suite_path).unwrap();
+
+        let probe = suite
+            .probes
+            .iter()
+            .find(|probe| probe.name == "live_broker_exact_lineage_marker")
+            .expect("suite should lock exact lineage marker recall coverage");
+
+        assert_eq!(probe.source, ContextEvalProbeSource::LiveBroker);
+        assert_eq!(probe.group, "retrieval");
+        assert_eq!(
+            probe.query.as_deref(),
+            Some("live-branch-reason-marker-20260526-verified-fork-surface")
+        );
+        assert!(
+            probe.assertions.iter().any(|assertion| matches!(
+                assertion,
+                ContextAssertion::SlotFieldContains {
+                    slot,
+                    field,
+                    contains,
+                } if slot == "lineage"
+                    && field == "content"
+                    && contains.contains("live-branch-reason-marker")
+            )),
+            "probe should assert the exact marker reaches lineage content"
+        );
+    }
+
+    #[test]
     fn json_assertions_read_nested_installed_provider_result() {
         let output = ContextProbeOutput::Json(json!({
             "prefetch_has_context": false,
@@ -1366,6 +1420,16 @@ mod tests {
                 &ContextAssertion::JsonFieldMin {
                     field: "tool_item_count".to_string(),
                     min: 1.0,
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            evaluate_assertion(
+                &output,
+                &ContextAssertion::JsonFieldMax {
+                    field: "prefetch_diagnostics.last_prefetch_item_count".to_string(),
+                    max: 0.0,
                 }
             )
             .is_ok()

@@ -732,6 +732,31 @@
       ]
     },
     {
+      "name": "live_broker_exact_lineage_marker",
+      "group": "retrieval",
+      "source": "live_broker",
+      "description": "Live broker exact lineage recall should find a non-embedded checkpoint marker without broad project-history sludge.",
+      "query": "live-branch-reason-marker-20260526-verified-fork-surface",
+      "limit": 8,
+      "max_duration_ms": 5000,
+      "packet_budget_limits": {
+        "max_total_items": 20,
+        "max_serialized_chars": 22000,
+        "max_slot_items": {"authority": 3, "lineage": 4, "conflicts": 2, "tool_hints": 12},
+        "max_slot_serialized_chars": {"authority": 9000, "lineage": 6000, "conflicts": 4000, "tool_hints": 5000}
+      },
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "assertions": [
+        {"type": "packet_version", "equals": "clio_context_packet_v1"},
+        {"type": "slot_non_empty", "slot": "lineage"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "live-branch-reason-marker-20260526-verified-fork-surface"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.surface", "contains": "discord"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.branch_reason", "contains": "fork"},
+        {"type": "slot_forbids_field_contains", "slot": "authority", "field": "source_path", "contains": "Master-Second-Brain-Execution-Plan.md"},
+        {"type": "slot_forbids_field_contains", "slot": "conflicts", "field": "source_path", "contains": "OpenClaw"}
+      ]
+    },
+    {
       "name": "live_broker_broad_ghostty_retrieval",
       "group": "retrieval",
       "source": "live_broker",

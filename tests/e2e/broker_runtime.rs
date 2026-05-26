@@ -301,7 +301,7 @@ async fn typed_broker_context_api_returns_memory_tools_and_artifacts() -> Result
         assert!(
             matches!(
                 relevance.retrieval_mode.as_deref(),
-                Some("keyword") | Some("semantic_cascade")
+                Some("keyword") | Some("keyword_exact") | Some("semantic_cascade")
             ),
             "unexpected retrieval mode: {:?}",
             relevance.retrieval_mode
