@@ -1,7 +1,7 @@
 use super::{
-    handle_clear_session, handle_reload, handle_resume_session, mark_remote_reload_started,
-    rename_shutdown_signal, restored_session_was_interrupted, session_was_interrupted_by_reload,
-    subscribe_should_mark_ready,
+    handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
+    mark_remote_reload_started, rename_shutdown_signal, restored_session_was_interrupted,
+    session_was_interrupted_by_reload, subscribe_should_mark_ready,
 };
 use crate::agent::Agent;
 use crate::message::ContentBlock;
@@ -61,6 +61,72 @@ async fn subscribe_marks_non_running_member_ready() {
         test_swarm_member("worker", "spawned"),
     )])));
     assert!(subscribe_should_mark_ready("worker", &swarm_members).await);
+}
+
+#[tokio::test]
+async fn subscribe_emits_session_id_before_done() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry.clone())));
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+    let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
+    let event_history = Arc::new(RwLock::new(VecDeque::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _) = broadcast::channel(8);
+    let mut client_selfdev = false;
+
+    handle_subscribe(
+        42,
+        Some("/tmp/subscribe-session-id-project".to_string()),
+        None,
+        false,
+        &mut client_selfdev,
+        "session_subscribe_contract",
+        "connection_subscribe_contract",
+        &None,
+        &agent,
+        &registry,
+        false,
+        &swarm_members,
+        &swarms_by_id,
+        &channel_subscriptions,
+        &channel_subscriptions_by_session,
+        &swarm_plans,
+        &swarm_coordinators,
+        &client_event_tx,
+        &mcp_pool,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+    )
+    .await;
+
+    let events = collect_events_until_done(&mut client_event_rx, 42).await;
+    let done_index = events
+        .iter()
+        .position(|event| matches!(event, ServerEvent::Done { id: 42 }))
+        .expect("subscribe done event");
+    let session_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                ServerEvent::SessionId { session_id }
+                    if session_id == "session_subscribe_contract"
+            )
+        })
+        .expect("subscribe session id event");
+
+    assert!(
+        session_index < done_index,
+        "subscribe should expose the broker session id before done, got {events:?}"
+    );
 }
 
 #[async_trait]

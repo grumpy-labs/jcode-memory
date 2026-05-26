@@ -555,6 +555,9 @@ pub(super) async fn handle_subscribe(
         .await;
     }
 
+    let _ = client_event_tx.send(ServerEvent::SessionId {
+        session_id: client_session_id.to_string(),
+    });
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
