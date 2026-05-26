@@ -641,11 +641,15 @@ fn store_lineage_checkpoint_memory(
 
     let logical_super_session_id = logical_super_session_id(working_dir, session_id);
     let title = checkpoint_title(checkpoint_kind);
+    let surface = checkpoint_surface_from_source(source);
+    let branch_reason = checkpoint_branch_reason(checkpoint_kind);
     let summary = compact_transcript_checkpoint(transcript);
     let content = format!(
         "{title}\n\
          Logical super-session: {logical_super_session_id}\n\
          Session segment: {session_id}\n\
+         Surface: {surface}\n\
+         Branch reason: {branch_reason}\n\
          Source: {source}\n\
          Provenance memory: {provenance_id}\n\n\
          Checkpoint summary:\n{summary}"
@@ -656,6 +660,8 @@ fn store_lineage_checkpoint_memory(
             BROKER_LINEAGE_TAG.to_string(),
             BROKER_CHECKPOINT_TAG.to_string(),
             format!("checkpoint-kind:{checkpoint_kind}"),
+            format!("surface:{surface}"),
+            format!("branch-reason:{branch_reason}"),
             format!("logical-super-session:{logical_super_session_id}"),
             format!("session-segment:{session_id}"),
             format!("derived-from:{provenance_id}"),
@@ -679,6 +685,24 @@ fn checkpoint_title(checkpoint_kind: &str) -> &'static str {
         "compression" => "Hermes compression checkpoint",
         "session_end" => "Hermes session-end checkpoint",
         _ => "Hermes checkpoint",
+    }
+}
+
+fn checkpoint_surface_from_source(source: &str) -> String {
+    source
+        .split(':')
+        .next()
+        .map(str::trim)
+        .filter(|surface| !surface.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn checkpoint_branch_reason(checkpoint_kind: &str) -> &'static str {
+    match checkpoint_kind {
+        "compression" => "compression",
+        "session_end" => "handoff",
+        _ => "manual_reset",
     }
 }
 
@@ -3059,6 +3083,9 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
             json!(tag_value(&memory.tags, "session-segment:").unwrap_or_default());
         metadata["checkpoint_kind"] =
             json!(tag_value(&memory.tags, "checkpoint-kind:").unwrap_or_default());
+        metadata["surface"] = json!(tag_value(&memory.tags, "surface:").unwrap_or_default());
+        metadata["branch_reason"] =
+            json!(tag_value(&memory.tags, "branch-reason:").unwrap_or_default());
     }
     BrokerContextItem {
         id: memory.id.clone(),
@@ -3747,8 +3774,20 @@ mod tests {
                         .get("session_segment_id")
                         .and_then(|value| value.as_str())
                         == Some("session_lineage")
+                    && item
+                        .item
+                        .metadata
+                        .get("surface")
+                        .and_then(|value| value.as_str())
+                        == Some("hermes")
+                    && item
+                        .item
+                        .metadata
+                        .get("branch_reason")
+                        .and_then(|value| value.as_str())
+                        == Some("compression")
             }),
-            "lineage packet should contain compact checkpoint item, got {:?}",
+            "lineage packet should contain compact checkpoint item with surface/branch metadata, got {:?}",
             packet.lineage
         );
         assert!(
