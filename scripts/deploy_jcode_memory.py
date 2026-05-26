@@ -29,6 +29,7 @@ CT1103_RELEASE_ROOT = "/srv/hermes-jcode/releases/jcode-memory"
 CT1103_SOCKET = "/srv/hermes-jcode/runtime/jcode-broker.sock"
 CT1103_BINARY = "/usr/local/bin/jcode-memory-broker"
 CT1103_SERVICE = "hermes-jcode-broker.service"
+CT1103_BROKER_FEATURES = "duckdb-storage-bundled,embeddings"
 
 CT1150_RELEASE_ROOT = "/home/claw/.hermes/releases/jcode_graph"
 CT1150_PLUGIN_DIR = "/home/claw/.hermes/plugins/jcode_graph"
@@ -163,8 +164,8 @@ def _ct1103_steps(sha: str, *, apply: bool, ct1103_host: str, proxmox_host: str)
                 f"cd {_quote(release_dir)}; "
                 "cargo test -q -p jcode-protocol; "
                 "cargo test -q -p jcode-storage --features duckdb-storage-bundled; "
-                "cargo test -q --features duckdb-storage-bundled --test e2e broker_runtime; "
-                "cargo build -q --release --bin jcode --features duckdb-storage-bundled",
+                f"cargo test -q --features {CT1103_BROKER_FEATURES} --test e2e broker_runtime; "
+                f"cargo build -q --release --bin jcode --features {CT1103_BROKER_FEATURES}",
             ),
         ),
     ]

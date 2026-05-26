@@ -52,6 +52,7 @@ class DeployJcodeMemoryTests(unittest.TestCase):
 
         self.assertIn("/srv/hermes-jcode/releases/jcode-memory/" + sha, dry_rendered)
         self.assertIn("cargo test -q -p jcode-protocol", dry_rendered)
+        self.assertIn("--features duckdb-storage-bundled,embeddings", dry_rendered)
         self.assertIn("cargo build -q --release --bin jcode", dry_rendered)
         self.assertIn("/usr/local/bin/jcode-memory-broker", apply_rendered)
         self.assertIn("systemctl restart hermes-jcode-broker.service", apply_rendered)

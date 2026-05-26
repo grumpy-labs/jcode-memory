@@ -298,7 +298,14 @@ async fn typed_broker_context_api_returns_memory_tools_and_artifacts() -> Result
             .as_ref()
             .context("memory broker item should include relevance")?;
         assert_eq!(relevance.query.as_deref(), Some("Typed broker"));
-        assert_eq!(relevance.retrieval_mode.as_deref(), Some("keyword"));
+        assert!(
+            matches!(
+                relevance.retrieval_mode.as_deref(),
+                Some("keyword") | Some("semantic_cascade")
+            ),
+            "unexpected retrieval mode: {:?}",
+            relevance.retrieval_mode
+        );
         assert!(relevance.rank.is_some());
 
         assert_eq!(
