@@ -103,17 +103,26 @@ Use `--no-log` for local scratch runs. Omit it when the run should append to:
   rows and conflict notes.
 - Installed-provider mode proves current-plan authority, current-correction
   precedence over checkpoint evidence, exact Ghostty source span, CURRENT
-  relationship rows, non-Vault restraint, and hidden sync.
+  relationship rows, structured session-end handoffs, non-Vault restraint, and
+  hidden sync.
+- Fixture mode proves generated helper-session demotion, stale prior-session
+  demotion for current-state prompts, and open Vault task/checklist routing
+  into `active_task`.
 - The full initial suite passes at least 90%.
 - Probe duration and packet budget caps pass.
 
 As of the current context-gate suite, the latest expected results are:
 
 ```text
-fixture:            14/14
+fixture:            18/18
 live-broker:         5/5
-installed-provider:  6/6
+installed-provider:  7/7
 ```
+
+Latest production broker: `0bfb9ca2a41f2c7cb3c8c933fd9a47350fec7fc5`
+(`v0.12.216-dev`). That deployment routes open `vault_task` checklist/task rows
+into Clio Context Packet `active_task`, while completed Vault task rows remain
+source context rather than active work state.
 
 ## Failure Policy
 
