@@ -1010,6 +1010,7 @@ fn collect_broker_memory_results_impl(
 
     let mut seen = HashSet::new();
     let mut memories = Vec::new();
+    let logical_lineage_filter = active_logical_super_session_filter(working_dir);
 
     if working_dir.is_some() {
         append_recent_lineage_results(
@@ -1017,6 +1018,7 @@ fn collect_broker_memory_results_impl(
             MemoryScope::Project,
             "project",
             query,
+            logical_lineage_filter.as_deref(),
             limit,
             &mut seen,
             &mut memories,
@@ -1029,6 +1031,7 @@ fn collect_broker_memory_results_impl(
             query_embedding,
             limit,
             include_provenance,
+            logical_lineage_filter.as_deref(),
             &mut seen,
             &mut memories,
         )?;
@@ -1039,6 +1042,7 @@ fn collect_broker_memory_results_impl(
         MemoryScope::Global,
         "global",
         query,
+        logical_lineage_filter.as_deref(),
         limit,
         &mut seen,
         &mut memories,
@@ -1051,6 +1055,7 @@ fn collect_broker_memory_results_impl(
         query_embedding,
         limit,
         include_provenance,
+        logical_lineage_filter.as_deref(),
         &mut seen,
         &mut memories,
     )?;
@@ -1059,11 +1064,20 @@ fn collect_broker_memory_results_impl(
     Ok(memories)
 }
 
+fn active_logical_super_session_filter(working_dir: Option<&str>) -> Option<String> {
+    let working_dir = working_dir?;
+    if working_dir.contains("Hermes-Honcho-LangGraph-Second-Brain") {
+        return Some(logical_super_session_id(Some(working_dir), ""));
+    }
+    None
+}
+
 fn append_recent_lineage_results(
     manager: &MemoryManager,
     scope: MemoryScope,
     scope_label: &str,
     query: Option<&str>,
+    logical_super_session_filter: Option<&str>,
     limit: usize,
     seen: &mut HashSet<String>,
     memories: &mut Vec<BrokerMemoryResult>,
@@ -1076,6 +1090,7 @@ fn append_recent_lineage_results(
         .list_all_scoped(scope)?
         .into_iter()
         .filter(|entry| entry.active && !is_provenance_memory(entry) && is_lineage_memory(entry))
+        .filter(|entry| lineage_matches_logical_filter(entry, logical_super_session_filter))
         .collect();
     sort_lineage_entries(&mut entries, query);
 
@@ -1103,6 +1118,18 @@ fn append_recent_lineage_results(
     Ok(())
 }
 
+fn lineage_matches_logical_filter(
+    entry: &MemoryEntry,
+    logical_super_session_filter: Option<&str>,
+) -> bool {
+    match logical_super_session_filter {
+        Some(expected) => {
+            tag_value(&entry.tags, "logical-super-session:").as_deref() == Some(expected)
+        }
+        None => true,
+    }
+}
+
 fn append_scoped_memory_results(
     manager: &MemoryManager,
     scope: MemoryScope,
@@ -1111,6 +1138,7 @@ fn append_scoped_memory_results(
     query_embedding: Option<&[f32]>,
     limit: usize,
     include_provenance: bool,
+    logical_super_session_filter: Option<&str>,
     seen: &mut HashSet<String>,
     memories: &mut Vec<BrokerMemoryResult>,
 ) -> Result<()> {
@@ -1125,6 +1153,11 @@ fn append_scoped_memory_results(
             continue;
         }
         if !include_provenance && is_provenance_memory(&entry) {
+            continue;
+        }
+        if is_lineage_memory(&entry)
+            && !lineage_matches_logical_filter(&entry, logical_super_session_filter)
+        {
             continue;
         }
         let rank = memories.len() + 1;
@@ -3860,6 +3893,78 @@ mod tests {
                     .contains("Next action")
             }),
             "lineage packet should keep the actionable checkpoint ahead of low-info smoke, got {:?}",
+            packet.lineage
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_retrieval_filters_to_active_logical_super_session() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let project_dir = _env.path().join("Hermes-Honcho-LangGraph-Second-Brain");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let manager = MemoryManager::new().with_project_dir(&project_dir);
+        let extractor = FakeTranscriptExtractor::new(Vec::new());
+
+        broker_transcript_sync_event_for_manager_with_gate(
+            101,
+            "session_active_lineage".to_string(),
+            &manager,
+            "User: Active Clio lineage.\nAssistant: Next action is active checkpoint work.",
+            "hermes:pre_compress",
+            Some(project_dir.to_string_lossy().as_ref()),
+            false,
+            &extractor,
+        )
+        .await
+        .expect("sync active lineage checkpoint");
+
+        let foreign_checkpoint = MemoryEntry::new(
+            MemoryCategory::Custom("checkpoint".to_string()),
+            "Foreign lineage checkpoint\nNext action: unrelated project work.".to_string(),
+        )
+        .with_source("broker-lineage:hermes:pre_compress:foreign_session".to_string())
+        .with_tags(vec![
+            BROKER_LINEAGE_TAG.to_string(),
+            BROKER_CHECKPOINT_TAG.to_string(),
+            "checkpoint-kind:compression".to_string(),
+            "logical-super-session:foreign-super-session".to_string(),
+            "session-segment:foreign_session".to_string(),
+            "surface:hermes".to_string(),
+            "branch-reason:compression".to_string(),
+        ]);
+        let foreign_id = manager
+            .remember_project(foreign_checkpoint)
+            .expect("store foreign checkpoint");
+
+        let memory_results = collect_broker_memory_results(
+            Some(project_dir.to_string_lossy().as_ref()),
+            Some("lineage checkpoint next action"),
+            8,
+            false,
+        )
+        .expect("collect broker memory results");
+        let items: Vec<BrokerContextItem> = memory_results
+            .iter()
+            .map(|result| memory_broker_item(result, Some(project_dir.to_string_lossy().as_ref())))
+            .collect();
+        let packet = clio_context_packet_from_items(&items);
+
+        assert!(
+            packet.lineage.iter().any(|item| {
+                item.item.metadata.get("logical_super_session_id")
+                    == Some(&json!("clio-super-session"))
+            }),
+            "active Clio lineage should be present, got {:?}",
+            packet.lineage
+        );
+        assert!(
+            packet.lineage.iter().all(|item| {
+                item.item.id != foreign_id
+                    && item.item.metadata.get("logical_super_session_id")
+                        != Some(&json!("foreign-super-session"))
+            }),
+            "foreign logical super-session checkpoint should be filtered out, got {:?}",
             packet.lineage
         );
     }
