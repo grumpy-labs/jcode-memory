@@ -461,6 +461,9 @@
         {"type": "slot_field_equals", "slot": "authority", "field": "workflow_status", "equals": "active"},
         {"type": "slot_field_contains", "slot": "authority", "field": "metadata.frontmatter_json", "contains": "workflow_status"},
         {"type": "slot_field_contains", "slot": "authority", "field": "metadata.frontmatter_json", "contains": "dateModified"},
+        {"type": "slot_field_contains", "slot": "authority", "field": "metadata.frontmatter_json", "contains": "categories"},
+        {"type": "slot_field_contains", "slot": "authority", "field": "metadata.frontmatter_json", "contains": "projects"},
+        {"type": "slot_field_contains", "slot": "authority", "field": "metadata.frontmatter_json", "contains": "tags"},
         {"type": "slot_field_contains", "slot": "authority", "field": "content", "contains": "deployed on CT `1103`"}
       ]
     },
@@ -578,6 +581,9 @@
         {"type": "json_field_contains", "field": "tool_items.0.source_path", "contains": "jcode-Nervous-System-Broker-Parity-Plan.md"},
         {"type": "json_field_contains", "field": "tool_items.0.metadata.frontmatter_json", "contains": "workflow_status"},
         {"type": "json_field_contains", "field": "tool_items.0.metadata.frontmatter_json", "contains": "dateModified"},
+        {"type": "json_field_contains", "field": "tool_items.0.metadata.frontmatter_json", "contains": "categories"},
+        {"type": "json_field_contains", "field": "tool_items.0.metadata.frontmatter_json", "contains": "projects"},
+        {"type": "json_field_contains", "field": "tool_items.0.metadata.frontmatter_json", "contains": "tags"},
         {"type": "json_field_equals", "field": "default_prefetch_has_raw_provenance", "equals": false},
         {"type": "json_field_equals", "field": "tool_event_type", "equals": "broker_context"},
         {"type": "json_field_min", "field": "tool_item_count", "min": 1}

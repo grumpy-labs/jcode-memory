@@ -226,31 +226,110 @@ fn vault_ingestion_metadata_json(text: &str) -> String {
     );
 
     if let Some(frontmatter) = frontmatter_block(text) {
-        for line in frontmatter.lines() {
-            if line.starts_with(char::is_whitespace) || line.trim_start().starts_with('-') {
-                continue;
-            }
-            let Some((raw_key, raw_value)) = line.split_once(':') else {
-                continue;
-            };
-            let key = raw_key.trim();
-            if key.is_empty()
-                || !key
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-            {
-                continue;
-            }
-            let value = raw_value.trim();
-            if value.is_empty() {
-                continue;
-            }
-            metadata.insert(key.to_string(), frontmatter_scalar_value(value));
-        }
+        merge_frontmatter_metadata(&mut metadata, frontmatter);
     }
 
     serde_json::to_string(&serde_json::Value::Object(metadata))
         .unwrap_or_else(|_| format!(r#"{{"ingestion_version":{VAULT_INGESTION_VERSION}}}"#))
+}
+
+fn merge_frontmatter_metadata(
+    metadata: &mut serde_json::Map<String, serde_json::Value>,
+    frontmatter: &str,
+) {
+    if let Ok(serde_yaml::Value::Mapping(mapping)) =
+        serde_yaml::from_str::<serde_yaml::Value>(frontmatter)
+    {
+        for (raw_key, raw_value) in mapping {
+            let Some(key) = yaml_string_key(&raw_key) else {
+                continue;
+            };
+            if !frontmatter_key_is_safe(&key) {
+                continue;
+            }
+            if let Some(value) = yaml_value_to_json(raw_value) {
+                metadata.insert(key, value);
+            }
+        }
+        return;
+    }
+
+    merge_line_scanned_frontmatter_metadata(metadata, frontmatter);
+}
+
+fn merge_line_scanned_frontmatter_metadata(
+    metadata: &mut serde_json::Map<String, serde_json::Value>,
+    frontmatter: &str,
+) {
+    for line in frontmatter.lines() {
+        if line.starts_with(char::is_whitespace) || line.trim_start().starts_with('-') {
+            continue;
+        }
+        let Some((raw_key, raw_value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        if !frontmatter_key_is_safe(key) {
+            continue;
+        }
+        let value = raw_value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        metadata.insert(key.to_string(), frontmatter_scalar_value(value));
+    }
+}
+
+fn frontmatter_key_is_safe(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn yaml_string_key(value: &serde_yaml::Value) -> Option<String> {
+    match value {
+        serde_yaml::Value::String(key) => Some(key.trim().to_string()),
+        _ => None,
+    }
+}
+
+fn yaml_value_to_json(value: serde_yaml::Value) -> Option<serde_json::Value> {
+    match value {
+        serde_yaml::Value::Null => None,
+        serde_yaml::Value::Bool(value) => Some(serde_json::Value::Bool(value)),
+        serde_yaml::Value::Number(value) => yaml_number_to_json(value),
+        serde_yaml::Value::String(value) => Some(serde_json::Value::String(value)),
+        serde_yaml::Value::Sequence(values) => Some(serde_json::Value::Array(
+            values.into_iter().filter_map(yaml_value_to_json).collect(),
+        )),
+        serde_yaml::Value::Mapping(mapping) => {
+            let mut object = serde_json::Map::new();
+            for (raw_key, raw_value) in mapping {
+                let Some(key) = yaml_string_key(&raw_key) else {
+                    continue;
+                };
+                if !frontmatter_key_is_safe(&key) {
+                    continue;
+                }
+                if let Some(value) = yaml_value_to_json(raw_value) {
+                    object.insert(key, value);
+                }
+            }
+            Some(serde_json::Value::Object(object))
+        }
+        serde_yaml::Value::Tagged(tagged) => yaml_value_to_json(tagged.value),
+    }
+}
+
+fn yaml_number_to_json(value: serde_yaml::Number) -> Option<serde_json::Value> {
+    if let Some(number) = value.as_i64() {
+        return Some(serde_json::json!(number));
+    }
+    if let Some(number) = value.as_u64() {
+        return Some(serde_json::json!(number));
+    }
+    value.as_f64().map(|number| serde_json::json!(number))
 }
 
 fn frontmatter_block(text: &str) -> Option<&str> {

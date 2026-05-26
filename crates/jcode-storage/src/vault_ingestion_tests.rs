@@ -108,7 +108,7 @@ fn vault_ingestion_preserves_currentness_frontmatter_metadata() {
     std::fs::create_dir_all(&vault).expect("create vault");
     std::fs::write(
         vault.join("Current.md"),
-        "---\nworkflow_status: active\nstatus: ready\ndateModified: 2026-05-26T00:00:00-0400\nreplacement_candidate: true\n---\n# Current\nContext contract evidence.\n",
+        "---\nworkflow_status: active\nstatus: ready\ndateModified: 2026-05-26T00:00:00-0400\nreplacement_candidate: true\ncategories:\n  - \"[[Categories/Knowledge]]\"\nprojects:\n  - \"[[Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Honcho-LangGraph-Second-Brain]]\"\ntags:\n  - task\n  - jcode\n---\n# Current\nContext contract evidence.\n",
     )
     .expect("write Current");
 
@@ -120,6 +120,13 @@ fn vault_ingestion_preserves_currentness_frontmatter_metadata() {
     assert_eq!(metadata["status"], "ready");
     assert_eq!(metadata["dateModified"], "2026-05-26T00:00:00-0400");
     assert_eq!(metadata["replacement_candidate"], true);
+    assert_eq!(metadata["categories"][0], "[[Categories/Knowledge]]");
+    assert_eq!(
+        metadata["projects"][0],
+        "[[Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Honcho-LangGraph-Second-Brain]]"
+    );
+    assert_eq!(metadata["tags"][0], "task");
+    assert_eq!(metadata["tags"][1], "jcode");
 }
 
 #[test]
