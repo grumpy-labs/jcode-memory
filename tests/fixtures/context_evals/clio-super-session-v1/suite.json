@@ -471,6 +471,22 @@
       ]
     },
     {
+      "name": "live_broker_broad_ghostty_retrieval",
+      "group": "retrieval",
+      "source": "live_broker",
+      "description": "Live broker socket should rank the Ghostty terminal note first for a broad, focused terminal-emulator prompt.",
+      "query": "improving a terminal emulator setup with shell prompt styling, system monitor integration, and productivity tweaks?",
+      "limit": 8,
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "assertions": [
+        {"type": "packet_version", "equals": "clio_context_packet_v1"},
+        {"type": "slot_non_empty", "slot": "authority"},
+        {"type": "slot_first_field_contains", "slot": "authority", "field": "source_path", "contains": "Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off.md"},
+        {"type": "slot_first_field_equals", "slot": "authority", "field": "relevance.rank", "equals": 1},
+        {"type": "slot_first_field_equals", "slot": "authority", "field": "relevance.retrieval_mode", "equals": "duckdb_broker_store_semantic"}
+      ]
+    },
+    {
       "name": "installed_provider_current_plan_authority",
       "group": "authority_conflict",
       "source": "installed_provider",

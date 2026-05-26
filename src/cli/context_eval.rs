@@ -99,7 +99,17 @@ enum ContextAssertion {
         field: String,
         contains: String,
     },
+    SlotFirstFieldContains {
+        slot: String,
+        field: String,
+        contains: String,
+    },
     SlotFieldEquals {
+        slot: String,
+        field: String,
+        equals: Value,
+    },
+    SlotFirstFieldEquals {
         slot: String,
         field: String,
         equals: Value,
@@ -701,6 +711,23 @@ fn evaluate_assertion(
                 ))
             }
         }
+        ContextAssertion::SlotFirstFieldContains {
+            slot,
+            field,
+            contains,
+        } => {
+            let packet = output_packet(output)?;
+            let item = first_slot_item(packet, slot)?;
+            match item_field_text(item, field) {
+                Some(text) if text.contains(contains) => Ok(()),
+                Some(text) => Err(format!(
+                    "first item in slot {slot:?} has field {field:?} text {text:?}, which does not contain {contains:?}"
+                )),
+                None => Err(format!(
+                    "first item in slot {slot:?} has no field {field:?}"
+                )),
+            }
+        }
         ContextAssertion::SlotFieldEquals {
             slot,
             field,
@@ -717,6 +744,23 @@ fn evaluate_assertion(
                 Err(format!(
                     "no item in slot {slot:?} has field {field:?} equal to {equals}"
                 ))
+            }
+        }
+        ContextAssertion::SlotFirstFieldEquals {
+            slot,
+            field,
+            equals,
+        } => {
+            let packet = output_packet(output)?;
+            let item = first_slot_item(packet, slot)?;
+            match item_field_value(item, field) {
+                Some(value) if value == *equals => Ok(()),
+                Some(value) => Err(format!(
+                    "first item in slot {slot:?} has field {field:?} value {value}, expected {equals}"
+                )),
+                None => Err(format!(
+                    "first item in slot {slot:?} has no field {field:?}"
+                )),
             }
         }
         ContextAssertion::SlotForbidsFieldContains {
@@ -841,6 +885,15 @@ fn slot_items<'a>(
         }
     }
     Err(format!("unknown context packet slot {slot:?}"))
+}
+
+fn first_slot_item<'a>(
+    packet: &'a ClioContextPacketV1,
+    slot: &str,
+) -> Result<&'a ClioContextPacketItem, String> {
+    slot_items(packet, slot)?
+        .first()
+        .ok_or_else(|| format!("slot {slot:?} is empty"))
 }
 
 fn packet_slot_slices(
@@ -1015,6 +1068,54 @@ mod tests {
                 }
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn slot_first_field_assertions_check_only_the_first_item() {
+        let packet: ClioContextPacketV1 = serde_json::from_value(json!({
+            "version": "clio_context_packet_v1",
+            "authority": [
+                {
+                    "id": "vault:first",
+                    "kind": "vault_chunk",
+                    "scope": "vault",
+                    "source_path": "TaskNotes/Prompt in Progress.md",
+                    "relevance": {"rank": 1}
+                },
+                {
+                    "id": "vault:second",
+                    "kind": "vault_chunk",
+                    "scope": "vault",
+                    "source_path": "TaskNotes/Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off.md",
+                    "relevance": {"rank": 2}
+                }
+            ]
+        }))
+        .unwrap();
+        let output = ContextProbeOutput::Packet(packet);
+
+        assert!(
+            evaluate_assertion(
+                &output,
+                &ContextAssertion::SlotFirstFieldContains {
+                    slot: "authority".to_string(),
+                    field: "source_path".to_string(),
+                    contains: "Prompt in Progress.md".to_string(),
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            evaluate_assertion(
+                &output,
+                &ContextAssertion::SlotFirstFieldContains {
+                    slot: "authority".to_string(),
+                    field: "source_path".to_string(),
+                    contains: "Ghostty Terminal".to_string(),
+                }
+            )
+            .is_err()
         );
     }
 }
