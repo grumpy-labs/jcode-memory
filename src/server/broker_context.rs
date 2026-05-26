@@ -1383,16 +1383,17 @@ fn clio_context_packet_item(item: &BrokerContextItem) -> ClioContextPacketItem {
     let source_uri = clio_source_uri(item);
     let source_path = clio_source_path(item, source_uri.as_deref());
     let authority_class = clio_authority_class(item, source_path.as_deref());
-    let slot = clio_packet_slot(item, authority_class.as_str(), source_path.as_deref());
+    let slot = clio_packet_slot(item, authority_class.as_str());
     let (line_start, line_end) = clio_line_span(item);
-    let workflow_status = clio_workflow_status(authority_class.as_str(), source_path.as_deref());
+    let workflow_status =
+        clio_workflow_status(item, authority_class.as_str(), source_path.as_deref());
     let why_included = clio_why_included(
         slot.as_str(),
         authority_class.as_str(),
         item.relevance.as_ref().and_then(|relevance| relevance.rank),
     );
     let conflict_group = if slot == "conflicts" {
-        Some("currentness".to_string())
+        Some(clio_conflict_group(item, source_path.as_deref()))
     } else {
         None
     };
@@ -1480,30 +1481,22 @@ fn clio_authority_class(item: &BrokerContextItem, source_path: Option<&str>) -> 
     }
 
     let path = source_path.unwrap_or_default();
-    let basename = path.rsplit('/').next().unwrap_or(path);
+    if clio_metadata_workflow_status(item)
+        .as_deref()
+        .is_some_and(clio_status_is_historical)
+    {
+        return "historical_context".to_string();
+    }
     if path.contains("/System/Clio/Core/") {
         return "clio_core".to_string();
     }
-    if matches!(
-        basename,
-        "CURRENT.md"
-            | "Master-Second-Brain-Execution-Plan.md"
-            | "Clio-Context-Engineering-Operating-Model.md"
-            | "jcode-Nervous-System-Broker-Parity-Plan.md"
-    ) {
+    if clio_path_is_current_project_authority(path) {
         return "current_project_authority".to_string();
     }
     if path.contains("TaskNotes/") {
         return "active_task_note".to_string();
     }
-    if path.contains("OpenClaw")
-        || path.contains("Honcho")
-        || path.contains("Archive")
-        || path.contains("backup")
-        || path.contains("rollback")
-        || path.contains("pre-super-session-adoption")
-        || path.contains("Super-Session-Fork")
-    {
+    if clio_path_is_historical(path) {
         return "historical_context".to_string();
     }
     if kind.starts_with("vault_") {
@@ -1512,11 +1505,7 @@ fn clio_authority_class(item: &BrokerContextItem, source_path: Option<&str>) -> 
     "broker_context".to_string()
 }
 
-fn clio_packet_slot(
-    item: &BrokerContextItem,
-    authority_class: &str,
-    source_path: Option<&str>,
-) -> String {
+fn clio_packet_slot(item: &BrokerContextItem, authority_class: &str) -> String {
     match item.kind.as_str() {
         "goal" | "todo" => "active_task".to_string(),
         "memory" => "durable_memory".to_string(),
@@ -1534,13 +1523,7 @@ fn clio_packet_slot(
             "authority".to_string()
         }
         _ if authority_class == "historical_context"
-            && source_path
-                .map(|path| {
-                    path.contains("Super-Session-Fork")
-                        || path.contains("pre-super-session-adoption")
-                        || path.contains("rollback")
-                })
-                .unwrap_or(false) =>
+            && !clio_item_query_allows_historical_context(item) =>
         {
             "conflicts".to_string()
         }
@@ -1548,15 +1531,22 @@ fn clio_packet_slot(
     }
 }
 
-fn clio_workflow_status(authority_class: &str, source_path: Option<&str>) -> Option<String> {
+fn clio_workflow_status(
+    item: &BrokerContextItem,
+    authority_class: &str,
+    source_path: Option<&str>,
+) -> Option<String> {
+    if authority_class == "historical_context" {
+        return Some("historical".to_string());
+    }
+    if let Some(status) = clio_metadata_workflow_status(item) {
+        return Some(status);
+    }
     if matches!(
         authority_class,
         "current_project_authority" | "clio_core" | "active_task_note"
     ) {
         return Some("active".to_string());
-    }
-    if authority_class == "historical_context" {
-        return Some("historical".to_string());
     }
     source_path.and_then(|path| {
         if path.contains("Archive") {
@@ -1565,6 +1555,126 @@ fn clio_workflow_status(authority_class: &str, source_path: Option<&str>) -> Opt
             None
         }
     })
+}
+
+fn clio_metadata_workflow_status(item: &BrokerContextItem) -> Option<String> {
+    json_string_field(&item.metadata, "workflow_status")
+        .or_else(|| json_string_field(&item.metadata, "status"))
+        .or_else(|| json_frontmatter_string_field(&item.metadata, "workflow_status"))
+        .or_else(|| json_frontmatter_string_field(&item.metadata, "status"))
+}
+
+fn json_frontmatter_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    let frontmatter = json_string_field(value, "frontmatter_json")?;
+    serde_json::from_str::<serde_json::Value>(&frontmatter)
+        .ok()
+        .and_then(|metadata| json_string_field(&metadata, key))
+}
+
+fn clio_status_is_historical(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "historical" | "superseded" | "archived" | "archive" | "rollback" | "rejected"
+    )
+}
+
+fn clio_path_is_current_project_authority(path: &str) -> bool {
+    if clio_path_is_historical(path) {
+        return false;
+    }
+
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    if matches!(
+        basename,
+        "CURRENT.md"
+            | "Master-Second-Brain-Execution-Plan.md"
+            | "Clio-Context-Engineering-Operating-Model.md"
+            | "jcode-Nervous-System-Broker-Parity-Plan.md"
+    ) {
+        return true;
+    }
+
+    path.contains("Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/")
+}
+
+fn clio_path_is_historical(path: &str) -> bool {
+    let path_lower = path.to_ascii_lowercase();
+    let active_clio_project = path_lower.contains("projects/hermes-honcho-langgraph-second-brain/");
+    path_lower.contains("pre-super-session-adoption")
+        || path_lower.contains("super-session-fork")
+        || path_lower.contains("/archive/")
+        || path_lower.starts_with("archive/")
+        || path_lower.contains("/backup")
+        || path_lower.contains("rollback")
+        || (!active_clio_project
+            && (path_lower.contains("openclaw") || path_lower.contains("honcho")))
+}
+
+fn clio_item_query_allows_historical_context(item: &BrokerContextItem) -> bool {
+    item.relevance
+        .as_ref()
+        .and_then(|relevance| relevance.query.as_deref())
+        .is_some_and(query_allows_historical_context)
+}
+
+fn query_allows_historical_context(query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    [
+        "history",
+        "historical",
+        "rollback",
+        "migration",
+        "migrate",
+        "provenance",
+        "old",
+        "older",
+        "previous",
+        "before",
+        "legacy",
+        "archive",
+        "archived",
+        "compare",
+        "comparison",
+    ]
+    .iter()
+    .any(|needle| query.contains(needle))
+}
+
+fn clio_conflict_group(item: &BrokerContextItem, source_path: Option<&str>) -> String {
+    let path = source_path.unwrap_or_default().to_ascii_lowercase();
+    let basename = path.rsplit('/').next().unwrap_or(&path);
+    let mut text_haystack = String::new();
+    for value in [
+        item.title.as_deref(),
+        item.summary.as_deref(),
+        item.content.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        text_haystack.push('\n');
+        text_haystack.push_str(&value.to_ascii_lowercase());
+    }
+    if text_haystack.contains("provider")
+        || text_haystack.contains("honcho")
+        || text_haystack.contains("surrealdb")
+        || text_haystack.contains("jcode_graph")
+        || text_haystack.contains("memory path")
+        || basename.contains("honcho")
+    {
+        return "provider_currentness".to_string();
+    }
+    if path.contains("openclaw") || text_haystack.contains("project name") {
+        return "project_name".to_string();
+    }
+    if text_haystack.contains("task")
+        || text_haystack.contains("checklist")
+        || text_haystack.contains("progress")
+        || text_haystack.contains("status")
+    {
+        return "task_state".to_string();
+    }
+    "currentness".to_string()
 }
 
 fn clio_why_included(slot: &str, authority_class: &str, rank: Option<usize>) -> String {
@@ -1693,9 +1803,25 @@ fn collect_vault_context_items_with_client(
     );
     let strong_lexical_threshold = strong_lexical_match_threshold(query);
     let task_item_query = is_vault_task_item_query(query);
+    let relationship_query = vault_relationship_query_requested(Some(query));
     hits.sort_by(|left, right| {
-        left.priority(query, strong_lexical_threshold, task_item_query)
-            .cmp(&right.priority(query, strong_lexical_threshold, task_item_query))
+        let primary_order = if relationship_query {
+            left.priority(query, strong_lexical_threshold, task_item_query)
+                .cmp(&right.priority(query, strong_lexical_threshold, task_item_query))
+                .then_with(|| {
+                    left.currentness_priority(query)
+                        .cmp(&right.currentness_priority(query))
+                })
+        } else {
+            left.currentness_priority(query)
+                .cmp(&right.currentness_priority(query))
+                .then_with(|| {
+                    left.priority(query, strong_lexical_threshold, task_item_query)
+                        .cmp(&right.priority(query, strong_lexical_threshold, task_item_query))
+                })
+        };
+
+        primary_order
             .then_with(|| {
                 right
                     .score()
@@ -1780,6 +1906,30 @@ impl VaultContextHit {
         }
     }
 
+    fn path(&self) -> &str {
+        match self {
+            Self::Relationship(row) => &row.source_path,
+            Self::SemanticChunk(row) => &row.path,
+            Self::Chunk(row) => &row.path,
+            Self::Task(row) => &row.path,
+            Self::Link(row) => &row.source_path,
+        }
+    }
+
+    fn frontmatter_json(&self) -> &str {
+        match self {
+            Self::Relationship(row) => &row.frontmatter_json,
+            Self::SemanticChunk(row) => &row.frontmatter_json,
+            Self::Chunk(row) => &row.frontmatter_json,
+            Self::Task(row) => &row.frontmatter_json,
+            Self::Link(row) => &row.frontmatter_json,
+        }
+    }
+
+    fn currentness_priority(&self, query: &str) -> usize {
+        vault_currentness_priority(self.path(), self.frontmatter_json(), query)
+    }
+
     fn priority(
         &self,
         query: &str,
@@ -1787,7 +1937,12 @@ impl VaultContextHit {
         task_item_query: bool,
     ) -> usize {
         match self {
-            Self::Relationship(_) => 0,
+            Self::Relationship(row) => match row.relationship.as_str() {
+                "backlink" => 0,
+                "outlink" => 1,
+                "folder_neighbor" => 2,
+                _ => 3,
+            },
             Self::Task(row)
                 if task_item_query
                     && is_strong_lexical_match(
@@ -1846,6 +2001,94 @@ impl VaultContextHit {
             Self::Link(row) => vault_link_broker_item(row, query, rank, working_dir),
         }
     }
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_currentness_priority(path: &str, frontmatter_json: &str, query: &str) -> usize {
+    if query_explicitly_names_vault_path(query, path) {
+        return 0;
+    }
+
+    let workflow_status = frontmatter_json_string(frontmatter_json, "workflow_status")
+        .or_else(|| frontmatter_json_string(frontmatter_json, "status"));
+    if workflow_status
+        .as_deref()
+        .is_some_and(clio_status_is_historical)
+        || vault_path_is_historical(path)
+    {
+        return if query_allows_historical_context(query) {
+            4
+        } else {
+            20
+        };
+    }
+
+    if vault_path_is_current_project_authority(path) && query_requests_current_authority(query) {
+        return 1;
+    }
+    if path.contains("/System/Clio/Core/") || path.starts_with("System/Clio/Core/") {
+        return 2;
+    }
+    if path.contains("TaskNotes/") || path.starts_with("TaskNotes/") {
+        return 3;
+    }
+    5
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn query_explicitly_names_vault_path(query: &str, path: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    let path = path.to_ascii_lowercase();
+    if query.contains(&path) {
+        return true;
+    }
+    let basename = path.rsplit('/').next().unwrap_or(&path);
+    query.contains(basename)
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn query_requests_current_authority(query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    [
+        "active plan",
+        "canonical plan",
+        "current plan",
+        "current project",
+        "current state",
+        "current status",
+        "context contract",
+        "context engineering",
+        "context packet",
+        "context provider",
+        "operating model",
+        "provider",
+        "broker",
+        "clio",
+        "hermes",
+        "jcode",
+        "super-session",
+        "handoff",
+        "next action",
+    ]
+    .iter()
+    .any(|needle| query.contains(needle))
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_path_is_current_project_authority(path: &str) -> bool {
+    clio_path_is_current_project_authority(path)
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn vault_path_is_historical(path: &str) -> bool {
+    clio_path_is_historical(path)
+}
+
+#[cfg(feature = "duckdb-storage")]
+fn frontmatter_json_string(frontmatter_json: &str, key: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(frontmatter_json)
+        .ok()
+        .and_then(|metadata| json_string_field(&metadata, key))
 }
 
 #[cfg(feature = "duckdb-storage")]
@@ -2136,6 +2379,7 @@ fn vault_relationship_broker_item(
             "source_checksum": row.source_checksum,
             "target_checksum": row.target_checksum,
             "mtime_ns": row.mtime_ns,
+            "frontmatter_json": row.frontmatter_json,
         }),
     }
 }
@@ -2197,6 +2441,7 @@ fn vault_chunk_broker_item(
             "checksum": row.checksum,
             "source_checksum": row.source_checksum,
             "mtime_ns": row.mtime_ns,
+            "frontmatter_json": row.frontmatter_json,
             "start_line": row.start_line,
             "end_line": row.end_line,
             "uri": uri,
@@ -2265,6 +2510,7 @@ fn vault_semantic_chunk_broker_item(
             "checksum": row.checksum,
             "source_checksum": row.source_checksum,
             "mtime_ns": row.mtime_ns,
+            "frontmatter_json": row.frontmatter_json,
             "start_line": row.start_line,
             "end_line": row.end_line,
             "uri": uri,
@@ -2331,6 +2577,7 @@ fn vault_task_broker_item(
             "checked": row.checked,
             "source_checksum": row.source_checksum,
             "mtime_ns": row.mtime_ns,
+            "frontmatter_json": row.frontmatter_json,
             "line": row.line,
             "uri": uri,
         }),
@@ -2395,6 +2642,7 @@ fn vault_link_broker_item(
             "link_kind": row.kind,
             "source_checksum": row.source_checksum,
             "mtime_ns": row.mtime_ns,
+            "frontmatter_json": row.frontmatter_json,
             "uri": uri,
         }),
     }
@@ -3854,6 +4102,184 @@ mod tests {
         assert_eq!(
             packet.tool_hints[0].authority_class.as_deref(),
             Some("procedural_hint")
+        );
+    }
+
+    #[test]
+    fn clio_context_packet_routes_provider_currentness_disagreement_to_conflicts() {
+        let old_provider_note = BrokerContextItem {
+            id: "vault_chunk:old-provider-note".to_string(),
+            kind: "vault_chunk".to_string(),
+            scope: "vault".to_string(),
+            content_format: "markdown".to_string(),
+            title: Some("Old Honcho provider note".to_string()),
+            summary: Some("Older note says Honcho is the main context path.".to_string()),
+            content: Some("Honcho is the active memory provider.".to_string()),
+            tags: Vec::new(),
+            source: Some(
+                "vault://Projects/OpenClaw-Stack/Honcho-Provider-Plan.md#provider".to_string(),
+            ),
+            score: Some(0.99),
+            origin: BrokerContextOrigin {
+                tool: Some("duckdb_broker_store".to_string()),
+                uri: Some(
+                    "vault://Projects/OpenClaw-Stack/Honcho-Provider-Plan.md#provider".to_string(),
+                ),
+                path: Some("Projects/OpenClaw-Stack/Honcho-Provider-Plan.md".to_string()),
+                ..Default::default()
+            },
+            relevance: Some(BrokerContextRelevance {
+                query: Some("current Clio provider".to_string()),
+                retrieval_mode: Some("duckdb_broker_store".to_string()),
+                rank: Some(1),
+                ..Default::default()
+            }),
+            fragments: Vec::new(),
+            metadata: json!({"start_line": 1, "end_line": 8}),
+        };
+
+        let packet = clio_context_packet_from_items(&[old_provider_note.clone()]);
+
+        assert_eq!(packet.conflicts.len(), 1);
+        assert_eq!(packet.conflicts[0].item.id, old_provider_note.id);
+        assert_eq!(
+            packet.conflicts[0].conflict_group.as_deref(),
+            Some("provider_currentness")
+        );
+        assert_eq!(
+            packet.conflicts[0].workflow_status.as_deref(),
+            Some("historical")
+        );
+    }
+
+    #[test]
+    fn clio_context_packet_does_not_treat_active_project_folder_honcho_as_historical() {
+        let active_plan_note = BrokerContextItem {
+            id: "vault_chunk:active-project-plan-note".to_string(),
+            kind: "vault_chunk".to_string(),
+            scope: "vault".to_string(),
+            content_format: "markdown".to_string(),
+            title: Some("Active Clio implementation note".to_string()),
+            summary: Some("Current super-session implementation details.".to_string()),
+            content: Some("This is an active Clio plan note in the Hermes plan folder.".to_string()),
+            tags: Vec::new(),
+            source: Some("vault://Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/Clio-Implementation-Details.md#current".to_string()),
+            score: Some(0.99),
+            origin: BrokerContextOrigin {
+                tool: Some("duckdb_broker_store".to_string()),
+                uri: Some("vault://Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/Clio-Implementation-Details.md#current".to_string()),
+                path: Some("Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/Clio-Implementation-Details.md".to_string()),
+                ..Default::default()
+            },
+            relevance: Some(BrokerContextRelevance {
+                query: Some("current Clio implementation plan".to_string()),
+                retrieval_mode: Some("duckdb_broker_store".to_string()),
+                rank: Some(1),
+                ..Default::default()
+            }),
+            fragments: Vec::new(),
+            metadata: json!({"start_line": 20, "end_line": 30}),
+        };
+
+        let packet = clio_context_packet_from_items(&[active_plan_note.clone()]);
+
+        assert_eq!(packet.authority.len(), 1);
+        assert_eq!(packet.authority[0].item.id, active_plan_note.id);
+        assert_eq!(
+            packet.authority[0].authority_class.as_deref(),
+            Some("current_project_authority")
+        );
+        assert!(packet.conflicts.is_empty());
+    }
+
+    #[cfg(feature = "duckdb-storage")]
+    #[test]
+    fn broker_context_ranks_current_authority_above_historical_context_for_current_queries() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let db_path = _env.path().join("broker.duckdb");
+        let service = DuckDbBrokerStoreService::start(&db_path).expect("start broker store");
+        service
+            .replace_vault_records(VaultRecordBatch {
+                files: vec![
+                    VaultFileRecord {
+                        id: "current-file".to_string(),
+                        path: "Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md".to_string(),
+                        title: "jcode Super-Session Context Broker Plan".to_string(),
+                        checksum: "sha256:current".to_string(),
+                        size_bytes: 100,
+                        mtime_ns: 20,
+                        frontmatter_json: r#"{"workflow_status":"active","dateModified":"2026-05-26T00:00:00-0400"}"#.to_string(),
+                        deleted_at: None,
+                    },
+                    VaultFileRecord {
+                        id: "historical-file".to_string(),
+                        path: "Archive/OpenClaw/Honcho-Provider-Plan.md".to_string(),
+                        title: "Old Honcho provider plan".to_string(),
+                        checksum: "sha256:historical".to_string(),
+                        size_bytes: 100,
+                        mtime_ns: 10,
+                        frontmatter_json: r#"{"workflow_status":"historical","dateModified":"2026-04-01T00:00:00-0400"}"#.to_string(),
+                        deleted_at: None,
+                    },
+                ],
+                chunks: vec![
+                    VaultChunkRecord {
+                        id: "current-chunk".to_string(),
+                        file_id: "current-file".to_string(),
+                        path: "Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md".to_string(),
+                        heading: "Current provider".to_string(),
+                        content: "Current Clio context provider is jcode_graph with DuckDB gates.".to_string(),
+                        start_line: 10,
+                        end_line: 12,
+                        checksum: "sha256:current-chunk".to_string(),
+                        deleted_at: None,
+                    },
+                    VaultChunkRecord {
+                        id: "historical-chunk".to_string(),
+                        file_id: "historical-file".to_string(),
+                        path: "Archive/OpenClaw/Honcho-Provider-Plan.md".to_string(),
+                        heading: "Historical provider".to_string(),
+                        content: "Current Clio provider provider provider context context broker broker was Honcho in this old note.".to_string(),
+                        start_line: 1,
+                        end_line: 3,
+                        checksum: "sha256:historical-chunk".to_string(),
+                        deleted_at: None,
+                    },
+                ],
+                ..Default::default()
+            })
+            .expect("replace records");
+
+        let items = collect_vault_context_items_with_client(
+            &service.client(),
+            Some("/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain"),
+            "current Clio provider context broker",
+            None,
+            4,
+        )
+        .expect("collect context");
+        let first_path = items[0].origin.path.as_deref().expect("first path");
+        assert!(
+            first_path.ends_with("jcode-Nervous-System-Broker-Parity-Plan.md"),
+            "current authority should outrank historical context, got {items:?}"
+        );
+
+        let packet = clio_context_packet_from_items(&items);
+        assert_eq!(
+            packet.authority[0].source_path.as_deref(),
+            Some(
+                "Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md"
+            )
+        );
+        assert!(
+            packet
+                .conflicts
+                .iter()
+                .any(|item| item.source_path.as_deref()
+                    == Some("Archive/OpenClaw/Honcho-Provider-Plan.md")),
+            "historical provider note should be conflict evidence: {:?}",
+            packet.conflicts
         );
     }
 

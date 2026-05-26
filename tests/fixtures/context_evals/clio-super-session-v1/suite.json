@@ -175,6 +175,109 @@
       ]
     },
     {
+      "name": "historical_note_demoted_for_current_state_query",
+      "group": "authority_conflict",
+      "description": "Current-state prompts should route stale provider notes into conflicts instead of normal evidence.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "authority": [
+          {
+            "id": "vault:current-provider",
+            "kind": "vault_chunk",
+            "scope": "project",
+            "title": "CURRENT.md",
+            "summary": "Current Clio memory provider is jcode_graph / DuckDB.",
+            "source_path": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md",
+            "authority_class": "current_project_authority",
+            "workflow_status": "active",
+            "relevance": {"rank": 1}
+          }
+        ],
+        "conflicts": [
+          {
+            "id": "vault:old-honcho-provider",
+            "kind": "vault_chunk",
+            "scope": "historical",
+            "title": "Old Honcho provider note",
+            "summary": "Older memory says Honcho provider is the main context path.",
+            "source_path": "/Users/rob/Vault/Projects/OpenClaw-Stack/Honcho-Provider-Plan.md",
+            "authority_class": "historical_context",
+            "workflow_status": "historical",
+            "conflict_group": "provider_currentness"
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_field_equals", "slot": "authority", "field": "relevance.rank", "equals": 1},
+        {"type": "slot_field_equals", "slot": "conflicts", "field": "conflict_group", "equals": "provider_currentness"},
+        {"type": "slot_field_contains", "slot": "conflicts", "field": "source_path", "contains": "OpenClaw-Stack"}
+      ]
+    },
+    {
+      "name": "historical_note_allowed_for_history_query",
+      "group": "authority_conflict",
+      "description": "Historical notes remain usable as evidence when the query is explicitly about history or rollback.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "vault_evidence": [
+          {
+            "id": "vault:old-openclaw-history",
+            "kind": "vault_chunk",
+            "scope": "historical",
+            "title": "OpenClaw migration history",
+            "summary": "Historical note is relevant because the query asks for migration history.",
+            "source_path": "/Users/rob/Vault/Projects/OpenClaw-Stack/HISTORY.md",
+            "authority_class": "historical_context",
+            "workflow_status": "historical",
+            "relevance": {"rank": 1}
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_non_empty", "slot": "vault_evidence"},
+        {"type": "slot_field_equals", "slot": "vault_evidence", "field": "authority_class", "equals": "historical_context"},
+        {"type": "slot_forbids_field_contains", "slot": "conflicts", "field": "source_path", "contains": "OpenClaw-Stack/HISTORY.md"}
+      ]
+    },
+    {
+      "name": "current_named_path_beats_semantic_neighbor",
+      "group": "retrieval",
+      "description": "An explicitly named current path should outrank semantically similar neighbors.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "authority": [
+          {
+            "id": "vault:named-current-path",
+            "kind": "vault_chunk",
+            "scope": "project",
+            "title": "jcode Super-Session Context Broker Plan",
+            "summary": "Explicitly named canonical plan path wins.",
+            "source_path": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md",
+            "authority_class": "current_project_authority",
+            "workflow_status": "active",
+            "relevance": {"retrieval_mode": "duckdb_broker_store", "rank": 1, "exact_match": true}
+          }
+        ],
+        "vault_evidence": [
+          {
+            "id": "vault:semantic-neighbor",
+            "kind": "vault_chunk",
+            "scope": "project",
+            "title": "Related but unnamed context note",
+            "summary": "Semantic neighbor stays below the named current path.",
+            "source_path": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/Related-Context-Note.md",
+            "authority_class": "source_evidence",
+            "relevance": {"retrieval_mode": "duckdb_broker_store_semantic", "rank": 2}
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_field_contains", "slot": "authority", "field": "source_path", "contains": "jcode-Nervous-System-Broker-Parity-Plan.md"},
+        {"type": "slot_field_equals", "slot": "authority", "field": "relevance.rank", "equals": 1},
+        {"type": "slot_field_equals", "slot": "vault_evidence", "field": "relevance.rank", "equals": 2}
+      ]
+    },
+    {
       "name": "retrieval_scope_exact",
       "group": "retrieval",
       "description": "Exact text recall should use exact source spans and avoid unrelated historical distractors.",

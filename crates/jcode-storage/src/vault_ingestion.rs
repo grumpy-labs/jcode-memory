@@ -175,7 +175,7 @@ fn append_markdown_file_records(
         checksum,
         size_bytes: metadata.len() as i64,
         mtime_ns: modified_time_ns(&metadata),
-        frontmatter_json: vault_ingestion_metadata_json(),
+        frontmatter_json: vault_ingestion_metadata_json(&text),
         deleted_at: None,
     };
     let chunks = chunk_body(&file_id, &rel_path, body, line_offset);
@@ -218,8 +218,76 @@ fn append_markdown_file_records(
     Ok(())
 }
 
-fn vault_ingestion_metadata_json() -> String {
-    format!(r#"{{"ingestion_version":{VAULT_INGESTION_VERSION}}}"#)
+fn vault_ingestion_metadata_json(text: &str) -> String {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "ingestion_version".to_string(),
+        serde_json::json!(VAULT_INGESTION_VERSION),
+    );
+
+    if let Some(frontmatter) = frontmatter_block(text) {
+        for line in frontmatter.lines() {
+            if line.starts_with(char::is_whitespace) || line.trim_start().starts_with('-') {
+                continue;
+            }
+            let Some((raw_key, raw_value)) = line.split_once(':') else {
+                continue;
+            };
+            let key = raw_key.trim();
+            if key.is_empty()
+                || !key
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+            {
+                continue;
+            }
+            let value = raw_value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            metadata.insert(key.to_string(), frontmatter_scalar_value(value));
+        }
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(metadata))
+        .unwrap_or_else(|_| format!(r#"{{"ingestion_version":{VAULT_INGESTION_VERSION}}}"#))
+}
+
+fn frontmatter_block(text: &str) -> Option<&str> {
+    if !text.starts_with("---") {
+        return None;
+    }
+    let mut consumed = 0usize;
+    for (idx, line) in text.split_inclusive('\n').enumerate() {
+        let marker = line.trim_end_matches(['\r', '\n']).trim();
+        if idx == 0 {
+            if marker != "---" {
+                return None;
+            }
+        } else if marker == "---" {
+            let start = text.lines().next().map(|line| line.len() + 1).unwrap_or(0);
+            let end = consumed;
+            return text.get(start..end);
+        }
+        consumed += line.len();
+    }
+    None
+}
+
+fn frontmatter_scalar_value(value: &str) -> serde_json::Value {
+    let value = value
+        .trim()
+        .trim_matches(|ch| ch == '"' || ch == '\'')
+        .trim()
+        .to_string();
+    match value.as_str() {
+        "true" => serde_json::Value::Bool(true),
+        "false" => serde_json::Value::Bool(false),
+        _ => value
+            .parse::<i64>()
+            .map(|number| serde_json::json!(number))
+            .unwrap_or_else(|_| serde_json::Value::String(value)),
+    }
 }
 
 fn records_for_file(batch: &VaultRecordBatch, file_id: &str) -> VaultRecordBatch {

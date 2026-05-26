@@ -102,6 +102,27 @@ fn vault_ingestion_reports_source_lines_after_frontmatter() {
 }
 
 #[test]
+fn vault_ingestion_preserves_currentness_frontmatter_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let vault = temp.path().join("Vault");
+    std::fs::create_dir_all(&vault).expect("create vault");
+    std::fs::write(
+        vault.join("Current.md"),
+        "---\nworkflow_status: active\nstatus: ready\ndateModified: 2026-05-26T00:00:00-0400\nreplacement_candidate: true\n---\n# Current\nContext contract evidence.\n",
+    )
+    .expect("write Current");
+
+    let records = collect_vault_records(&vault).expect("collect records");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&records.files[0].frontmatter_json).expect("frontmatter json");
+
+    assert_eq!(metadata["workflow_status"], "active");
+    assert_eq!(metadata["status"], "ready");
+    assert_eq!(metadata["dateModified"], "2026-05-26T00:00:00-0400");
+    assert_eq!(metadata["replacement_candidate"], true);
+}
+
+#[test]
 fn vault_ingestion_reconciles_updates_deletes_and_renames() {
     let temp = tempfile::tempdir().expect("tempdir");
     let vault = temp.path().join("Vault");

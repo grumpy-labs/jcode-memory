@@ -139,6 +139,7 @@ pub struct VaultChunkContextRow {
     pub checksum: String,
     pub source_checksum: String,
     pub mtime_ns: i64,
+    pub frontmatter_json: String,
     pub score: f64,
     pub matched_terms: Vec<String>,
 }
@@ -154,6 +155,7 @@ pub struct VaultTaskContextRow {
     pub line: i64,
     pub source_checksum: String,
     pub mtime_ns: i64,
+    pub frontmatter_json: String,
     pub score: f64,
     pub matched_terms: Vec<String>,
 }
@@ -169,6 +171,7 @@ pub struct VaultLinkContextRow {
     pub raw: String,
     pub source_checksum: String,
     pub mtime_ns: i64,
+    pub frontmatter_json: String,
     pub score: f64,
     pub matched_terms: Vec<String>,
 }
@@ -188,6 +191,7 @@ pub struct VaultRelationshipContextRow {
     pub source_checksum: String,
     pub target_checksum: Option<String>,
     pub mtime_ns: i64,
+    pub frontmatter_json: String,
     pub score: f64,
     pub retrieval_mode: String,
 }
@@ -220,6 +224,7 @@ pub struct VaultChunkEmbeddingHit {
     pub checksum: String,
     pub source_checksum: String,
     pub mtime_ns: i64,
+    pub frontmatter_json: String,
     pub embedding_model: String,
     pub score: f64,
 }
@@ -250,6 +255,7 @@ struct ActiveVaultFile {
     title: String,
     checksum: String,
     mtime_ns: i64,
+    frontmatter_json: String,
 }
 
 #[derive(Debug, Clone)]
@@ -773,6 +779,7 @@ impl DuckDbBrokerStore {
                 c.checksum,
                 f.checksum,
                 f.mtime_ns,
+                f.frontmatter_json,
                 e.embedding_model,
                 e.embedding_json
             FROM vault_embedding e
@@ -796,7 +803,7 @@ impl DuckDbBrokerStore {
         let mut hits = Vec::new();
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
-            let embedding_json: String = row.get(12)?;
+            let embedding_json: String = row.get(13)?;
             let embedding = parse_embedding_json(&embedding_json)
                 .with_context(|| format!("invalid stored embedding for row {id}"))?;
             let score = cosine_similarity(query_embedding, &embedding);
@@ -812,7 +819,8 @@ impl DuckDbBrokerStore {
                 checksum: row.get(8)?,
                 source_checksum: row.get(9)?,
                 mtime_ns: row.get(10)?,
-                embedding_model: row.get(11)?,
+                frontmatter_json: row.get(11)?,
+                embedding_model: row.get(12)?,
                 score,
             });
         }
@@ -853,7 +861,8 @@ impl DuckDbBrokerStore {
                 c.end_line,
                 c.checksum,
                 f.checksum,
-                f.mtime_ns
+                f.mtime_ns,
+                f.frontmatter_json
             FROM vault_chunk c
             JOIN vault_file f ON f.id = c.file_id
             WHERE c.deleted_at IS NULL
@@ -885,6 +894,7 @@ impl DuckDbBrokerStore {
                 checksum: row.get(8)?,
                 source_checksum: row.get(9)?,
                 mtime_ns: row.get(10)?,
+                frontmatter_json: row.get(11)?,
                 score,
                 matched_terms,
             });
@@ -920,7 +930,8 @@ impl DuckDbBrokerStore {
                 t.content,
                 t.line,
                 f.checksum,
-                f.mtime_ns
+                f.mtime_ns,
+                f.frontmatter_json
             FROM vault_task t
             JOIN vault_file f ON f.id = t.file_id
             WHERE t.deleted_at IS NULL
@@ -948,6 +959,7 @@ impl DuckDbBrokerStore {
                 line: row.get(6)?,
                 source_checksum: row.get(7)?,
                 mtime_ns: row.get(8)?,
+                frontmatter_json: row.get(9)?,
                 score,
                 matched_terms,
             });
@@ -983,7 +995,8 @@ impl DuckDbBrokerStore {
                 l.kind,
                 l.raw,
                 f.checksum,
-                f.mtime_ns
+                f.mtime_ns,
+                f.frontmatter_json
             FROM vault_link l
             JOIN vault_file f ON f.id = l.source_file_id
             WHERE l.deleted_at IS NULL
@@ -1013,6 +1026,7 @@ impl DuckDbBrokerStore {
                 raw,
                 source_checksum: row.get(7)?,
                 mtime_ns: row.get(8)?,
+                frontmatter_json: row.get(9)?,
                 score,
                 matched_terms,
             });
@@ -1078,6 +1092,7 @@ impl DuckDbBrokerStore {
                 source_checksum: target_file.checksum.clone(),
                 target_checksum: linked_file.map(|file| file.checksum.clone()),
                 mtime_ns: target_file.mtime_ns,
+                frontmatter_json: target_file.frontmatter_json.clone(),
                 score: 100.0,
                 retrieval_mode: "duckdb_broker_store_relationship".to_string(),
             });
@@ -1109,6 +1124,7 @@ impl DuckDbBrokerStore {
                 source_checksum: source_file.checksum.clone(),
                 target_checksum: Some(target_file.checksum.clone()),
                 mtime_ns: source_file.mtime_ns,
+                frontmatter_json: source_file.frontmatter_json.clone(),
                 score: 95.0,
                 retrieval_mode: "duckdb_broker_store_relationship".to_string(),
             });
@@ -1137,6 +1153,7 @@ impl DuckDbBrokerStore {
                 source_checksum: target_file.checksum.clone(),
                 target_checksum: Some(file.checksum.clone()),
                 mtime_ns: file.mtime_ns,
+                frontmatter_json: target_file.frontmatter_json.clone(),
                 score: 25.0,
                 retrieval_mode: "duckdb_broker_store_relationship".to_string(),
             });
@@ -1161,7 +1178,7 @@ impl DuckDbBrokerStore {
     fn active_vault_files_for_relationships(&self) -> Result<Vec<ActiveVaultFile>> {
         let mut statement = self.connection.prepare(
             r#"
-            SELECT id, path, title, checksum, mtime_ns
+            SELECT id, path, title, checksum, mtime_ns, frontmatter_json
             FROM vault_file
             WHERE deleted_at IS NULL
             ORDER BY path
@@ -1176,6 +1193,7 @@ impl DuckDbBrokerStore {
                 title: row.get(2)?,
                 checksum: row.get(3)?,
                 mtime_ns: row.get(4)?,
+                frontmatter_json: row.get(5)?,
             });
         }
         Ok(files)

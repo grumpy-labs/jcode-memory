@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 #[derive(Debug, Deserialize)]
 struct ContextEvalSuite {
@@ -106,6 +107,7 @@ struct ContextEvalReport {
     suite_path: String,
     mode: String,
     timestamp: String,
+    duration_ms: u64,
     provider: ContextEvalProviderReport,
     passed: bool,
     pass_rate: f64,
@@ -133,8 +135,18 @@ struct ContextEvalProbeReport {
     group: String,
     description: String,
     source: String,
+    duration_ms: u64,
+    packet_budget: ContextPacketBudgetReport,
     passed: bool,
     failures: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ContextPacketBudgetReport {
+    total_items: usize,
+    serialized_chars: usize,
+    slot_item_counts: BTreeMap<String, usize>,
+    slot_serialized_chars: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -230,6 +242,7 @@ async fn evaluate_suite(
     suite_path: &Path,
     mode: ContextEvalProbeSource,
 ) -> Result<ContextEvalReport> {
+    let suite_started = Instant::now();
     if suite.probes.is_empty() {
         anyhow::bail!("context eval suite {} has no probes", suite.name);
     }
@@ -260,7 +273,10 @@ async fn evaluate_suite(
         if let Some(working_dir) = &probe.working_dir {
             working_dirs.insert(working_dir.clone());
         }
-        let failures = evaluate_probe(&probe, mode).await?;
+        let probe_started = Instant::now();
+        let evaluation = evaluate_probe(&probe, mode).await?;
+        let duration_ms = elapsed_millis(probe_started);
+        let failures = evaluation.failures;
         let passed = failures.is_empty();
         let group = groups.entry(probe.group.clone()).or_default();
         group.probe_count += 1;
@@ -272,6 +288,8 @@ async fn evaluate_suite(
             group: probe.group,
             description: probe.description,
             source: probe.source.as_str().to_string(),
+            duration_ms,
+            packet_budget: evaluation.packet_budget,
             passed,
             failures,
         });
@@ -317,6 +335,7 @@ async fn evaluate_suite(
         suite_path: suite_path.display().to_string(),
         mode: mode.as_str().to_string(),
         timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        duration_ms: elapsed_millis(suite_started),
         provider: ContextEvalProviderReport {
             kind: mode.as_str().to_string(),
             socket_path: (mode == ContextEvalProbeSource::LiveBroker)
@@ -336,18 +355,57 @@ async fn evaluate_suite(
     })
 }
 
+struct ContextProbeEvaluation {
+    failures: Vec<String>,
+    packet_budget: ContextPacketBudgetReport,
+}
+
 async fn evaluate_probe(
     probe: &ContextEvalProbe,
     mode: ContextEvalProbeSource,
-) -> Result<Vec<String>> {
+) -> Result<ContextProbeEvaluation> {
     let packet = packet_for_probe(probe, mode).await?;
+    let packet_budget = packet_budget_report(&packet)?;
     let mut failures = Vec::new();
     for assertion in &probe.assertions {
         if let Err(error) = evaluate_assertion(&packet, assertion) {
             failures.push(error);
         }
     }
-    Ok(failures)
+    Ok(ContextProbeEvaluation {
+        failures,
+        packet_budget,
+    })
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn packet_budget_report(packet: &ClioContextPacketV1) -> Result<ContextPacketBudgetReport> {
+    let mut total_items = 0;
+    let mut slot_item_counts = BTreeMap::new();
+    let mut slot_serialized_chars = BTreeMap::new();
+
+    for (slot, items) in packet_slot_slices(packet) {
+        total_items += items.len();
+        slot_item_counts.insert(slot.to_string(), items.len());
+        let serialized = serde_json::to_string(items)
+            .with_context(|| format!("failed to serialize context packet slot {slot}"))?;
+        slot_serialized_chars.insert(slot.to_string(), serialized.chars().count());
+    }
+
+    let serialized_chars = serde_json::to_string(packet)
+        .context("failed to serialize context packet for budget report")?
+        .chars()
+        .count();
+
+    Ok(ContextPacketBudgetReport {
+        total_items,
+        serialized_chars,
+        slot_item_counts,
+        slot_serialized_chars,
+    })
 }
 
 async fn packet_for_probe(
@@ -522,19 +580,29 @@ fn slot_items<'a>(
     packet: &'a ClioContextPacketV1,
     slot: &str,
 ) -> Result<&'a [ClioContextPacketItem], String> {
-    match slot {
-        "active_task" => Ok(&packet.active_task),
-        "authority" => Ok(&packet.authority),
-        "lineage" => Ok(&packet.lineage),
-        "vault_evidence" => Ok(&packet.vault_evidence),
-        "durable_memory" => Ok(&packet.durable_memory),
-        "session_evidence" => Ok(&packet.session_evidence),
-        "artifact_refs" => Ok(&packet.artifact_refs),
-        "conflicts" => Ok(&packet.conflicts),
-        "skill_hints" => Ok(&packet.skill_hints),
-        "tool_hints" => Ok(&packet.tool_hints),
-        _ => Err(format!("unknown context packet slot {slot:?}")),
+    for (name, items) in packet_slot_slices(packet) {
+        if name == slot {
+            return Ok(items);
+        }
     }
+    Err(format!("unknown context packet slot {slot:?}"))
+}
+
+fn packet_slot_slices(
+    packet: &ClioContextPacketV1,
+) -> [(&'static str, &[ClioContextPacketItem]); 10] {
+    [
+        ("active_task", &packet.active_task),
+        ("authority", &packet.authority),
+        ("lineage", &packet.lineage),
+        ("vault_evidence", &packet.vault_evidence),
+        ("durable_memory", &packet.durable_memory),
+        ("session_evidence", &packet.session_evidence),
+        ("artifact_refs", &packet.artifact_refs),
+        ("conflicts", &packet.conflicts),
+        ("skill_hints", &packet.skill_hints),
+        ("tool_hints", &packet.tool_hints),
+    ]
 }
 
 fn item_field_value(item: &ClioContextPacketItem, field: &str) -> Option<Value> {
@@ -594,22 +662,26 @@ fn default_log_path(suite: &str) -> Result<PathBuf> {
 
 fn print_human_report(report: &ContextEvalReport) {
     println!(
-        "context eval {} [{}]: {} ({}/{} probes, pass_rate={:.2}, required={:.2})",
+        "context eval {} [{}]: {} ({}/{} probes, pass_rate={:.2}, required={:.2}, duration_ms={})",
         report.suite,
         report.mode,
         if report.passed { "passed" } else { "failed" },
         report.passed_count,
         report.probe_count,
         report.pass_rate,
-        report.required_pass_rate
+        report.required_pass_rate,
+        report.duration_ms
     );
     for probe in &report.probes {
         println!(
-            "- {} [{}:{}]: {}",
+            "- {} [{}:{}]: {} (duration_ms={}, packet_items={}, packet_chars={})",
             probe.name,
             probe.source,
             probe.group,
-            if probe.passed { "passed" } else { "failed" }
+            if probe.passed { "passed" } else { "failed" },
+            probe.duration_ms,
+            probe.packet_budget.total_items,
+            probe.packet_budget.serialized_chars
         );
         for failure in &probe.failures {
             println!("  - {failure}");
