@@ -1558,6 +1558,9 @@ fn clio_authority_class(item: &BrokerContextItem, source_path: Option<&str>) -> 
     if matches!(kind, "tool" | "skill") {
         return "procedural_hint".to_string();
     }
+    if matches!(kind, "current_user_input" | "current_correction") {
+        return "current_user_input".to_string();
+    }
     if kind == "memory" {
         return "durable_memory".to_string();
     }
@@ -1601,6 +1604,7 @@ fn clio_authority_class(item: &BrokerContextItem, source_path: Option<&str>) -> 
 
 fn clio_packet_slot(item: &BrokerContextItem, authority_class: &str) -> String {
     match item.kind.as_str() {
+        "current_user_input" | "current_correction" => "active_task".to_string(),
         "goal" | "todo" => "active_task".to_string(),
         "memory" => "durable_memory".to_string(),
         "session_search_hit" | "conversation_search_hit" => "session_evidence".to_string(),
@@ -1638,7 +1642,7 @@ fn clio_workflow_status(
     }
     if matches!(
         authority_class,
-        "current_project_authority" | "clio_core" | "active_task_note"
+        "current_user_input" | "current_project_authority" | "clio_core" | "active_task_note"
     ) {
         return Some("active".to_string());
     }
@@ -4222,6 +4226,46 @@ mod tests {
 
         assert_eq!(items[0], vault_item);
         assert_eq!(items[1].kind, "tool");
+    }
+
+    #[test]
+    fn clio_context_packet_routes_current_user_input_to_active_task() {
+        let current_input = BrokerContextItem {
+            id: "current:user-correction".to_string(),
+            kind: "current_user_input".to_string(),
+            scope: "turn".to_string(),
+            content_format: "markdown".to_string(),
+            title: Some("Current user correction".to_string()),
+            summary: Some(
+                "Current correction: use the latest user request over stored context.".to_string(),
+            ),
+            content: None,
+            tags: Vec::new(),
+            source: Some("turn://current".to_string()),
+            score: Some(1.0),
+            origin: BrokerContextOrigin {
+                tool: Some("current_turn".to_string()),
+                uri: Some("turn://current".to_string()),
+                ..Default::default()
+            },
+            relevance: None,
+            fragments: Vec::new(),
+            metadata: json!({}),
+        };
+
+        let packet = clio_context_packet_from_items(&[current_input.clone()]);
+
+        assert_eq!(packet.active_task.len(), 1);
+        assert_eq!(packet.active_task[0].item.id, current_input.id);
+        assert_eq!(
+            packet.active_task[0].authority_class.as_deref(),
+            Some("current_user_input")
+        );
+        assert_eq!(
+            packet.active_task[0].workflow_status.as_deref(),
+            Some("active")
+        );
+        assert!(packet.vault_evidence.is_empty());
     }
 
     #[test]
