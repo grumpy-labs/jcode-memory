@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
 #[derive(Debug, Deserialize)]
@@ -31,14 +32,26 @@ struct ContextEvalProbe {
     packet: Option<ClioContextPacketV1>,
     #[serde(default)]
     query: Option<String>,
+    #[serde(default)]
+    tool_query: Option<String>,
     #[serde(default = "default_probe_limit")]
     limit: usize,
     #[serde(default)]
     include_provenance: bool,
     #[serde(default)]
+    expect_no_prefetch: bool,
+    #[serde(default)]
     session_id: Option<String>,
     #[serde(default)]
     working_dir: Option<String>,
+    #[serde(default)]
+    sync_user: Option<String>,
+    #[serde(default)]
+    sync_assistant: Option<String>,
+    #[serde(default)]
+    transcript_user: Option<String>,
+    #[serde(default)]
+    transcript_assistant: Option<String>,
     #[serde(default)]
     assertions: Vec<ContextAssertion>,
 }
@@ -48,6 +61,7 @@ struct ContextEvalProbe {
 enum ContextEvalProbeSource {
     Fixture,
     LiveBroker,
+    InstalledProvider,
 }
 
 impl ContextEvalProbeSource {
@@ -55,8 +69,9 @@ impl ContextEvalProbeSource {
         match value.trim().to_ascii_lowercase().as_str() {
             "fixture" => Ok(Self::Fixture),
             "live-broker" | "live_broker" => Ok(Self::LiveBroker),
+            "installed-provider" | "installed_provider" => Ok(Self::InstalledProvider),
             other => anyhow::bail!(
-                "unknown context eval mode {other:?}; expected fixture or live-broker"
+                "unknown context eval mode {other:?}; expected fixture, live-broker, or installed-provider"
             ),
         }
     }
@@ -65,6 +80,7 @@ impl ContextEvalProbeSource {
         match self {
             Self::Fixture => "fixture",
             Self::LiveBroker => "live_broker",
+            Self::InstalledProvider => "installed_provider",
         }
     }
 }
@@ -97,6 +113,18 @@ enum ContextAssertion {
         slot: String,
         field: String,
         max_chars: usize,
+    },
+    JsonFieldEquals {
+        field: String,
+        equals: Value,
+    },
+    JsonFieldContains {
+        field: String,
+        contains: String,
+    },
+    JsonFieldMin {
+        field: String,
+        min: f64,
     },
 }
 
@@ -338,8 +366,15 @@ async fn evaluate_suite(
         duration_ms: elapsed_millis(suite_started),
         provider: ContextEvalProviderReport {
             kind: mode.as_str().to_string(),
-            socket_path: (mode == ContextEvalProbeSource::LiveBroker)
-                .then(|| crate::server::socket_path().display().to_string()),
+            socket_path: match mode {
+                ContextEvalProbeSource::Fixture => None,
+                ContextEvalProbeSource::LiveBroker => {
+                    Some(crate::server::socket_path().display().to_string())
+                }
+                ContextEvalProbeSource::InstalledProvider => {
+                    std::env::var("JCODE_BROKER_SOCKET").ok()
+                }
+            },
             working_dirs: working_dirs.into_iter().collect(),
             git_hash: env!("JCODE_GIT_HASH").to_string(),
             version: env!("JCODE_VERSION").to_string(),
@@ -360,15 +395,20 @@ struct ContextProbeEvaluation {
     packet_budget: ContextPacketBudgetReport,
 }
 
+enum ContextProbeOutput {
+    Packet(ClioContextPacketV1),
+    Json(Value),
+}
+
 async fn evaluate_probe(
     probe: &ContextEvalProbe,
     mode: ContextEvalProbeSource,
 ) -> Result<ContextProbeEvaluation> {
-    let packet = packet_for_probe(probe, mode).await?;
-    let packet_budget = packet_budget_report(&packet)?;
+    let output = output_for_probe(probe, mode).await?;
+    let packet_budget = output_budget_report(&output)?;
     let mut failures = Vec::new();
     for assertion in &probe.assertions {
-        if let Err(error) = evaluate_assertion(&packet, assertion) {
+        if let Err(error) = evaluate_assertion(&output, assertion) {
             failures.push(error);
         }
     }
@@ -408,16 +448,37 @@ fn packet_budget_report(packet: &ClioContextPacketV1) -> Result<ContextPacketBud
     })
 }
 
-async fn packet_for_probe(
+fn output_budget_report(output: &ContextProbeOutput) -> Result<ContextPacketBudgetReport> {
+    match output {
+        ContextProbeOutput::Packet(packet) => packet_budget_report(packet),
+        ContextProbeOutput::Json(value) => Ok(ContextPacketBudgetReport {
+            total_items: 0,
+            serialized_chars: serde_json::to_string(value)
+                .context("failed to serialize installed-provider eval result")?
+                .chars()
+                .count(),
+            slot_item_counts: BTreeMap::new(),
+            slot_serialized_chars: BTreeMap::new(),
+        }),
+    }
+}
+
+async fn output_for_probe(
     probe: &ContextEvalProbe,
     mode: ContextEvalProbeSource,
-) -> Result<ClioContextPacketV1> {
+) -> Result<ContextProbeOutput> {
     match mode {
         ContextEvalProbeSource::Fixture => probe
             .packet
             .clone()
+            .map(ContextProbeOutput::Packet)
             .with_context(|| format!("fixture probe {} is missing packet", probe.name)),
-        ContextEvalProbeSource::LiveBroker => fetch_live_broker_packet(probe).await,
+        ContextEvalProbeSource::LiveBroker => fetch_live_broker_packet(probe)
+            .await
+            .map(ContextProbeOutput::Packet),
+        ContextEvalProbeSource::InstalledProvider => {
+            fetch_installed_provider_result(probe).map(ContextProbeOutput::Json)
+        }
     }
 }
 
@@ -478,12 +539,133 @@ async fn fetch_live_broker_packet(probe: &ContextEvalProbe) -> Result<ClioContex
     }
 }
 
+fn fetch_installed_provider_result(probe: &ContextEvalProbe) -> Result<Value> {
+    let query = probe
+        .query
+        .as_ref()
+        .map(|query| query.trim())
+        .filter(|query| !query.is_empty())
+        .with_context(|| format!("installed-provider probe {} is missing query", probe.name))?;
+    let python =
+        std::env::var("HERMES_JCODE_GRAPH_SMOKE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let script = std::env::var("HERMES_JCODE_GRAPH_SMOKE_SCRIPT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("scripts")
+                .join("hermes_jcode_graph_smoke.py")
+        });
+
+    let mut command = Command::new(&python);
+    command
+        .arg(&script)
+        .arg("--query")
+        .arg(query)
+        .arg("--limit")
+        .arg(probe.limit.to_string())
+        .arg("--json");
+
+    if let Some(working_dir) = probe
+        .working_dir
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        command.arg("--working-dir").arg(working_dir);
+    }
+    if let Some(session_id) = probe
+        .session_id
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        command.arg("--session-id").arg(session_id);
+    }
+    if let Some(tool_query) = probe
+        .tool_query
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        command.arg("--tool-query").arg(tool_query);
+    }
+    if probe.expect_no_prefetch {
+        command.arg("--expect-no-prefetch");
+    }
+    if let Some(sync_user) = probe
+        .sync_user
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        command.arg("--sync-user").arg(sync_user);
+    }
+    if let Some(sync_assistant) = probe
+        .sync_assistant
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        command.arg("--sync-assistant").arg(sync_assistant);
+    }
+    if let Some(transcript_user) = probe
+        .transcript_user
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        command.arg("--transcript-user").arg(transcript_user);
+    }
+    if let Some(transcript_assistant) = probe
+        .transcript_assistant
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        command
+            .arg("--transcript-assistant")
+            .arg(transcript_assistant);
+    }
+
+    let output = command.output().with_context(|| {
+        format!(
+            "failed to run installed-provider smoke script {} with {python}",
+            script.display()
+        )
+    })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "installed-provider probe {} failed with status {} stdout={} stderr={}",
+            probe.name,
+            output.status,
+            truncate_for_error(&String::from_utf8_lossy(&output.stdout), 1200),
+            truncate_for_error(&String::from_utf8_lossy(&output.stderr), 1200)
+        );
+    }
+    serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "installed-provider probe {} returned invalid JSON stdout={}",
+            probe.name,
+            truncate_for_error(&String::from_utf8_lossy(&output.stdout), 1200)
+        )
+    })
+}
+
+fn truncate_for_error(value: &str, max_chars: usize) -> String {
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
+}
+
 fn evaluate_assertion(
-    packet: &ClioContextPacketV1,
+    output: &ContextProbeOutput,
     assertion: &ContextAssertion,
 ) -> Result<(), String> {
     match assertion {
         ContextAssertion::PacketVersion { equals } => {
+            let packet = output_packet(output)?;
             if &packet.version == equals {
                 Ok(())
             } else {
@@ -494,6 +676,7 @@ fn evaluate_assertion(
             }
         }
         ContextAssertion::SlotNonEmpty { slot } => {
+            let packet = output_packet(output)?;
             let items = slot_items(packet, slot)?;
             if items.is_empty() {
                 Err(format!("slot {slot:?} is empty"))
@@ -506,6 +689,7 @@ fn evaluate_assertion(
             field,
             contains,
         } => {
+            let packet = output_packet(output)?;
             let items = slot_items(packet, slot)?;
             if items.iter().any(|item| {
                 item_field_text(item, field).is_some_and(|text| text.contains(contains))
@@ -522,6 +706,7 @@ fn evaluate_assertion(
             field,
             equals,
         } => {
+            let packet = output_packet(output)?;
             let items = slot_items(packet, slot)?;
             if items
                 .iter()
@@ -539,6 +724,7 @@ fn evaluate_assertion(
             field,
             contains,
         } => {
+            let packet = output_packet(output)?;
             let items = slot_items(packet, slot)?;
             if items.iter().any(|item| {
                 item_field_text(item, field).is_some_and(|text| text.contains(contains))
@@ -555,6 +741,7 @@ fn evaluate_assertion(
             field,
             max_chars,
         } => {
+            let packet = output_packet(output)?;
             let items = slot_items(packet, slot)?;
             if items.is_empty() {
                 return Err(format!("slot {slot:?} is empty"));
@@ -573,6 +760,74 @@ fn evaluate_assertion(
                 Ok(())
             }
         }
+        ContextAssertion::JsonFieldEquals { field, equals } => {
+            let value = output_json_field_value(output, field)?;
+            if value == equals {
+                Ok(())
+            } else {
+                Err(format!(
+                    "json field {field:?} mismatch: expected {equals}, got {value}"
+                ))
+            }
+        }
+        ContextAssertion::JsonFieldContains { field, contains } => {
+            let text = output_json_field_text(output, field)?;
+            if text.contains(contains) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "json field {field:?} text does not contain {contains:?}"
+                ))
+            }
+        }
+        ContextAssertion::JsonFieldMin { field, min } => {
+            let value = output_json_field_value(output, field)?;
+            let number = value
+                .as_f64()
+                .ok_or_else(|| format!("json field {field:?} is not numeric: {value}"))?;
+            if number >= *min {
+                Ok(())
+            } else {
+                Err(format!(
+                    "json field {field:?} is {number}, below minimum {min}"
+                ))
+            }
+        }
+    }
+}
+
+fn output_packet(output: &ContextProbeOutput) -> Result<&ClioContextPacketV1, String> {
+    match output {
+        ContextProbeOutput::Packet(packet) => Ok(packet),
+        ContextProbeOutput::Json(_) => {
+            Err("packet assertion used with installed-provider JSON result".to_string())
+        }
+    }
+}
+
+fn output_json(output: &ContextProbeOutput) -> Result<&Value, String> {
+    match output {
+        ContextProbeOutput::Json(value) => Ok(value),
+        ContextProbeOutput::Packet(_) => {
+            Err("json assertion used with packet probe result".to_string())
+        }
+    }
+}
+
+fn output_json_field_value<'a>(
+    output: &'a ContextProbeOutput,
+    field: &str,
+) -> Result<&'a Value, String> {
+    let value = output_json(output)?;
+    get_dotted_value(value, field).ok_or_else(|| format!("json field {field:?} is missing"))
+}
+
+fn output_json_field_text(output: &ContextProbeOutput, field: &str) -> Result<String, String> {
+    let value = output_json_field_value(output, field)?;
+    match value {
+        Value::Null => Ok("null".to_string()),
+        Value::String(value) => Ok(value.clone()),
+        other => Ok(other.to_string()),
     }
 }
 
@@ -712,6 +967,54 @@ mod tests {
         assert_eq!(
             ContextEvalProbeSource::parse("live_broker").unwrap(),
             ContextEvalProbeSource::LiveBroker
+        );
+        assert_eq!(
+            ContextEvalProbeSource::parse("installed-provider").unwrap(),
+            ContextEvalProbeSource::InstalledProvider
+        );
+        assert_eq!(
+            ContextEvalProbeSource::parse("installed_provider").unwrap(),
+            ContextEvalProbeSource::InstalledProvider
+        );
+    }
+
+    #[test]
+    fn json_assertions_read_nested_installed_provider_result() {
+        let output = ContextProbeOutput::Json(json!({
+            "prefetch_has_context": false,
+            "prefetch_diagnostics": {"last_prefetch_item_count": 0},
+            "tool_item_count": 17
+        }));
+
+        assert!(
+            evaluate_assertion(
+                &output,
+                &ContextAssertion::JsonFieldEquals {
+                    field: "prefetch_has_context".to_string(),
+                    equals: json!(false),
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            evaluate_assertion(
+                &output,
+                &ContextAssertion::JsonFieldEquals {
+                    field: "prefetch_diagnostics.last_prefetch_item_count".to_string(),
+                    equals: json!(0),
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            evaluate_assertion(
+                &output,
+                &ContextAssertion::JsonFieldMin {
+                    field: "tool_item_count".to_string(),
+                    min: 1.0,
+                }
+            )
+            .is_ok()
         );
     }
 }

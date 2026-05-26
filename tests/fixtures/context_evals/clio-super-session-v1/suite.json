@@ -469,6 +469,63 @@
         {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.logical_super_session_id", "contains": "clio-super-session"},
         {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Next action"}
       ]
+    },
+    {
+      "name": "installed_provider_current_plan_authority",
+      "group": "authority_conflict",
+      "source": "installed_provider",
+      "description": "Installed Hermes provider should inject current canonical plan context for context-bearing project prompts.",
+      "query": "Clio current context packet provider gate",
+      "limit": 8,
+      "session_id": "clio_installed_provider_current_plan_eval",
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "assertions": [
+        {"type": "json_field_equals", "field": "prefetch_has_context", "equals": true},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "jcode-Nervous-System-Broker-Parity-Plan.md"},
+        {"type": "json_field_equals", "field": "default_prefetch_has_raw_provenance", "equals": false},
+        {"type": "json_field_equals", "field": "tool_event_type", "equals": "broker_context"},
+        {"type": "json_field_min", "field": "tool_item_count", "min": 1}
+      ]
+    },
+    {
+      "name": "installed_provider_non_vault_restraint",
+      "group": "budget",
+      "source": "installed_provider",
+      "description": "Installed Hermes provider should not inject Vault context for ordinary non-Vault prompts.",
+      "query": "Answer in one concise sentence: what makes a cup of tea relaxing?",
+      "tool_query": "Clio current context packet provider gate",
+      "expect_no_prefetch": true,
+      "limit": 8,
+      "session_id": "clio_installed_provider_non_vault_eval",
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "assertions": [
+        {"type": "json_field_equals", "field": "prefetch_has_context", "equals": false},
+        {"type": "json_field_equals", "field": "prefetch_chars", "equals": 0},
+        {"type": "json_field_equals", "field": "prefetch_diagnostics.last_prefetch_item_count", "equals": 0},
+        {"type": "json_field_equals", "field": "tool_event_type", "equals": "broker_context"},
+        {"type": "json_field_min", "field": "tool_item_count", "min": 1}
+      ]
+    },
+    {
+      "name": "installed_provider_hidden_sync_nonblocking",
+      "group": "provider_gate",
+      "source": "installed_provider",
+      "description": "Installed Hermes provider should sync turns/transcripts as hidden provenance without leaking raw text into normal prefetch.",
+      "query": "Clio current context packet provider gate",
+      "limit": 8,
+      "session_id": "clio_installed_provider_hidden_sync_eval",
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "sync_user": "installed provider eval hidden sync user marker 0d51d00e",
+      "sync_assistant": "installed provider eval hidden sync assistant marker 0d51d00e",
+      "transcript_user": "Decision: installed provider eval hidden sync marker 0d51d00e. Next action: keep installed provider eval mode formal.",
+      "transcript_assistant": "Acknowledged. Installed provider eval mode should remain source-backed and compact.",
+      "assertions": [
+        {"type": "json_field_equals", "field": "prefetch_has_context", "equals": true},
+        {"type": "json_field_equals", "field": "default_prefetch_has_raw_provenance", "equals": false},
+        {"type": "json_field_min", "field": "diagnostics.turn_sync_count", "min": 1},
+        {"type": "json_field_min", "field": "diagnostics.transcript_sync_count", "min": 2},
+        {"type": "json_field_equals", "field": "provenance_tool_contains_synced_text", "equals": true}
+      ]
     }
   ]
 }
