@@ -817,6 +817,64 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         self.assertNotIn("Fallback Memory", text)
         self.assertEqual(diagnostics["last_prefetch_item_count"], 5)
 
+    def test_provider_renders_structured_lineage_handoff_content(self) -> None:
+        packet = {
+            "version": "clio_context_packet_v1",
+            "lineage": [
+                {
+                    "id": "checkpoint_session_end",
+                    "kind": "compression_checkpoint",
+                    "scope": "project",
+                    "title": "Hermes session-end checkpoint",
+                    "summary": "Hermes session-end checkpoint",
+                    "content": (
+                        "Hermes session-end checkpoint\n"
+                        "Structured session-end handoff:\n"
+                        "Active task:\n"
+                        "- finish section 11.3 structured session-end handoff\n"
+                        "Decisions:\n"
+                        "- keep the fallback builder broker-side\n"
+                        "Files:\n"
+                        "- /Users/rob/Code/grumpy-labs/jcode-memory/src/server/broker_context.rs\n"
+                        "Commands and verification:\n"
+                        "- cargo test -q --features duckdb-storage-bundled broker_context\n"
+                        "Next action:\n"
+                        "- run fixture/live/installed gates"
+                    ),
+                    "slot": "lineage",
+                    "why_included": "lineage; current plan files override checkpoint content",
+                    "metadata": {
+                        "surface": "hermes",
+                        "session_segment_id": "hermes_session_end_surface",
+                        "checkpoint_kind": "session_end",
+                        "branch_reason": "handoff",
+                    },
+                }
+            ],
+        }
+        with FakeBrokerServer(context_packet=packet) as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "context_limit": 8,
+                    "max_chars": 1200,
+                    "item_max_chars": 520,
+                }
+            )
+            provider.initialize("hermes_session")
+            text = provider.prefetch("structured session-end handoff", session_id="hermes_session")
+            provider.shutdown()
+
+        self.assertIn("### Lineage", text)
+        self.assertIn("Structured session-end handoff", text)
+        self.assertIn("Active task:", text)
+        self.assertIn("finish section 11.3 structured session-end handoff", text)
+        self.assertIn("Commands and verification:", text)
+        self.assertIn("cargo test -q --features duckdb-storage-bundled broker_context", text)
+        self.assertIn("surface=hermes", text)
+        self.assertIn("segment=hermes_session_end_surface", text)
+
     def test_provider_ignores_unknown_context_packet_version(self) -> None:
         packet = {
             "version": "clio_context_packet_v2",

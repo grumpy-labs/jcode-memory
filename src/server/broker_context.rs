@@ -733,7 +733,11 @@ fn store_lineage_checkpoint_memory(
     let branch_reason = checkpoint_branch_reason(checkpoint_kind);
     let active_project_path = active_project_path_for_working_dir(working_dir);
     let active_plan_path = active_plan_path_for_working_dir(working_dir);
-    let summary = compact_transcript_checkpoint(transcript);
+    let summary = if checkpoint_kind == "session_end" {
+        structured_session_end_handoff(transcript, source, provenance_id)
+    } else {
+        compact_transcript_checkpoint(transcript)
+    };
     let mut content = format!(
         "{title}\n\
          Logical super-session: {logical_super_session_id}\n\
@@ -910,6 +914,179 @@ fn checkpoint_line_has_artifact_signal(line: &str) -> bool {
         || line.contains(".rs")
         || line.contains(".py")
         || line.trim_start().starts_with('$')
+}
+
+#[derive(Default)]
+struct StructuredHandoffSections {
+    active_task: Vec<String>,
+    decisions: Vec<String>,
+    files: Vec<String>,
+    commands: Vec<String>,
+    failures: Vec<String>,
+    current_state: Vec<String>,
+    remaining_work: Vec<String>,
+    next_action: Vec<String>,
+}
+
+fn structured_session_end_handoff(transcript: &str, source: &str, provenance_id: &str) -> String {
+    let mut sections = StructuredHandoffSections::default();
+    for raw_line in transcript.lines() {
+        let line = strip_transcript_role_prefix(raw_line);
+        if line.is_empty() {
+            continue;
+        }
+        for fragment in handoff_line_fragments(line) {
+            collect_structured_handoff_line(&mut sections, fragment.as_str());
+        }
+    }
+
+    let mut output = String::from("Structured session-end handoff:\n");
+    append_handoff_section(&mut output, "Active task", &sections.active_task);
+    append_handoff_section(&mut output, "Decisions", &sections.decisions);
+    append_handoff_section(&mut output, "Files", &sections.files);
+    append_handoff_section(&mut output, "Commands and verification", &sections.commands);
+    append_handoff_section(&mut output, "Failures and risks", &sections.failures);
+    append_handoff_section(&mut output, "Current state", &sections.current_state);
+    append_handoff_section(&mut output, "Remaining work", &sections.remaining_work);
+    append_handoff_section(&mut output, "Next action", &sections.next_action);
+    let source_refs =
+        format!("Source refs:\n- Source: {source}\n- Provenance memory: {provenance_id}");
+    let max_chars = 1_600usize;
+    let source_ref_chars = source_refs.chars().count();
+    let output_chars = output.chars().count();
+    if output_chars + source_ref_chars <= max_chars {
+        output.push_str(&source_refs);
+        return output;
+    }
+    let body_budget = max_chars.saturating_sub(source_ref_chars + 5);
+    let mut clipped: String = output.chars().take(body_budget).collect();
+    clipped.push_str("\n...\n");
+    clipped.push_str(&source_refs);
+    clipped
+}
+
+fn collect_structured_handoff_line(sections: &mut StructuredHandoffSections, line: &str) {
+    if let Some(value) = strip_labeled_value(line, &["active task", "current task", "task"]) {
+        push_handoff_value(&mut sections.active_task, value);
+    }
+    if let Some(value) = strip_labeled_value(line, &["decision", "decided"]) {
+        push_handoff_value(&mut sections.decisions, value);
+    }
+    if let Some(value) = strip_labeled_value(
+        line,
+        &[
+            "file",
+            "files",
+            "modified file",
+            "created file",
+            "updated file",
+            "read file",
+        ],
+    ) {
+        push_handoff_value(&mut sections.files, value);
+    } else if line_has_file_signal(line) {
+        push_handoff_value(&mut sections.files, line);
+    }
+    if let Some(value) = strip_labeled_value(
+        line,
+        &["command", "commands", "verified", "verification", "passed"],
+    ) {
+        push_handoff_value(&mut sections.commands, value);
+    } else if line.trim_start().starts_with('$') {
+        push_handoff_value(&mut sections.commands, line.trim_start_matches('$').trim());
+    }
+    if let Some(value) = strip_labeled_value(
+        line,
+        &["failure", "failed", "error", "risk", "blocked", "blocker"],
+    ) {
+        push_handoff_value(&mut sections.failures, value);
+    }
+    if let Some(value) = strip_labeled_value(line, &["current state", "status", "state"]) {
+        push_handoff_value(&mut sections.current_state, value);
+    }
+    if let Some(value) =
+        strip_labeled_value(line, &["remaining work", "remaining", "todo", "next steps"])
+    {
+        push_handoff_value(&mut sections.remaining_work, value);
+    }
+    if let Some(value) = strip_labeled_value(line, &["next action", "next"]) {
+        push_handoff_value(&mut sections.next_action, value);
+    }
+}
+
+fn strip_transcript_role_prefix(line: &str) -> &str {
+    let trimmed = line.trim();
+    for prefix in ["user:", "assistant:"] {
+        if trimmed.len() >= prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix) {
+            return trimmed[prefix.len()..].trim();
+        }
+    }
+    trimmed
+}
+
+fn handoff_line_fragments(line: &str) -> Vec<String> {
+    let fragments: Vec<String> = line
+        .split(". ")
+        .map(|fragment| fragment.trim().trim_end_matches('.').trim())
+        .filter(|fragment| !fragment.is_empty())
+        .map(str::to_string)
+        .collect();
+    if fragments.is_empty() {
+        vec![line.trim().to_string()]
+    } else {
+        fragments
+    }
+}
+
+fn strip_labeled_value<'a>(line: &'a str, labels: &[&str]) -> Option<&'a str> {
+    let trimmed = line.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    for label in labels {
+        let prefix = format!("{label}:");
+        if lower.starts_with(&prefix) {
+            let value = trimmed[prefix.len()..].trim();
+            return Some(if value.is_empty() { trimmed } else { value });
+        }
+    }
+    None
+}
+
+fn line_has_file_signal(line: &str) -> bool {
+    line.contains("/Users/")
+        || line.contains("/srv/")
+        || line.contains(".md")
+        || line.contains(".rs")
+        || line.contains(".py")
+        || line.contains("Cargo.toml")
+        || line.contains("scripts/")
+}
+
+fn push_handoff_value(values: &mut Vec<String>, value: &str) {
+    let cleaned = value.trim().trim_matches('`').trim();
+    if cleaned.is_empty() {
+        return;
+    }
+    let clipped: String = cleaned.chars().take(240).collect();
+    if values.iter().any(|existing| existing == &clipped) {
+        return;
+    }
+    if values.len() < 4 {
+        values.push(clipped);
+    }
+}
+
+fn append_handoff_section(output: &mut String, title: &str, values: &[String]) {
+    output.push_str(title);
+    output.push_str(":\n");
+    if values.is_empty() {
+        output.push_str("- Not detected in transcript.\n");
+        return;
+    }
+    for value in values {
+        output.push_str("- ");
+        output.push_str(value);
+        output.push('\n');
+    }
 }
 
 async fn extract_derived_memories(
@@ -1503,6 +1680,9 @@ fn lineage_entry_quality_score(entry: &MemoryEntry, query: Option<&str>) -> i32 
     }
     if text.contains("no artifact-trail lines detected") {
         score -= 50;
+    }
+    if text.contains("not detected in transcript") {
+        score -= 60;
     }
 
     if let Some(query) = query {
@@ -4117,6 +4297,168 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_end_transcript_sync_builds_structured_handoff_checkpoint() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let project_dir = _env.path().join("Hermes-Honcho-LangGraph-Second-Brain");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let manager = MemoryManager::new().with_project_dir(&project_dir);
+        let extractor = FakeTranscriptExtractor::new(Vec::new());
+
+        broker_transcript_sync_event_for_manager_with_gate(
+            199,
+            "session_handoff".to_string(),
+            &manager,
+            "user: Active task: finish section 11.3 structured session-end handoff.\n\
+             assistant: Decision: keep the fallback builder broker-side.\n\
+             assistant: Modified file: /Users/rob/Code/grumpy-labs/jcode-memory/src/server/broker_context.rs\n\
+             assistant: Command: cargo test -q --features duckdb-storage-bundled broker_context\n\
+             assistant: Failure: first live gate exceeded lineage budget.\n\
+             assistant: Current state: red test written, implementation pending.\n\
+             assistant: Remaining work: deploy to CT1103.\n\
+             assistant: Next action: run fixture/live/installed gates.",
+            "hermes:session_end",
+            TranscriptLineageContext {
+                working_dir: Some(project_dir.to_string_lossy().as_ref()),
+                surface_session_id: Some("hermes_session_end_surface"),
+                surface: Some("hermes"),
+                ..Default::default()
+            },
+            false,
+            &extractor,
+        )
+        .await
+        .expect("sync session-end transcript");
+
+        let memory_results = collect_broker_memory_results(
+            Some(project_dir.to_string_lossy().as_ref()),
+            Some("structured session-end handoff section 11.3 live gates"),
+            8,
+            false,
+        )
+        .expect("collect broker memory results");
+        let items: Vec<BrokerContextItem> = memory_results
+            .iter()
+            .map(|result| memory_broker_item(result, Some(project_dir.to_string_lossy().as_ref())))
+            .collect();
+        let packet = clio_context_packet_from_items(&items);
+        let handoff = packet
+            .lineage
+            .iter()
+            .find(|item| {
+                item.item.kind == "compression_checkpoint"
+                    && item
+                        .item
+                        .metadata
+                        .get("checkpoint_kind")
+                        .and_then(|value| value.as_str())
+                        == Some("session_end")
+            })
+            .expect("session-end handoff checkpoint should reach packet lineage");
+        let content = handoff.item.content.as_deref().unwrap_or_default();
+
+        assert!(
+            content.contains("Structured session-end handoff:"),
+            "session-end checkpoint should expose a structured handoff body, got {content}"
+        );
+        for heading in [
+            "Active task:",
+            "Decisions:",
+            "Files:",
+            "Commands and verification:",
+            "Failures and risks:",
+            "Current state:",
+            "Remaining work:",
+            "Next action:",
+            "Source refs:",
+        ] {
+            assert!(
+                content.contains(heading),
+                "structured handoff should contain {heading}, got {content}"
+            );
+        }
+        assert!(content.contains("finish section 11.3 structured session-end handoff"));
+        assert!(content.contains("keep the fallback builder broker-side"));
+        assert!(
+            content
+                .contains("/Users/rob/Code/grumpy-labs/jcode-memory/src/server/broker_context.rs")
+        );
+        assert!(content.contains("cargo test -q --features duckdb-storage-bundled broker_context"));
+        assert!(content.contains("first live gate exceeded lineage budget"));
+        assert!(content.contains("red test written, implementation pending"));
+        assert!(content.contains("deploy to CT1103"));
+        assert!(content.contains("run fixture/live/installed gates"));
+        assert!(content.contains("Provenance memory:"));
+        assert_eq!(
+            handoff
+                .item
+                .metadata
+                .get("branch_reason")
+                .and_then(|value| value.as_str()),
+            Some("handoff")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_end_handoff_keeps_section_placeholders_when_signals_are_absent() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let project_dir = _env.path().join("Hermes-Honcho-LangGraph-Second-Brain");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let manager = MemoryManager::new().with_project_dir(&project_dir);
+        let extractor = FakeTranscriptExtractor::new(Vec::new());
+
+        broker_transcript_sync_event_for_manager_with_gate(
+            200,
+            "session_sparse_handoff".to_string(),
+            &manager,
+            "user: hi\nassistant: ok",
+            "hermes:session_end",
+            TranscriptLineageContext {
+                working_dir: Some(project_dir.to_string_lossy().as_ref()),
+                ..Default::default()
+            },
+            false,
+            &extractor,
+        )
+        .await
+        .expect("sync sparse session-end transcript");
+
+        let memory_results = collect_broker_memory_results(
+            Some(project_dir.to_string_lossy().as_ref()),
+            Some("structured session-end handoff"),
+            8,
+            false,
+        )
+        .expect("collect broker memory results");
+        let items: Vec<BrokerContextItem> = memory_results
+            .iter()
+            .map(|result| memory_broker_item(result, Some(project_dir.to_string_lossy().as_ref())))
+            .collect();
+        let packet = clio_context_packet_from_items(&items);
+        let handoff = packet
+            .lineage
+            .iter()
+            .find(|item| {
+                item.item.kind == "compression_checkpoint"
+                    && item
+                        .item
+                        .metadata
+                        .get("checkpoint_kind")
+                        .and_then(|value| value.as_str())
+                        == Some("session_end")
+            })
+            .expect("sparse session-end handoff checkpoint should reach packet lineage");
+        let content = handoff.item.content.as_deref().unwrap_or_default();
+
+        assert!(content.contains("Active task:\n- Not detected in transcript."));
+        assert!(content.contains("Decisions:\n- Not detected in transcript."));
+        assert!(content.contains("Files:\n- Not detected in transcript."));
+        assert!(content.contains("Source refs:\n- Source: hermes:session_end"));
+        assert!(content.contains("- Provenance memory:"));
+    }
+
+    #[tokio::test]
     async fn lineage_checkpoint_with_next_action_beats_newer_low_info_smoke() {
         let _guard = crate::storage::lock_test_env();
         let _env = TestHome::new();
@@ -4172,16 +4514,18 @@ mod tests {
             .collect();
         let packet = clio_context_packet_from_items(&items);
 
+        let first_lineage_content = packet
+            .lineage
+            .first()
+            .and_then(|item| item.item.content.as_deref())
+            .unwrap_or_default();
         assert!(
-            packet.lineage.iter().any(|item| {
-                item.item
-                    .content
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("Next action")
-            }),
-            "lineage packet should keep the actionable checkpoint ahead of low-info smoke, got {:?}",
-            packet.lineage
+            first_lineage_content.contains("Next action: run non-Vault restraint probe"),
+            "actionable checkpoint should outrank newer low-info smoke checkpoints, got {first_lineage_content}"
+        );
+        assert!(
+            !first_lineage_content.contains("Not detected in transcript"),
+            "placeholder-only session-end handoffs should not outrank actionable checkpoints, got {first_lineage_content}"
         );
     }
 

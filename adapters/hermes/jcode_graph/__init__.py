@@ -1096,6 +1096,8 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         item_summary = item.get("summary")
         if item.get("slot") == "artifact_refs" or kind in {"artifact_ref", "side_panel"}:
             content = item_summary or "Full output retained behind artifact reference."
+        elif item.get("slot") == "lineage" or kind == "compression_checkpoint":
+            content = item_content or item_summary or ""
         elif kind in {"vault_chunk", "vault_task", "vault_link"} and item_content:
             content = item_content
         else:

@@ -434,6 +434,44 @@
       ]
     },
     {
+      "name": "structured_session_end_handoff",
+      "group": "lineage",
+      "description": "Session-end checkpoints should preserve a structured handoff when Hermes does not expose a final summary.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "lineage": [
+          {
+            "id": "lineage:session-end-handoff",
+            "kind": "compression_checkpoint",
+            "scope": "logical_super_session",
+            "title": "Hermes session-end checkpoint",
+            "summary": "Structured session-end handoff for continuing section 11.3 work.",
+            "content": "Hermes session-end checkpoint\nStructured session-end handoff:\nActive task:\n- finish section 11.3 structured session-end handoff\nDecisions:\n- keep the fallback builder broker-side\nFiles:\n- /Users/rob/Code/grumpy-labs/jcode-memory/src/server/broker_context.rs\nCommands and verification:\n- cargo test -q --features duckdb-storage-bundled broker_context\nFailures and risks:\n- first live gate exceeded lineage budget\nCurrent state:\n- implementation pending\nRemaining work:\n- deploy to CT1103\nNext action:\n- run fixture/live/installed gates\nSource refs:\n- Provenance memory: mem_session_end_handoff",
+            "metadata": {
+              "logical_super_session_id": "clio-super-session",
+              "checkpoint_kind": "session_end",
+              "branch_reason": "handoff",
+              "surface": "hermes"
+            }
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.checkpoint_kind", "contains": "session_end"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.branch_reason", "contains": "handoff"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Structured session-end handoff:"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Active task:"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Decisions:"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Files:"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Commands and verification:"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Failures and risks:"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Current state:"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Remaining work:"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Next action:"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Source refs:"}
+      ]
+    },
+    {
       "name": "provider_gate",
       "group": "provider_gate",
       "description": "The incumbent provider must satisfy authority, conflict, provenance, routing, budget, and lineage gates.",
@@ -740,6 +778,32 @@
         {"type": "json_field_equals", "field": "default_prefetch_has_raw_provenance", "equals": false},
         {"type": "json_field_min", "field": "diagnostics.turn_sync_count", "min": 1},
         {"type": "json_field_min", "field": "diagnostics.transcript_sync_count", "min": 2},
+        {"type": "json_field_equals", "field": "provenance_tool_contains_synced_text", "equals": true}
+      ]
+    },
+    {
+      "name": "installed_provider_structured_session_end_handoff",
+      "group": "lineage",
+      "source": "installed_provider",
+      "description": "Installed Hermes provider should surface broker-generated structured session-end handoff checkpoints without leaking raw provenance.",
+      "query": "structured session-end handoff provider gate amber-cascade-20260526",
+      "tool_query": "structured session-end handoff provider gate amber-cascade-20260526",
+      "limit": 8,
+      "max_duration_ms": 10000,
+      "session_id": "clio_installed_provider_structured_handoff_eval",
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "transcript_user": "Active task: structured handoff provider gate amber-cascade-20260526.",
+      "transcript_assistant": "Decision: keep builder broker-side. Command: cargo test -q context_eval. Failure: no blocker. Current state: structured handoff generated. Remaining work: deploy. Next action: run gates.",
+      "assertions": [
+        {"type": "json_field_equals", "field": "prefetch_has_context", "equals": true},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "Structured session-end handoff:"},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "Active task:"},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "amber-cascade-20260526"},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "Commands and verification:"},
+        {"type": "json_field_contains", "field": "tool_items", "contains": "session_end"},
+        {"type": "json_field_contains", "field": "tool_items", "contains": "handoff"},
+        {"type": "json_field_min", "field": "diagnostics.transcript_sync_count", "min": 2},
+        {"type": "json_field_equals", "field": "default_prefetch_has_raw_provenance", "equals": false},
         {"type": "json_field_equals", "field": "provenance_tool_contains_synced_text", "equals": true}
       ]
     }
