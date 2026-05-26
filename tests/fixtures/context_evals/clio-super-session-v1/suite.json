@@ -578,6 +578,7 @@
         {"type": "json_field_equals", "field": "prefetch_has_context", "equals": true},
         {"type": "json_field_contains", "field": "prefetch", "contains": "jcode-Nervous-System-Broker-Parity-Plan.md"},
         {"type": "json_field_contains", "field": "prefetch", "contains": "status=active"},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "Current user request and latest correction override stored broker context"},
         {"type": "json_field_contains", "field": "tool_items.0.source_path", "contains": "jcode-Nervous-System-Broker-Parity-Plan.md"},
         {"type": "json_field_contains", "field": "tool_items.0.metadata.frontmatter_json", "contains": "workflow_status"},
         {"type": "json_field_contains", "field": "tool_items.0.metadata.frontmatter_json", "contains": "dateModified"},

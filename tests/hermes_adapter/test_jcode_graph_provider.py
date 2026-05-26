@@ -765,6 +765,10 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
             provider.shutdown()
 
         self.assertIn("## Clio Context Packet v1", text)
+        self.assertIn(
+            "Current user request and latest correction override stored broker context",
+            text,
+        )
         self.assertIn("### Active Task", text)
         self.assertIn("### Authority", text)
         self.assertIn("### Conflicts", text)
