@@ -26,6 +26,7 @@ DEFAULT_CT1150_HOST = "claw@10.1.10.150"
 DEFAULT_PROXMOX_HOST = "root@10.1.10.19"
 
 CT1103_RELEASE_ROOT = "/srv/hermes-jcode/releases/jcode-memory"
+CT1103_CARGO_TARGET_DIR = "/srv/hermes-jcode/build-cache/jcode-memory-target"
 CT1103_SOCKET = "/srv/hermes-jcode/runtime/jcode-broker.sock"
 CT1103_BINARY = "/usr/local/bin/jcode-memory-broker"
 CT1103_SERVICE = "hermes-jcode-broker.service"
@@ -161,6 +162,8 @@ def _ct1103_steps(sha: str, *, apply: bool, ct1103_host: str, proxmox_host: str)
                 ct1103_host,
                 "set -euo pipefail; "
                 'export PATH="$HOME/.cargo/bin:$PATH"; '
+                f"mkdir -p {_quote(CT1103_CARGO_TARGET_DIR)}; "
+                f"export CARGO_TARGET_DIR={_quote(CT1103_CARGO_TARGET_DIR)}; "
                 f"cd {_quote(release_dir)}; "
                 "cargo test -q -p jcode-protocol; "
                 "cargo test -q -p jcode-storage --features duckdb-storage-bundled; "
@@ -177,7 +180,7 @@ def _ct1103_steps(sha: str, *, apply: bool, ct1103_host: str, proxmox_host: str)
                     "Install broker binary and restart CT1103 service",
                     ssh_command(
                         proxmox_host,
-                        f"pct exec 1103 -- install -m 0755 {_quote(release_dir + '/target/release/jcode')} "
+                        f"pct exec 1103 -- install -m 0755 {_quote(CT1103_CARGO_TARGET_DIR + '/release/jcode')} "
                         f"{_quote(CT1103_BINARY)} && "
                         f"pct exec 1103 -- systemctl restart {CT1103_SERVICE} && "
                         f"pct exec 1103 -- systemctl is-active {CT1103_SERVICE}",

@@ -32,6 +32,17 @@ By default the script refuses to deploy a commit that is not reachable from the
 configured upstream branch. Use `--allow-unpushed` only for an intentional
 local-only emergency deploy.
 
+## Inner Loop Policy
+
+Do not deploy CT `1103` for changes that do not affect the production broker
+binary, such as docs, eval fixture text, local-only scripts, comments, report
+formatting, or analysis artifacts. Run the relevant local checks instead.
+
+For small broker-code changes, run fast local tests first and batch related
+fixes into one CT `1103` deploy when safe. Keep live-broker and
+installed-provider gates meaningful after the deploy, but do not pay the full
+remote build cost for every tiny iteration.
+
 ## Target Details
 
 ### CT1103 Broker
@@ -45,11 +56,16 @@ The CT `1103` target stages the exact Git commit under:
 It then runs the focused broker/storage checks and builds the release binary:
 
 ```bash
+CARGO_TARGET_DIR=/srv/hermes-jcode/build-cache/jcode-memory-target
 cargo test -q -p jcode-protocol
 cargo test -q -p jcode-storage --features duckdb-storage-bundled
-cargo test -q --features duckdb-storage-bundled --test e2e broker_runtime
-cargo build -q --release --bin jcode --features duckdb-storage-bundled
+cargo test -q --features duckdb-storage-bundled,embeddings --test e2e broker_runtime
+cargo build -q --release --bin jcode --features duckdb-storage-bundled,embeddings
 ```
+
+The shared `CARGO_TARGET_DIR` is intentionally outside the per-SHA release
+directory so CT `1103` can reuse Cargo/DuckDB/embedding build artifacts across
+deploys while still staging and building the exact requested SHA.
 
 Only with `--apply`, it installs:
 

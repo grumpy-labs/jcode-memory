@@ -137,9 +137,9 @@ cargo run -q --bin jcode -- broker eval-context \
 Current expected gate counts:
 
 ```text
-fixture:            14/14
+fixture:            15/15
 live-broker:         5/5
-installed-provider:  6/6
+installed-provider:  7/7
 ```
 
 The harmless local warning currently seen on some runs is:
@@ -168,6 +168,17 @@ scripts/deploy_jcode_memory.py --target all --apply
 The script intentionally keeps CT `1103` broker rollout and CT `1150`
 `jcode_graph` plugin rollout explicit. It does not enable automatic Git
 pulls, timers, or webhooks.
+
+CT `1103` deploys reuse a persistent Cargo target cache at:
+
+```text
+/srv/hermes-jcode/build-cache/jcode-memory-target
+```
+
+This keeps the full target-side checks and release build, but avoids cold
+rebuilding bundled DuckDB and embedding dependencies for every small SHA.
+Do not deploy CT `1103` for docs, fixture-only, local-script, formatting, or
+analysis-only changes.
 
 ## Roll Back
 
