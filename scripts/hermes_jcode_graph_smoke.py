@@ -142,6 +142,7 @@ def main() -> int:
         "default_prefetch_has_raw_provenance": any(term in text for term in raw_terms),
         "tool_event_type": tool.get("type"),
         "tool_query": tool_query,
+        "tool_items": _compact_tool_items(items),
         "tool_item_kinds": [item.get("kind") for item in items if isinstance(item, dict)],
         "tool_memory_contents": [
             item.get("content")
@@ -283,6 +284,44 @@ def _is_provenance_item(item: dict) -> bool:
         or item.get("category") == "provenance"
         or item.get("title") == "provenance"
     )
+
+
+def _compact_tool_items(items: list[Any]) -> list[dict[str, Any]]:
+    """Keep source/provenance fields visible to evals without dumping content."""
+    kept_fields = (
+        "id",
+        "kind",
+        "title",
+        "summary",
+        "source_path",
+        "line_start",
+        "line_end",
+        "authority_class",
+    )
+    compact: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        entry = {field: item[field] for field in kept_fields if field in item}
+        metadata = item.get("metadata")
+        if isinstance(metadata, dict):
+            entry["metadata"] = metadata
+            if "source_path" not in entry:
+                source_path = metadata.get("source_path")
+                uri = metadata.get("uri")
+                if isinstance(source_path, str):
+                    entry["source_path"] = source_path
+                elif isinstance(uri, str) and uri.startswith("vault://"):
+                    entry["source_path"] = uri[len("vault://") :].split("#", 1)[0]
+            if "line_start" not in entry and isinstance(metadata.get("start_line"), int):
+                entry["line_start"] = metadata["start_line"]
+            if "line_end" not in entry and isinstance(metadata.get("end_line"), int):
+                entry["line_end"] = metadata["end_line"]
+        relevance = item.get("relevance")
+        if isinstance(relevance, dict):
+            entry["relevance"] = relevance
+        compact.append(entry)
+    return compact
 
 
 def _derived_store_proof(session_id: str, *, raw_terms: list[str]) -> dict[str, Any]:

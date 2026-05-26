@@ -1035,7 +1035,13 @@ fn item_field_text(item: &ClioContextPacketItem, field: &str) -> Option<String> 
 fn get_dotted_value<'a>(value: &'a Value, field: &str) -> Option<&'a Value> {
     field
         .split('.')
-        .try_fold(value, |current, segment| current.get(segment))
+        .try_fold(value, |current, segment| match current {
+            Value::Array(items) => segment
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| items.get(index)),
+            _ => current.get(segment),
+        })
 }
 
 fn append_run_log(report: &ContextEvalReport, log: Option<&str>) -> Result<()> {
@@ -1304,6 +1310,51 @@ mod tests {
                 &ContextAssertion::JsonFieldMin {
                     field: "tool_item_count".to_string(),
                     min: 1.0,
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn json_assertions_read_array_indexed_installed_provider_result() {
+        let output = ContextProbeOutput::Json(json!({
+            "tool_items": [
+                {
+                    "kind": "vault_chunk",
+                    "source_path": "TaskNotes/Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off.md",
+                    "line_start": 199,
+                    "metadata": {"relationship": "backlink"}
+                }
+            ]
+        }));
+
+        assert!(
+            evaluate_assertion(
+                &output,
+                &ContextAssertion::JsonFieldContains {
+                    field: "tool_items.0.source_path".to_string(),
+                    contains: "Ghostty Terminal".to_string(),
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            evaluate_assertion(
+                &output,
+                &ContextAssertion::JsonFieldEquals {
+                    field: "tool_items.0.line_start".to_string(),
+                    equals: json!(199),
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            evaluate_assertion(
+                &output,
+                &ContextAssertion::JsonFieldEquals {
+                    field: "tool_items.0.metadata.relationship".to_string(),
+                    equals: json!("backlink"),
                 }
             )
             .is_ok()

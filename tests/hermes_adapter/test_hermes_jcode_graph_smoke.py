@@ -100,6 +100,34 @@ class HermesJcodeGraphSmokeTests(unittest.TestCase):
 
         self.assertEqual(query, "unique synced smoke marker")
 
+    def test_compact_tool_items_keep_source_metadata_without_full_content(self) -> None:
+        smoke = load_smoke_module()
+
+        compact = smoke._compact_tool_items(
+            [
+                {
+                    "kind": "vault_chunk",
+                    "title": "Ghostty setup",
+                    "summary": "Advanced Tips: Make Ghostty Even Better",
+                    "content": "long body should stay out of eval JSON",
+                    "metadata": {
+                        "target_path": "Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md",
+                        "uri": "vault://TaskNotes/Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off.md#Advanced Tips",
+                        "start_line": 199,
+                        "end_line": 200,
+                    },
+                    "relevance": {"rank": 1, "retrieval_mode": "duckdb_broker_store"},
+                }
+            ]
+        )
+
+        self.assertEqual(compact[0]["kind"], "vault_chunk")
+        self.assertIn("Ghostty Terminal", compact[0]["source_path"])
+        self.assertEqual(compact[0]["line_start"], 199)
+        self.assertEqual(compact[0]["metadata"]["target_path"], "Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md")
+        self.assertEqual(compact[0]["relevance"]["retrieval_mode"], "duckdb_broker_store")
+        self.assertNotIn("content", compact[0])
+
     def test_derived_store_proof_finds_live_sidecar_memories(self) -> None:
         smoke = load_smoke_module()
         with tempfile.TemporaryDirectory() as temp_dir:

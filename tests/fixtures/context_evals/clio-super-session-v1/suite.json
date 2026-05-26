@@ -577,6 +577,52 @@
       ]
     },
     {
+      "name": "installed_provider_exact_ghostty_heading",
+      "group": "retrieval",
+      "source": "installed_provider",
+      "description": "Installed Hermes provider explicit broker tool should preserve the Ghostty exact-heading/source-span baseline.",
+      "query": "Advanced Tips: Make Ghostty Even Better",
+      "tool_query": "Advanced Tips: Make Ghostty Even Better",
+      "limit": 8,
+      "max_duration_ms": 10000,
+      "session_id": "clio_installed_provider_exact_ghostty_eval",
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "assertions": [
+        {"type": "json_field_equals", "field": "prefetch_has_context", "equals": true},
+        {"type": "json_field_equals", "field": "default_prefetch_has_raw_provenance", "equals": false},
+        {"type": "json_field_equals", "field": "tool_event_type", "equals": "broker_context"},
+        {"type": "json_field_equals", "field": "tool_items.0.kind", "equals": "vault_chunk"},
+        {"type": "json_field_contains", "field": "tool_items.0.source_path", "contains": "Ghostty Terminal Hands-On Set Up in 5 Minutes, Development Efficiency Takes Off.md"},
+        {"type": "json_field_equals", "field": "tool_items.0.line_start", "equals": 199},
+        {"type": "json_field_equals", "field": "tool_items.0.line_end", "equals": 200},
+        {"type": "json_field_equals", "field": "tool_items.0.relevance.rank", "equals": 1},
+        {"type": "json_field_equals", "field": "tool_items.0.relevance.retrieval_mode", "equals": "duckdb_broker_store"},
+        {"type": "json_field_equals", "field": "tool_items.0.relevance.exact_match", "equals": true}
+      ]
+    },
+    {
+      "name": "installed_provider_current_relationship_neighborhood",
+      "group": "retrieval",
+      "source": "installed_provider",
+      "description": "Installed Hermes provider explicit broker tool should expose CURRENT.md relationship rows and keep stale OpenClaw backlinks visible.",
+      "query": "What links or backlinks relate to Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md?",
+      "tool_query": "What links or backlinks relate to Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md?",
+      "limit": 12,
+      "max_duration_ms": 10000,
+      "session_id": "clio_installed_provider_relationship_eval",
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "assertions": [
+        {"type": "json_field_equals", "field": "prefetch_has_context", "equals": true},
+        {"type": "json_field_equals", "field": "default_prefetch_has_raw_provenance", "equals": false},
+        {"type": "json_field_equals", "field": "tool_event_type", "equals": "broker_context"},
+        {"type": "json_field_equals", "field": "tool_items.0.kind", "equals": "vault_relationship"},
+        {"type": "json_field_equals", "field": "tool_items.0.metadata.relationship", "equals": "backlink"},
+        {"type": "json_field_equals", "field": "tool_items.0.metadata.target_path", "equals": "Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md"},
+        {"type": "json_field_equals", "field": "tool_items.0.relevance.retrieval_mode", "equals": "duckdb_broker_store_relationship"},
+        {"type": "json_field_contains", "field": "tool_items", "contains": "Projects/OpenClaw-Stack/CURRENT.md"}
+      ]
+    },
+    {
       "name": "installed_provider_non_vault_restraint",
       "group": "budget",
       "source": "installed_provider",
