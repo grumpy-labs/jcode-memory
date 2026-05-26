@@ -103,7 +103,8 @@ Use `--no-log` for local scratch runs. Omit it when the run should append to:
   rows and conflict notes.
 - Installed-provider mode proves current-plan authority, current-correction
   precedence over checkpoint evidence, exact Ghostty source span, CURRENT
-  relationship rows, structured session-end handoffs, non-Vault restraint, and
+  relationship rows, structured session-end handoffs, ambiguous Vault/current
+  uncertainty guidance, legacy-provider restraint, non-Vault restraint, and
   hidden sync.
 - Fixture mode proves generated helper-session demotion, stale prior-session
   demotion for current-state prompts, and open Vault task/checklist routing
@@ -114,15 +115,17 @@ Use `--no-log` for local scratch runs. Omit it when the run should append to:
 As of the current context-gate suite, the latest expected results are:
 
 ```text
-fixture:            18/18
+fixture:            20/20
 live-broker:         5/5
-installed-provider:  7/7
+installed-provider:  9/9
 ```
 
-Latest production broker: `0bfb9ca2a41f2c7cb3c8c933fd9a47350fec7fc5`
-(`v0.12.216-dev`). That deployment routes open `vault_task` checklist/task rows
-into Clio Context Packet `active_task`, while completed Vault task rows remain
-source context rather than active work state.
+Latest production broker: `2ada547e1894eba738dbfb0209718f32ac82d9d9`. That
+deployment captures true Hermes runtime compression summaries through
+`broker_transcript_sync.runtime_summary`. Latest Mac/CT `1150` adapter/plugin:
+`f3078c60673e5b6fcd4a354ee936370943099eec`. That adapter/eval slice adds
+ambiguity guidance plus legacy-provider restraint gates without rebuilding CT
+`1103`.
 
 ## Failure Policy
 
