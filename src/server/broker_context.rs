@@ -564,6 +564,9 @@ where
         extractor,
     )
     .await?;
+    if let Some(lineage_checkpoint_id) = lineage_checkpoint_id.as_deref() {
+        link_derived_memories(manager, lineage_checkpoint_id, &derived_memory_ids)?;
+    }
     let mut memory_ids = vec![provenance_id.clone()];
     if let Some(lineage_checkpoint_id) = lineage_checkpoint_id {
         memory_ids.push(lineage_checkpoint_id);
@@ -760,7 +763,7 @@ fn store_lineage_checkpoint_memory(
             compact_runtime_summary_checkpoint(runtime_summary),
             "hermes_runtime",
         )
-    } else if checkpoint_kind == "session_end" {
+    } else if checkpoint_kind_uses_structured_handoff(checkpoint_kind) {
         (
             structured_session_end_handoff(transcript, source, provenance_id),
             "broker_generated",
@@ -831,9 +834,19 @@ fn store_lineage_checkpoint_memory(
 }
 
 fn checkpoint_kind_from_source(source: &str) -> Option<&'static str> {
-    match source {
-        "hermes:pre_compress" => Some("compression"),
-        "hermes:session_end" => Some("session_end"),
+    let checkpoint_source = source
+        .split_once(':')
+        .map(|(_, event)| event)
+        .unwrap_or(source)
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    match checkpoint_source.as_str() {
+        "pre_compress" | "compression" | "compress" => Some("compression"),
+        "handoff" | "manual_handoff" => Some("handoff"),
+        "session_end" | "on_session_end" => Some("session_end"),
+        "manual_summary" | "summary" => Some("manual_summary"),
+        "plan_update" | "plan_checkpoint" => Some("plan_update"),
         _ => None,
     }
 }
@@ -841,9 +854,16 @@ fn checkpoint_kind_from_source(source: &str) -> Option<&'static str> {
 fn checkpoint_title(checkpoint_kind: &str) -> &'static str {
     match checkpoint_kind {
         "compression" => "Hermes compression checkpoint",
+        "handoff" => "Hermes handoff checkpoint",
         "session_end" => "Hermes session-end checkpoint",
+        "manual_summary" => "Hermes manual-summary checkpoint",
+        "plan_update" => "Hermes plan-update checkpoint",
         _ => "Hermes checkpoint",
     }
+}
+
+fn checkpoint_kind_uses_structured_handoff(checkpoint_kind: &str) -> bool {
+    matches!(checkpoint_kind, "handoff" | "session_end")
 }
 
 fn checkpoint_surface_from_source(source: &str) -> String {
@@ -859,7 +879,7 @@ fn checkpoint_surface_from_source(source: &str) -> String {
 fn checkpoint_branch_reason(checkpoint_kind: &str) -> &'static str {
     match checkpoint_kind {
         "compression" => "compression",
-        "session_end" => "handoff",
+        "handoff" | "session_end" | "manual_summary" | "plan_update" => "handoff",
         _ => "manual_reset",
     }
 }
@@ -4492,6 +4512,31 @@ mod tests {
                 .all(|memory| memory.id != provenance_memory_ids[0]),
             "provenance memory should stay hidden by default, got {context:?}"
         );
+        let checkpoint_id = memory_ids
+            .iter()
+            .find(|memory_id| {
+                *memory_id != &provenance_memory_ids[0] && *memory_id != &derived_memory_ids[0]
+            })
+            .expect("checkpoint memory id");
+        let graph = manager.load_project_graph().expect("load graph");
+        let derived_edges = graph
+            .edges
+            .get(&derived_memory_ids[0])
+            .expect("derived memory edges");
+        assert!(
+            derived_edges
+                .iter()
+                .any(|edge| edge.target == provenance_memory_ids[0]
+                    && matches!(edge.kind, EdgeKind::DerivedFrom)),
+            "derived memory should link back to hidden provenance"
+        );
+        assert!(
+            derived_edges
+                .iter()
+                .any(|edge| edge.target == *checkpoint_id
+                    && matches!(edge.kind, EdgeKind::DerivedFrom)),
+            "derived memory should link back to lineage checkpoint"
+        );
     }
 
     #[tokio::test]
@@ -4693,6 +4738,31 @@ mod tests {
             Some("handoff")
         );
         assert_eq!(normalize_branch_reason("surprise").as_deref(), None);
+    }
+
+    #[test]
+    fn checkpoint_kind_from_source_covers_required_variants() {
+        assert_eq!(
+            checkpoint_kind_from_source("hermes:pre_compress"),
+            Some("compression")
+        );
+        assert_eq!(
+            checkpoint_kind_from_source("hermes:handoff"),
+            Some("handoff")
+        );
+        assert_eq!(
+            checkpoint_kind_from_source("hermes:session_end"),
+            Some("session_end")
+        );
+        assert_eq!(
+            checkpoint_kind_from_source("hermes:manual-summary"),
+            Some("manual_summary")
+        );
+        assert_eq!(
+            checkpoint_kind_from_source("hermes:plan_update"),
+            Some("plan_update")
+        );
+        assert_eq!(checkpoint_kind_from_source("hermes:turn"), None);
     }
 
     #[tokio::test]
@@ -5234,6 +5304,7 @@ mod tests {
         .expect("sync transcript");
 
         let ServerEvent::BrokerTranscriptSynced {
+            memory_ids,
             provenance_memory_ids,
             derived_memory_ids,
             extraction_status,
@@ -5262,12 +5333,25 @@ mod tests {
             1
         );
         let edges = graph.edges.get(&existing_id).expect("derived edges");
+        let checkpoint_id = memory_ids
+            .iter()
+            .find(|memory_id| {
+                *memory_id != &provenance_memory_ids[0] && *memory_id != &derived_memory_ids[0]
+            })
+            .expect("checkpoint memory id");
         assert!(
             edges
                 .iter()
                 .any(|edge| edge.target == provenance_memory_ids[0]
                     && matches!(edge.kind, EdgeKind::DerivedFrom)),
             "reinforced memory should link back to new transcript provenance"
+        );
+        assert!(
+            edges
+                .iter()
+                .any(|edge| edge.target == *checkpoint_id
+                    && matches!(edge.kind, EdgeKind::DerivedFrom)),
+            "reinforced memory should link back to new lineage checkpoint"
         );
     }
 
