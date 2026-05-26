@@ -446,6 +446,7 @@
       "description": "Live broker socket should retrieve the current canonical plan as authority for lineage/checkpoint state.",
       "query": "bcb6143bad371ca96b4a58ce4d3cbaa1302ce8c1 deployed CT 1103 first broker-visible lineage checkpoint slice current canonical plan",
       "limit": 8,
+      "max_duration_ms": 8000,
       "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
       "assertions": [
         {"type": "packet_version", "equals": "clio_context_packet_v1"},
@@ -461,6 +462,7 @@
       "description": "Live broker socket should expose recent logical super-session checkpoints through packet lineage.",
       "query": "live lineage checkpoint Next action CT1103 logical super-session",
       "limit": 8,
+      "max_duration_ms": 5000,
       "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
       "assertions": [
         {"type": "packet_version", "equals": "clio_context_packet_v1"},
@@ -477,6 +479,7 @@
       "description": "Live broker socket should rank the Ghostty terminal note first for a broad, focused terminal-emulator prompt.",
       "query": "improving a terminal emulator setup with shell prompt styling, system monitor integration, and productivity tweaks?",
       "limit": 8,
+      "max_duration_ms": 5000,
       "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
       "assertions": [
         {"type": "packet_version", "equals": "clio_context_packet_v1"},
@@ -493,6 +496,7 @@
       "description": "Live broker socket should preserve the Ghostty exact-heading/source-span regression baseline.",
       "query": "Advanced Tips: Make Ghostty Even Better",
       "limit": 8,
+      "max_duration_ms": 5000,
       "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
       "assertions": [
         {"type": "packet_version", "equals": "clio_context_packet_v1"},
@@ -512,6 +516,7 @@
       "description": "Live broker socket should expose relationship-neighborhood rows for the current project CURRENT.md without hiding stale OpenClaw backlinks.",
       "query": "What links or backlinks relate to Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md?",
       "limit": 12,
+      "max_duration_ms": 5000,
       "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
       "assertions": [
         {"type": "packet_version", "equals": "clio_context_packet_v1"},
@@ -530,6 +535,7 @@
       "description": "Installed Hermes provider should inject current canonical plan context for context-bearing project prompts.",
       "query": "Clio current context packet provider gate",
       "limit": 8,
+      "max_duration_ms": 10000,
       "session_id": "clio_installed_provider_current_plan_eval",
       "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
       "assertions": [
@@ -549,6 +555,7 @@
       "tool_query": "Clio current context packet provider gate",
       "expect_no_prefetch": true,
       "limit": 8,
+      "max_duration_ms": 8000,
       "session_id": "clio_installed_provider_non_vault_eval",
       "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
       "assertions": [
@@ -566,6 +573,7 @@
       "description": "Installed Hermes provider should sync turns/transcripts as hidden provenance without leaking raw text into normal prefetch.",
       "query": "Clio current context packet provider gate",
       "limit": 8,
+      "max_duration_ms": 10000,
       "session_id": "clio_installed_provider_hidden_sync_eval",
       "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
       "sync_user": "installed provider eval hidden sync user marker 0d51d00e",

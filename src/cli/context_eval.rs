@@ -41,6 +41,8 @@ struct ContextEvalProbe {
     #[serde(default)]
     expect_no_prefetch: bool,
     #[serde(default)]
+    max_duration_ms: Option<u64>,
+    #[serde(default)]
     session_id: Option<String>,
     #[serde(default)]
     working_dir: Option<String>,
@@ -314,7 +316,12 @@ async fn evaluate_suite(
         let probe_started = Instant::now();
         let evaluation = evaluate_probe(&probe, mode).await?;
         let duration_ms = elapsed_millis(probe_started);
-        let failures = evaluation.failures;
+        let mut failures = evaluation.failures;
+        failures.extend(duration_failures(
+            &probe.name,
+            probe.max_duration_ms,
+            duration_ms,
+        ));
         let passed = failures.is_empty();
         let group = groups.entry(probe.group.clone()).or_default();
         group.probe_count += 1;
@@ -430,6 +437,19 @@ async fn evaluate_probe(
 
 fn elapsed_millis(started: Instant) -> u64 {
     started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn duration_failures(name: &str, max_duration_ms: Option<u64>, duration_ms: u64) -> Vec<String> {
+    let Some(max_duration_ms) = max_duration_ms else {
+        return Vec::new();
+    };
+    if duration_ms > max_duration_ms {
+        vec![format!(
+            "probe {name:?} took {duration_ms}ms, over max_duration_ms {max_duration_ms}"
+        )]
+    } else {
+        Vec::new()
+    }
 }
 
 fn packet_budget_report(packet: &ClioContextPacketV1) -> Result<ContextPacketBudgetReport> {
@@ -1117,5 +1137,15 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn duration_failures_trip_when_probe_exceeds_max_duration() {
+        assert!(duration_failures("fast_probe", Some(100), 100).is_empty());
+        assert_eq!(
+            duration_failures("slow_probe", Some(100), 101),
+            vec!["probe \"slow_probe\" took 101ms, over max_duration_ms 100".to_string()]
+        );
+        assert!(duration_failures("unbounded_probe", None, 10_000).is_empty());
     }
 }
