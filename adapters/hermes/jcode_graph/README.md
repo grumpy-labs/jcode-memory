@@ -8,7 +8,8 @@ retrieval metadata, and provenance.
 For Rob's Clio deployment, `jcode_graph` is only the Hermes provider edge. The
 durable context service is the jcode broker API backed by DuckDB on CT `1103`.
 The current gate/adoption/rollback posture is documented in
-`docs/CLIO_CONTEXT_PROVIDER_GATES.md`.
+`docs/CLIO_CONTEXT_PROVIDER_GATES.md`; day-to-day operations are summarized in
+`docs/CLIO_JCODE_OPERATOR_GUIDE.md`.
 
 Install target for local testing:
 

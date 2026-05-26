@@ -159,7 +159,8 @@ Plan adoption and provider replacement are separate decisions.
   rollback context until Rob explicitly approves cleanup.
 - Keep useful locked probes even if a provider is replaced.
 
-For live deploys, use the manual dry-run-first lane in
+For day-to-day operation, use `docs/CLIO_JCODE_OPERATOR_GUIDE.md`. For live
+deploys, use the manual dry-run-first lane in
 `docs/JCODE_MEMORY_DEPLOYMENT.md`. Do not enable automatic Git pulls, timers,
 or webhooks until a manual apply and rollback rehearsal are boring.
 
