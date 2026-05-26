@@ -152,6 +152,7 @@ struct ContextEvalReport {
     timestamp: String,
     duration_ms: u64,
     provider: ContextEvalProviderReport,
+    review: ContextEvalReviewReport,
     passed: bool,
     pass_rate: f64,
     required_pass_rate: f64,
@@ -170,6 +171,21 @@ struct ContextEvalGroupReport {
     probe_count: usize,
     passed_count: usize,
     failed_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ContextEvalReviewReport {
+    recommendation: String,
+    failure_class_counts: BTreeMap<String, usize>,
+    top_failures: Vec<ContextEvalReviewFailure>,
+}
+
+#[derive(Debug, Serialize)]
+struct ContextEvalReviewFailure {
+    probe: String,
+    group: String,
+    classification: String,
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -393,6 +409,7 @@ async fn evaluate_suite(
             .unwrap_or(false)
     });
     let passed = pass_rate >= suite.minimum_pass_rate && required_groups_passed;
+    let review = review_summary(passed, &group_results, &probe_reports);
 
     Ok(ContextEvalReport {
         suite: suite.name,
@@ -416,6 +433,7 @@ async fn evaluate_suite(
             git_hash: env!("JCODE_GIT_HASH").to_string(),
             version: env!("JCODE_VERSION").to_string(),
         },
+        review,
         passed,
         pass_rate,
         required_pass_rate: suite.minimum_pass_rate,
@@ -1111,23 +1129,14 @@ fn human_report(report: &ContextEvalReport) -> String {
     }
     let _ = writeln!(&mut out);
     let _ = writeln!(&mut out, "Top failures");
-    let failed: Vec<_> = report.probes.iter().filter(|probe| !probe.passed).collect();
-    if failed.is_empty() {
+    if report.review.top_failures.is_empty() {
         let _ = writeln!(&mut out, "- none");
     } else {
-        for probe in failed.into_iter().take(5) {
-            let first_failure = probe
-                .failures
-                .first()
-                .map(String::as_str)
-                .unwrap_or("probe failed without detailed failure text");
+        for failure in &report.review.top_failures {
             let _ = writeln!(
                 &mut out,
                 "- {} [{}]: {} ({})",
-                probe.name,
-                probe.group,
-                first_failure,
-                classify_failure(first_failure)
+                failure.probe, failure.group, failure.message, failure.classification
             );
         }
     }
@@ -1165,27 +1174,62 @@ fn classify_failure(failure: &str) -> &'static str {
     }
 }
 
-fn review_recommendation(report: &ContextEvalReport) -> &'static str {
-    if report.passed {
+fn review_summary(
+    passed: bool,
+    group_results: &BTreeMap<String, ContextEvalGroupReport>,
+    probes: &[ContextEvalProbeReport],
+) -> ContextEvalReviewReport {
+    let mut failure_class_counts = BTreeMap::new();
+    let mut top_failures = Vec::new();
+    for probe in probes {
+        for failure in &probe.failures {
+            let classification = classify_failure(failure).to_string();
+            *failure_class_counts
+                .entry(classification.clone())
+                .or_insert(0) += 1;
+            if top_failures.len() < 5 {
+                top_failures.push(ContextEvalReviewFailure {
+                    probe: probe.name.clone(),
+                    group: probe.group.clone(),
+                    classification,
+                    message: failure.clone(),
+                });
+            }
+        }
+    }
+
+    ContextEvalReviewReport {
+        recommendation: recommendation_for(passed, group_results, &failure_class_counts)
+            .to_string(),
+        failure_class_counts,
+        top_failures,
+    }
+}
+
+fn review_recommendation(report: &ContextEvalReport) -> &str {
+    report.review.recommendation.as_str()
+}
+
+fn recommendation_for(
+    passed: bool,
+    group_results: &BTreeMap<String, ContextEvalGroupReport>,
+    failure_class_counts: &BTreeMap<String, usize>,
+) -> &'static str {
+    if passed {
         return "continue with jcode as incumbent for this mode; no remediation needed.";
     }
-    let required_group_failed = report
-        .group_results
+    let required_group_failed = group_results
         .values()
         .any(|group| group.required && !group.passed);
-    let classes = report
-        .probes
-        .iter()
-        .flat_map(|probe| probe.failures.iter())
-        .map(|failure| classify_failure(failure))
-        .collect::<std::collections::BTreeSet<_>>();
 
     if required_group_failed
-        || classes.contains("source_trace_or_retrieval")
-        || classes.contains("context_contract_structure")
+        || failure_class_counts.contains_key("source_trace_or_retrieval")
+        || failure_class_counts.contains_key("context_contract_structure")
     {
         "run one focused jcode remediation pass before deeper investment; if the same gate repeats, start the provider bake-off."
-    } else if classes.contains("latency_or_ux") || classes.contains("budget_or_rendering") {
+    } else if failure_class_counts.contains_key("latency_or_ux")
+        || failure_class_counts.contains_key("budget_or_rendering")
+    {
         "treat this as blocking UX/context-budget work before adoption; remediate once, then rerun the locked suite."
     } else {
         "review whether this is a provider bug or bad probe; update the probe only with a progress-log note."
@@ -1356,6 +1400,52 @@ mod tests {
 
     #[test]
     fn human_report_includes_review_sections_and_failure_classification() {
+        let group_results = BTreeMap::from([(
+            "latency".to_string(),
+            ContextEvalGroupReport {
+                passed: false,
+                required: false,
+                pass_rate: 0.0,
+                probe_count: 1,
+                passed_count: 0,
+                failed_count: 1,
+            },
+        )]);
+        let probes = vec![
+            ContextEvalProbeReport {
+                name: "fast_probe".to_string(),
+                group: "lineage".to_string(),
+                description: "Fast path".to_string(),
+                source: "live_broker".to_string(),
+                duration_ms: 10,
+                packet_budget: ContextPacketBudgetReport {
+                    total_items: 1,
+                    serialized_chars: 100,
+                    slot_item_counts: BTreeMap::new(),
+                    slot_serialized_chars: BTreeMap::new(),
+                },
+                passed: true,
+                failures: Vec::new(),
+            },
+            ContextEvalProbeReport {
+                name: "slow_probe".to_string(),
+                group: "latency".to_string(),
+                description: "Slow path".to_string(),
+                source: "live_broker".to_string(),
+                duration_ms: 101,
+                packet_budget: ContextPacketBudgetReport {
+                    total_items: 2,
+                    serialized_chars: 200,
+                    slot_item_counts: BTreeMap::new(),
+                    slot_serialized_chars: BTreeMap::new(),
+                },
+                passed: false,
+                failures: vec![
+                    "probe \"slow_probe\" took 101ms, over max_duration_ms 100".to_string(),
+                ],
+            },
+        ];
+        let review = review_summary(false, &group_results, &probes);
         let report = ContextEvalReport {
             suite: "clio-super-session-v1".to_string(),
             version: 1,
@@ -1370,57 +1460,15 @@ mod tests {
                 git_hash: "abc12345".to_string(),
                 version: "v0.test".to_string(),
             },
+            review,
             passed: false,
             pass_rate: 0.5,
             required_pass_rate: 0.9,
             probe_count: 2,
             passed_count: 1,
             failed_count: 1,
-            group_results: BTreeMap::from([(
-                "latency".to_string(),
-                ContextEvalGroupReport {
-                    passed: false,
-                    required: false,
-                    pass_rate: 0.0,
-                    probe_count: 1,
-                    passed_count: 0,
-                    failed_count: 1,
-                },
-            )]),
-            probes: vec![
-                ContextEvalProbeReport {
-                    name: "fast_probe".to_string(),
-                    group: "lineage".to_string(),
-                    description: "Fast path".to_string(),
-                    source: "live_broker".to_string(),
-                    duration_ms: 10,
-                    packet_budget: ContextPacketBudgetReport {
-                        total_items: 1,
-                        serialized_chars: 100,
-                        slot_item_counts: BTreeMap::new(),
-                        slot_serialized_chars: BTreeMap::new(),
-                    },
-                    passed: true,
-                    failures: Vec::new(),
-                },
-                ContextEvalProbeReport {
-                    name: "slow_probe".to_string(),
-                    group: "latency".to_string(),
-                    description: "Slow path".to_string(),
-                    source: "live_broker".to_string(),
-                    duration_ms: 101,
-                    packet_budget: ContextPacketBudgetReport {
-                        total_items: 2,
-                        serialized_chars: 200,
-                        slot_item_counts: BTreeMap::new(),
-                        slot_serialized_chars: BTreeMap::new(),
-                    },
-                    passed: false,
-                    failures: vec![
-                        "probe \"slow_probe\" took 101ms, over max_duration_ms 100".to_string(),
-                    ],
-                },
-            ],
+            group_results,
+            probes,
         };
 
         let rendered = human_report(&report);
@@ -1430,5 +1478,11 @@ mod tests {
         assert!(rendered.contains("Top failures"));
         assert!(rendered.contains("latency_or_ux"));
         assert!(rendered.contains("Recommendation"));
+
+        let json_report = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json_report["review"]["top_failures"][0]["classification"],
+            json!("latency_or_ux")
+        );
     }
 }
