@@ -3248,6 +3248,11 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
         metadata["retrieval_mode"] = json!(mode);
     }
     if is_lineage_checkpoint {
+        if let Some(map) = metadata.as_object_mut() {
+            map.remove("category");
+            map.remove("scope");
+            map.remove("retrieval_mode");
+        }
         metadata["logical_super_session_id"] =
             json!(tag_value(&memory.tags, "logical-super-session:").unwrap_or_default());
         metadata["session_segment_id"] =
@@ -4070,6 +4075,13 @@ mod tests {
             .iter()
             .find(|item| item.item.kind == "compression_checkpoint")
             .expect("lineage checkpoint packet item");
+        assert!(
+            lineage_item.item.metadata.get("category").is_none()
+                && lineage_item.item.metadata.get("scope").is_none()
+                && lineage_item.item.metadata.get("retrieval_mode").is_none(),
+            "lineage packet metadata should omit fields duplicated by top-level item/relevance fields: {:?}",
+            lineage_item.item.metadata
+        );
         assert!(
             lineage_item.item.tags.iter().all(|tag| {
                 !tag.starts_with("active-project-path:")
