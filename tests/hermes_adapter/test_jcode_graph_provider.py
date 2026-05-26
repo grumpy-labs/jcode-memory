@@ -898,6 +898,67 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         self.assertIn("surface=hermes", text)
         self.assertIn("segment=hermes_session_end_surface", text)
 
+    def test_provider_renders_structured_handoff_sections_after_checkpoint_header(self) -> None:
+        packet = {
+            "version": "clio_context_packet_v1",
+            "lineage": [
+                {
+                    "id": "checkpoint_session_end",
+                    "kind": "compression_checkpoint",
+                    "scope": "project",
+                    "title": "Hermes session-end checkpoint",
+                    "summary": "Hermes session-end checkpoint",
+                    "content": (
+                        "Hermes session-end checkpoint\n"
+                        "Logical super-session: clio-super-session\n"
+                        "Session segment: hermes_session_end_surface\n"
+                        "Surface: hermes\n"
+                        "Branch reason: handoff\n"
+                        "Source: hermes:session_end\n"
+                        "Summary source: broker_generated\n"
+                        "Provenance memory: mem_session_end_handoff\n\n"
+                        "Checkpoint summary:\n"
+                        "Structured session-end handoff:\n"
+                        "Active task:\n"
+                        "- structured handoff provider gate amber-cascade-20260526\n"
+                        "Decisions:\n"
+                        "- keep the fallback builder broker-side\n"
+                        "Files:\n"
+                        "- Not detected in transcript.\n"
+                        "Commands and verification:\n"
+                        "- cargo test -q context_eval\n"
+                        "Next action:\n"
+                        "- run gates"
+                    ),
+                    "slot": "lineage",
+                    "why_included": "lineage; current plan files override checkpoint content",
+                    "metadata": {
+                        "surface": "hermes",
+                        "session_segment_id": "hermes_session_end_surface",
+                        "checkpoint_kind": "session_end",
+                        "branch_reason": "handoff",
+                    },
+                }
+            ],
+        }
+        with FakeBrokerServer(context_packet=packet) as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "context_limit": 8,
+                    "max_chars": 1600,
+                    "item_max_chars": 360,
+                }
+            )
+            provider.initialize("hermes_session")
+            text = provider.prefetch("structured session-end handoff", session_id="hermes_session")
+            provider.shutdown()
+
+        self.assertIn("Structured session-end handoff:", text)
+        self.assertIn("Commands and verification:", text)
+        self.assertIn("cargo test -q context_eval", text)
+
     def test_provider_ignores_unknown_context_packet_version(self) -> None:
         packet = {
             "version": "clio_context_packet_v2",

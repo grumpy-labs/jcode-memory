@@ -1127,7 +1127,7 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         if item.get("slot") == "artifact_refs" or kind in {"artifact_ref", "side_panel"}:
             content = item_summary or "Full output retained behind artifact reference."
         elif item.get("slot") == "lineage" or kind == "compression_checkpoint":
-            content = item_content or item_summary or ""
+            content = _checkpoint_display_content(item_content or item_summary or "")
         elif kind in {"vault_chunk", "vault_task", "vault_link"} and item_content:
             content = item_content
         else:
@@ -1285,6 +1285,22 @@ def _compact_query_text(text: str) -> str:
     if len(text) <= 480:
         return text
     return text[:480].rsplit(" ", 1)[0].strip() or text[:480].strip()
+
+
+def _checkpoint_display_content(content: Any) -> str:
+    text = str(content or "").strip()
+    if not text:
+        return ""
+    marker = "Checkpoint summary:"
+    marker_index = text.find(marker)
+    if marker_index >= 0:
+        body = text[marker_index + len(marker) :].strip()
+        if body:
+            return body
+    handoff_index = text.find("Structured session-end handoff:")
+    if handoff_index >= 0:
+        return text[handoff_index:].strip()
+    return text
 
 
 def register(ctx: Any) -> None:
