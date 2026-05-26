@@ -1776,6 +1776,26 @@ fn clio_conflict_group(item: &BrokerContextItem, source_path: Option<&str>) -> S
     if path.contains("openclaw") || text_haystack.contains("project name") {
         return "project_name".to_string();
     }
+    if path.contains("session-summaries")
+        || text_haystack.contains("session lineage")
+        || text_haystack.contains("logical super-session")
+        || text_haystack.contains("super-session lineage")
+        || text_haystack.contains("old session")
+        || text_haystack.contains("prior session")
+        || text_haystack.contains("previous session")
+        || text_haystack.contains("session resume")
+        || text_haystack.contains("resumed session")
+        || text_haystack.contains("resume state")
+        || text_haystack.contains("forked session")
+        || text_haystack.contains("compression checkpoint")
+        || text_haystack.contains("current correction")
+        || text_haystack.contains("user correction")
+        || text_haystack.contains("handoff")
+        || (text_haystack.contains("checkpoint")
+            && (text_haystack.contains("session") || text_haystack.contains("resume")))
+    {
+        return "session_lineage".to_string();
+    }
     if text_haystack.contains("task")
         || text_haystack.contains("checklist")
         || text_haystack.contains("progress")
@@ -4386,6 +4406,57 @@ mod tests {
         assert_eq!(
             packet.conflicts[0].conflict_group.as_deref(),
             Some("source_of_truth")
+        );
+    }
+
+    #[test]
+    fn clio_context_packet_classifies_old_session_state_as_session_lineage() {
+        let old_session_note = BrokerContextItem {
+            id: "conflict:old-session-checkpoint".to_string(),
+            kind: "conflict".to_string(),
+            scope: "session".to_string(),
+            content_format: "markdown".to_string(),
+            title: Some("Prior session checkpoint conflict".to_string()),
+            summary: Some(
+                "Old session checkpoint says the task status should continue, but the current user correction changed direction.".to_string(),
+            ),
+            content: Some(
+                "Previous session resume state conflicts with the current correction for this logical super-session.".to_string(),
+            ),
+            tags: Vec::new(),
+            source: Some(
+                "vault://System/Clio/Session-Summaries/2026-05-25-old-resume.md#checkpoint"
+                    .to_string(),
+            ),
+            score: Some(0.91),
+            origin: BrokerContextOrigin {
+                tool: Some("duckdb_broker_store".to_string()),
+                uri: Some(
+                    "vault://System/Clio/Session-Summaries/2026-05-25-old-resume.md#checkpoint"
+                        .to_string(),
+                ),
+                path: Some(
+                    "System/Clio/Session-Summaries/2026-05-25-old-resume.md".to_string(),
+                ),
+                ..Default::default()
+            },
+            relevance: Some(BrokerContextRelevance {
+                query: Some("current correction for resumed Clio session".to_string()),
+                retrieval_mode: Some("duckdb_broker_store".to_string()),
+                rank: Some(1),
+                ..Default::default()
+            }),
+            fragments: Vec::new(),
+            metadata: json!({"start_line": 4, "end_line": 18}),
+        };
+
+        let packet = clio_context_packet_from_items(&[old_session_note.clone()]);
+
+        assert_eq!(packet.conflicts.len(), 1);
+        assert_eq!(packet.conflicts[0].item.id, old_session_note.id);
+        assert_eq!(
+            packet.conflicts[0].conflict_group.as_deref(),
+            Some("session_lineage")
         );
     }
 
