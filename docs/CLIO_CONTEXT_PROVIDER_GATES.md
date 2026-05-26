@@ -106,11 +106,10 @@ Use `--no-log` for local scratch runs. Omit it when the run should append to:
 - The full initial suite passes at least 90%.
 - Probe duration and packet budget caps pass.
 
-As of commit `74e05dc5fa7d2735192a2c9be6fea04aed9c81ec`, the latest expected
-results are:
+As of the current context-gate suite, the latest expected results are:
 
 ```text
-fixture:            13/13
+fixture:            14/14
 live-broker:         5/5
 installed-provider:  5/5
 ```

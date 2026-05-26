@@ -137,7 +137,7 @@ cargo run -q --bin jcode -- broker eval-context \
 Current expected gate counts:
 
 ```text
-fixture:            13/13
+fixture:            14/14
 live-broker:         5/5
 installed-provider:  5/5
 ```

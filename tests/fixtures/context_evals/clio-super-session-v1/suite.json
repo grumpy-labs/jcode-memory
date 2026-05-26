@@ -175,6 +175,46 @@
       ]
     },
     {
+      "name": "current_correction_over_old_checkpoint",
+      "group": "authority_conflict",
+      "description": "Current user correction should outrank old checkpoint or session-resume state.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "active_task": [
+          {
+            "id": "current:user-correction",
+            "kind": "current_user_input",
+            "scope": "turn",
+            "title": "Current correction",
+            "summary": "Current correction: stop following the prior checkpoint and use the latest user request.",
+            "authority_class": "current_user_input",
+            "workflow_status": "active"
+          }
+        ],
+        "conflicts": [
+          {
+            "id": "checkpoint:old-session-state",
+            "kind": "compression_checkpoint",
+            "scope": "logical_super_session",
+            "title": "Old checkpoint state",
+            "summary": "Previous session checkpoint says to continue the old task status.",
+            "source_path": "/Users/rob/Vault/System/Clio/Session-Summaries/2026-05-25-old-resume.md",
+            "authority_class": "lineage_checkpoint",
+            "workflow_status": "historical",
+            "conflict_group": "session_lineage",
+            "why_included": "currentness/conflict note; prefer current authority/current correction; mention uncertainty if this conflict affects the answer"
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_field_contains", "slot": "active_task", "field": "summary", "contains": "Current correction"},
+        {"type": "slot_field_equals", "slot": "active_task", "field": "authority_class", "equals": "current_user_input"},
+        {"type": "slot_field_equals", "slot": "conflicts", "field": "conflict_group", "equals": "session_lineage"},
+        {"type": "slot_field_contains", "slot": "conflicts", "field": "source_path", "contains": "Session-Summaries"},
+        {"type": "slot_field_contains", "slot": "conflicts", "field": "why_included", "contains": "current correction"}
+      ]
+    },
+    {
       "name": "historical_note_demoted_for_current_state_query",
       "group": "authority_conflict",
       "description": "Current-state prompts should route stale provider notes into conflicts instead of normal evidence.",
