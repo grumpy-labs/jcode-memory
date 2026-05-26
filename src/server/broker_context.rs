@@ -1787,6 +1787,12 @@ fn lineage_entry_quality_score(entry: &MemoryEntry, query: Option<&str>) -> i32 
     }
 
     if let Some(query) = query {
+        let normalized_query = crate::memory_types::normalize_search_text(query);
+        if !normalized_query.is_empty()
+            && crate::memory_types::normalize_search_text(&text).contains(normalized_query.as_str())
+        {
+            score += 10_000;
+        }
         for term in query
             .split(|character: char| !character.is_ascii_alphanumeric())
             .filter(|term| term.len() >= 4)
@@ -4398,20 +4404,26 @@ mod tests {
             )
             .expect("collect broker memory results");
 
+            assert_eq!(
+                results.first().map(|result| result.memory.id.as_str()),
+                Some(exact_id.as_str()),
+                "exact lineage checkpoint should outrank generic recent checkpoints: {results:?}"
+            );
+            let exact_result = results.first().expect("exact result");
+            assert!(exact_result.memory.content.contains(marker));
             assert!(
-                results.iter().any(|result| result.memory.id == exact_id
-                    && result.memory.content.contains(marker)
-                    && result
-                        .relevance
-                        .as_ref()
-                        .and_then(|relevance| relevance.retrieval_mode.as_deref())
-                        == Some("keyword_exact")
-                    && result
-                        .relevance
-                        .as_ref()
-                        .and_then(|relevance| relevance.exact_match)
-                        == Some(true)),
-                "exact non-embedded lineage checkpoint should not be skipped by semantic hits: {results:?}"
+                exact_result
+                    .memory
+                    .tags
+                    .iter()
+                    .any(|tag| tag == "surface:discord")
+            );
+            assert!(
+                exact_result
+                    .memory
+                    .tags
+                    .iter()
+                    .any(|tag| tag == "branch-reason:fork")
             );
         });
     }
