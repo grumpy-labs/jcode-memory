@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONTEXT_LIMIT = 8
 DEFAULT_MAX_CHARS = 2400
 DEFAULT_ITEM_MAX_CHARS = 360
+DEFAULT_PACKET_SLOT_ITEM_LIMIT = 4
+DEFAULT_PACKET_SLOT_MAX_CHARS = 1000
 DEFAULT_TRANSCRIPT_MAX_CHARS = 12000
 DEFAULT_TURN_BUFFER_LIMIT = 12
 DEFAULT_TURN_BUFFER_MAX_CHARS = 2000
@@ -362,6 +364,12 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         self._context_limit = int(self._config.get("context_limit", DEFAULT_CONTEXT_LIMIT))
         self._max_chars = int(self._config.get("max_chars", DEFAULT_MAX_CHARS))
         self._item_max_chars = int(self._config.get("item_max_chars", DEFAULT_ITEM_MAX_CHARS))
+        self._packet_slot_item_limit = int(
+            self._config.get("packet_slot_item_limit", DEFAULT_PACKET_SLOT_ITEM_LIMIT)
+        )
+        self._packet_slot_max_chars = int(
+            self._config.get("packet_slot_max_chars", DEFAULT_PACKET_SLOT_MAX_CHARS)
+        )
         self._transcript_max_chars = int(
             self._config.get("transcript_max_chars", DEFAULT_TRANSCRIPT_MAX_CHARS)
         )
@@ -641,6 +649,16 @@ class JcodeGraphMemoryProvider(MemoryProvider):
                 "default": str(DEFAULT_ITEM_MAX_CHARS),
             },
             {
+                "key": "packet_slot_item_limit",
+                "description": "Maximum Clio context packet items rendered per slot",
+                "default": str(DEFAULT_PACKET_SLOT_ITEM_LIMIT),
+            },
+            {
+                "key": "packet_slot_max_chars",
+                "description": "Maximum rendered characters per Clio context packet slot",
+                "default": str(DEFAULT_PACKET_SLOT_MAX_CHARS),
+            },
+            {
                 "key": "transcript_max_chars",
                 "description": "Maximum transcript characters sent to broker extraction hooks",
                 "default": str(DEFAULT_TRANSCRIPT_MAX_CHARS),
@@ -897,7 +915,7 @@ class JcodeGraphMemoryProvider(MemoryProvider):
 
     def _format_prefetch(self, event: Dict[str, Any], *, include_provenance: bool = False) -> str:
         packet = event.get("packet")
-        if isinstance(packet, dict):
+        if isinstance(packet, dict) and packet.get("version") == "clio_context_packet_v1":
             packet_text = self._format_clio_context_packet(
                 packet,
                 include_provenance=include_provenance,
@@ -994,9 +1012,14 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             if not section_items:
                 continue
             lines.append(f"### {title}")
-            for item in section_items:
-                lines.append(self._format_item_line(item))
-                rendered_count += 1
+            slot_lines, omitted_count = self._format_packet_slot_lines(key, section_items)
+            lines.extend(slot_lines)
+            if omitted_count:
+                lines.append(
+                    f"- ... {omitted_count} more {_packet_slot_item_label(key)} "
+                    "omitted by adapter slot cap"
+                )
+            rendered_count += len(slot_lines) + (1 if omitted_count else 0)
 
         if rendered_count == 0:
             return ""
@@ -1005,13 +1028,36 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             return text[: self._max_chars].rstrip() + "\n..."
         return text
 
+    def _format_packet_slot_lines(
+        self,
+        key: str,
+        section_items: List[Dict[str, Any]],
+    ) -> tuple[List[str], int]:
+        item_limit = max(0, self._packet_slot_item_limit)
+        max_chars = max(0, self._packet_slot_max_chars)
+        visible_items = section_items[:item_limit]
+        omitted_count = max(0, len(section_items) - len(visible_items))
+        lines: List[str] = []
+
+        for index, item in enumerate(visible_items):
+            line = self._format_item_line(item)
+            candidate = "\n".join([*lines, line])
+            if max_chars and len(candidate) > max_chars:
+                omitted_count += len(visible_items) - index
+                break
+            lines.append(line)
+
+        return lines, omitted_count
+
     def _format_item_line(self, item: Dict[str, Any]) -> str:
         kind = item.get("kind") or "context"
         scope = item.get("scope") or "session"
         title = item.get("title") or item.get("id") or kind
         item_content = item.get("content")
         item_summary = item.get("summary")
-        if kind in {"vault_chunk", "vault_task", "vault_link"} and item_content:
+        if item.get("slot") == "artifact_refs" or kind in {"artifact_ref", "side_panel"}:
+            content = item_summary or "Full output retained behind artifact reference."
+        elif kind in {"vault_chunk", "vault_task", "vault_link"} and item_content:
             content = item_content
         else:
             content = item_summary or item_content or ""
@@ -1134,6 +1180,21 @@ def _clio_packet_item_count(packet: Any) -> int:
         if isinstance(items, list):
             total += sum(1 for item in items if isinstance(item, dict))
     return total
+
+
+def _packet_slot_item_label(key: str) -> str:
+    return {
+        "active_task": "active task item",
+        "authority": "authority item",
+        "conflicts": "conflict item",
+        "lineage": "lineage item",
+        "vault_evidence": "vault evidence item",
+        "durable_memory": "durable memory item",
+        "session_evidence": "session evidence item",
+        "artifact_refs": "artifact ref",
+        "skill_hints": "skill hint",
+        "tool_hints": "tool hint",
+    }.get(key, "packet item")
 
 
 def _compact_query_text(text: str) -> str:

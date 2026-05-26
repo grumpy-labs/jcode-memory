@@ -783,6 +783,118 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         self.assertNotIn("Fallback Memory", text)
         self.assertEqual(diagnostics["last_prefetch_item_count"], 4)
 
+    def test_provider_ignores_unknown_context_packet_version(self) -> None:
+        packet = {
+            "version": "clio_context_packet_v2",
+            "authority": [
+                {
+                    "id": "future_packet_item",
+                    "kind": "vault_chunk",
+                    "scope": "project",
+                    "title": "Future Packet Item",
+                    "summary": "This version should not drive rendering.",
+                    "slot": "authority",
+                }
+            ],
+        }
+        fallback_items = [
+            {
+                "id": "mem_fallback",
+                "kind": "memory",
+                "scope": "project",
+                "title": "Fallback Memory",
+                "summary": "Legacy context remains the safe path.",
+                "origin": {"tool": "memory"},
+            }
+        ]
+        with FakeBrokerServer(context_items=fallback_items, context_packet=packet) as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "context_limit": 8,
+                }
+            )
+            provider.initialize("hermes_session")
+            text = provider.prefetch("broker packet spine", session_id="hermes_session")
+            provider.shutdown()
+
+        self.assertIn("## jcode Broker Context", text)
+        self.assertIn("Fallback Memory", text)
+        self.assertNotIn("## Clio Context Packet v1", text)
+        self.assertNotIn("Future Packet Item", text)
+
+    def test_provider_enforces_packet_slot_caps_and_masks_artifact_refs(self) -> None:
+        packet = {
+            "version": "clio_context_packet_v1",
+            "authority": [
+                {
+                    "id": "authority_1",
+                    "kind": "vault_chunk",
+                    "scope": "project",
+                    "title": "Authority One",
+                    "summary": "First authority item should render.",
+                    "slot": "authority",
+                    "authority_class": "current_project_authority",
+                },
+                {
+                    "id": "authority_2",
+                    "kind": "vault_chunk",
+                    "scope": "project",
+                    "title": "Authority Two",
+                    "summary": "Second authority item should be omitted by slot cap.",
+                    "slot": "authority",
+                    "authority_class": "current_project_authority",
+                },
+            ],
+            "artifact_refs": [
+                {
+                    "id": "artifact_tool_output",
+                    "kind": "artifact_ref",
+                    "scope": "session",
+                    "title": "Cargo output",
+                    "summary": "Full output kept behind /tmp/cargo-output.log",
+                    "content": "Total output lines: 999\n" + ("compiler detail\n" * 50),
+                    "source_uri": "file:///tmp/cargo-output.log",
+                    "slot": "artifact_refs",
+                }
+            ],
+            "skill_hints": [
+                {
+                    "id": "skill_context",
+                    "kind": "skill",
+                    "scope": "project",
+                    "title": "context-engineering-collection",
+                    "summary": "Procedural routing hint only.",
+                    "slot": "skill_hints",
+                }
+            ],
+        }
+        with FakeBrokerServer(context_packet=packet) as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                    "context_limit": 8,
+                    "max_chars": 4000,
+                    "item_max_chars": 500,
+                    "packet_slot_item_limit": 1,
+                    "packet_slot_max_chars": 500,
+                }
+            )
+            provider.initialize("hermes_session")
+            text = provider.prefetch("broker packet spine", session_id="hermes_session")
+            provider.shutdown()
+
+        self.assertIn("Authority One", text)
+        self.assertNotIn("Authority Two", text)
+        self.assertIn("1 more authority item omitted", text)
+        self.assertIn("Cargo output", text)
+        self.assertIn("Full output kept behind /tmp/cargo-output.log", text)
+        self.assertIn("ref=file:///tmp/cargo-output.log", text)
+        self.assertNotIn("Total output lines: 999", text)
+        self.assertIn("context-engineering-collection", text)
+
     def test_provider_exposes_context_tool_schema(self) -> None:
         provider = JcodeGraphMemoryProvider({"socket_path": os.devnull})
         schemas = provider.get_tool_schemas()
