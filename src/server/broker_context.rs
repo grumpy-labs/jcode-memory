@@ -1558,7 +1558,14 @@ fn clio_authority_class(item: &BrokerContextItem, source_path: Option<&str>) -> 
     if matches!(kind, "tool" | "skill") {
         return "procedural_hint".to_string();
     }
-    if matches!(kind, "current_user_input" | "current_correction") {
+    if matches!(
+        kind,
+        "current_user_input"
+            | "current_correction"
+            | "selected_text"
+            | "explicit_file_ref"
+            | "current_file_ref"
+    ) {
         return "current_user_input".to_string();
     }
     if kind == "memory" {
@@ -1604,7 +1611,8 @@ fn clio_authority_class(item: &BrokerContextItem, source_path: Option<&str>) -> 
 
 fn clio_packet_slot(item: &BrokerContextItem, authority_class: &str) -> String {
     match item.kind.as_str() {
-        "current_user_input" | "current_correction" => "active_task".to_string(),
+        "current_user_input" | "current_correction" | "selected_text" | "explicit_file_ref"
+        | "current_file_ref" => "active_task".to_string(),
         "goal" | "todo" => "active_task".to_string(),
         "memory" => "durable_memory".to_string(),
         "session_search_hit" | "conversation_search_hit" => "session_evidence".to_string(),
@@ -4265,6 +4273,65 @@ mod tests {
             packet.active_task[0].workflow_status.as_deref(),
             Some("active")
         );
+        assert!(packet.vault_evidence.is_empty());
+    }
+
+    #[test]
+    fn clio_context_packet_routes_selected_text_and_named_file_to_active_task() {
+        let selected_text = BrokerContextItem {
+            id: "current:selected-text".to_string(),
+            kind: "selected_text".to_string(),
+            scope: "turn".to_string(),
+            content_format: "markdown".to_string(),
+            title: Some("Selected text".to_string()),
+            summary: Some("Selected text from the current user surface.".to_string()),
+            content: Some("Use this selected paragraph as the local current context.".to_string()),
+            tags: Vec::new(),
+            source: Some("selection://current".to_string()),
+            score: Some(1.0),
+            origin: BrokerContextOrigin {
+                tool: Some("current_turn".to_string()),
+                uri: Some("selection://current".to_string()),
+                ..Default::default()
+            },
+            relevance: None,
+            fragments: Vec::new(),
+            metadata: json!({}),
+        };
+        let named_file = BrokerContextItem {
+            id: "current:named-file".to_string(),
+            kind: "explicit_file_ref".to_string(),
+            scope: "turn".to_string(),
+            content_format: "markdown".to_string(),
+            title: Some("Explicitly named file".to_string()),
+            summary: Some("Current user explicitly named CURRENT.md.".to_string()),
+            content: None,
+            tags: Vec::new(),
+            source: Some(
+                "file:///Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md"
+                    .to_string(),
+            ),
+            score: Some(1.0),
+            origin: BrokerContextOrigin {
+                tool: Some("current_turn".to_string()),
+                path: Some(
+                    "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md"
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+            relevance: None,
+            fragments: Vec::new(),
+            metadata: json!({}),
+        };
+
+        let packet = clio_context_packet_from_items(&[selected_text.clone(), named_file.clone()]);
+
+        assert_eq!(packet.active_task.len(), 2);
+        assert!(packet.active_task.iter().all(|item| {
+            item.authority_class.as_deref() == Some("current_user_input")
+                && item.workflow_status.as_deref() == Some("active")
+        }));
         assert!(packet.vault_evidence.is_empty());
     }
 
