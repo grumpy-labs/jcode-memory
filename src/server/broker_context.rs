@@ -990,6 +990,7 @@ fn collect_broker_memory_results_impl(
             &manager,
             MemoryScope::Project,
             "project",
+            query,
             limit,
             &mut seen,
             &mut memories,
@@ -1011,6 +1012,7 @@ fn collect_broker_memory_results_impl(
         &manager,
         MemoryScope::Global,
         "global",
+        query,
         limit,
         &mut seen,
         &mut memories,
@@ -1035,6 +1037,7 @@ fn append_recent_lineage_results(
     manager: &MemoryManager,
     scope: MemoryScope,
     scope_label: &str,
+    query: Option<&str>,
     limit: usize,
     seen: &mut HashSet<String>,
     memories: &mut Vec<BrokerMemoryResult>,
@@ -1048,7 +1051,7 @@ fn append_recent_lineage_results(
         .into_iter()
         .filter(|entry| entry.active && !is_provenance_memory(entry) && is_lineage_memory(entry))
         .collect();
-    sort_entries_by_updated_at(&mut entries);
+    sort_lineage_entries(&mut entries, query);
 
     for entry in entries.into_iter().take(BROKER_LINEAGE_CONTEXT_LIMIT) {
         if memories.len() >= limit {
@@ -1262,6 +1265,58 @@ fn sort_entries_by_updated_at(entries: &mut [MemoryEntry]) {
             .cmp(&a.updated_at)
             .then_with(|| a.id.cmp(&b.id))
     });
+}
+
+fn sort_lineage_entries(entries: &mut [MemoryEntry], query: Option<&str>) {
+    entries.sort_by(|a, b| {
+        lineage_entry_quality_score(b, query)
+            .cmp(&lineage_entry_quality_score(a, query))
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
+
+fn lineage_entry_quality_score(entry: &MemoryEntry, query: Option<&str>) -> i32 {
+    let text = format!(
+        "{} {} {:?}",
+        entry.content.to_ascii_lowercase(),
+        entry
+            .source
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+        entry.tags
+    );
+    let mut score = 0;
+
+    if text.contains("next action") {
+        score += 50;
+    }
+    if text.contains("decision:") {
+        score += 20;
+    }
+    if text.contains("verified") || text.contains("verification") {
+        score += 10;
+    }
+    if text.contains("command") || text.contains("cargo ") || text.contains("/users/") {
+        score += 5;
+    }
+    if text.contains("no artifact-trail lines detected") {
+        score -= 50;
+    }
+
+    if let Some(query) = query {
+        for term in query
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|term| term.len() >= 4)
+        {
+            if text.contains(&term.to_ascii_lowercase()) {
+                score += 1;
+            }
+        }
+    }
+
+    score
 }
 
 fn is_provenance_memory(entry: &MemoryEntry) -> bool {
@@ -3602,6 +3657,69 @@ mod tests {
                         == Some("session_lineage")
             }),
             "lineage packet should contain compact checkpoint item, got {:?}",
+            packet.lineage
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_checkpoint_with_next_action_beats_newer_low_info_smoke() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let project_dir = _env.path().join("Hermes-Honcho-LangGraph-Second-Brain");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let manager = MemoryManager::new().with_project_dir(&project_dir);
+        let extractor = FakeTranscriptExtractor::new(Vec::new());
+
+        broker_transcript_sync_event_for_manager_with_gate(
+            10,
+            "session_good_checkpoint".to_string(),
+            &manager,
+            "Decision: hidden sync gate passed.\nNext action: run non-Vault restraint probe.",
+            "hermes:pre_compress",
+            Some(project_dir.to_string_lossy().as_ref()),
+            false,
+            &extractor,
+        )
+        .await
+        .expect("sync good checkpoint");
+
+        for index in 0..3 {
+            broker_transcript_sync_event_for_manager_with_gate(
+                20 + index,
+                format!("session_smoke_{index}"),
+                &manager,
+                &format!("user: smoke marker {index}\nassistant: acknowledged"),
+                "hermes:session_end",
+                Some(project_dir.to_string_lossy().as_ref()),
+                false,
+                &extractor,
+            )
+            .await
+            .expect("sync smoke checkpoint");
+        }
+
+        let memory_results = collect_broker_memory_results(
+            Some(project_dir.to_string_lossy().as_ref()),
+            Some("lineage checkpoint next action"),
+            8,
+            false,
+        )
+        .expect("collect broker memory results");
+        let items: Vec<BrokerContextItem> = memory_results
+            .iter()
+            .map(|result| memory_broker_item(result, Some(project_dir.to_string_lossy().as_ref())))
+            .collect();
+        let packet = clio_context_packet_from_items(&items);
+
+        assert!(
+            packet.lineage.iter().any(|item| {
+                item.item
+                    .content
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("Next action")
+            }),
+            "lineage packet should keep the actionable checkpoint ahead of low-info smoke, got {:?}",
             packet.lineage
         );
     }
