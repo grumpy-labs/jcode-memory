@@ -204,6 +204,48 @@
       ]
     },
     {
+      "name": "current_vault_beats_old_session_memory",
+      "group": "authority_conflict",
+      "description": "Current Vault authority should outrank old prior-session memory for current-state prompts.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "authority": [
+          {
+            "id": "vault:current-deploy-state",
+            "kind": "vault_chunk",
+            "scope": "project",
+            "title": "CURRENT.md",
+            "summary": "Current production broker deployment is 8a4a45f5 and gates are green.",
+            "source_path": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md",
+            "authority_class": "current_project_authority",
+            "workflow_status": "active",
+            "why_included": "current authority context; class=current_project_authority rank 1"
+          }
+        ],
+        "conflicts": [
+          {
+            "id": "session:old-current-state",
+            "kind": "session_search_hit",
+            "scope": "session",
+            "title": "Prior session current-state handoff",
+            "summary": "Old session says CT1103 has not deployed the current broker.",
+            "source_path": "/Users/rob/Vault/System/Clio/Session-Summaries/2026-05-24-old.md",
+            "authority_class": "stale_session_evidence",
+            "workflow_status": "historical",
+            "conflict_group": "session_lineage",
+            "why_included": "currentness/conflict note; prefer current authority/current correction; mention uncertainty if this conflict affects the answer"
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_field_contains", "slot": "authority", "field": "source_path", "contains": "CURRENT.md"},
+        {"type": "slot_field_equals", "slot": "authority", "field": "workflow_status", "equals": "active"},
+        {"type": "slot_field_equals", "slot": "conflicts", "field": "authority_class", "equals": "stale_session_evidence"},
+        {"type": "slot_field_equals", "slot": "conflicts", "field": "conflict_group", "equals": "session_lineage"},
+        {"type": "slot_forbids_field_contains", "slot": "session_evidence", "field": "summary", "contains": "has not deployed"}
+      ]
+    },
+    {
       "name": "current_correction_over_old_checkpoint",
       "group": "authority_conflict",
       "description": "Current user correction should outrank old checkpoint or session-resume state.",

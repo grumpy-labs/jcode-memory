@@ -1963,6 +1963,9 @@ fn clio_authority_class(item: &BrokerContextItem, source_path: Option<&str>) -> 
     {
         return "generated_session_helper".to_string();
     }
+    if clio_session_item_is_stale_for_current_query(item) {
+        return "stale_session_evidence".to_string();
+    }
     if matches!(kind, "session_search_hit" | "conversation_search_hit") {
         return "session_evidence".to_string();
     }
@@ -2002,7 +2005,10 @@ fn clio_authority_class(item: &BrokerContextItem, source_path: Option<&str>) -> 
 }
 
 fn clio_packet_slot(item: &BrokerContextItem, authority_class: &str) -> String {
-    if authority_class == "generated_session_helper" {
+    if matches!(
+        authority_class,
+        "generated_session_helper" | "stale_session_evidence"
+    ) {
         return "conflicts".to_string();
     }
 
@@ -2043,6 +2049,9 @@ fn clio_workflow_status(
     }
     if authority_class == "generated_session_helper" {
         return Some("helper".to_string());
+    }
+    if authority_class == "stale_session_evidence" {
+        return Some("historical".to_string());
     }
     if let Some(status) = clio_metadata_workflow_status(item) {
         return Some(status);
@@ -2127,6 +2136,62 @@ fn clio_item_query_allows_generated_helper_context(item: &BrokerContextItem) -> 
         .as_ref()
         .and_then(|relevance| relevance.query.as_deref())
         .is_some_and(query_allows_generated_helper_context)
+}
+
+fn clio_session_item_is_stale_for_current_query(item: &BrokerContextItem) -> bool {
+    if !matches!(
+        item.kind.as_str(),
+        "session_search_hit" | "conversation_search_hit"
+    ) {
+        return false;
+    }
+    if clio_item_query_allows_historical_context(item) {
+        return false;
+    }
+    if clio_metadata_workflow_status(item)
+        .as_deref()
+        .is_some_and(clio_status_is_historical)
+    {
+        return true;
+    }
+
+    let source_uri = clio_source_uri(item);
+    let source_path = clio_source_path(item, source_uri.as_deref());
+    let mut haystack = String::new();
+    for value in [
+        item.title.as_deref(),
+        item.summary.as_deref(),
+        item.content.as_deref(),
+        item.source.as_deref(),
+        source_uri.as_deref(),
+        source_path.as_deref(),
+        json_string_field(&item.metadata, "source").as_deref(),
+        json_string_field(&item.metadata, "session_title").as_deref(),
+        json_string_field(&item.metadata, "result_kind").as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        haystack.push('\n');
+        haystack.push_str(&value.to_ascii_lowercase());
+    }
+
+    [
+        "system/clio/session-summaries/",
+        "session summary",
+        "session-summary",
+        "old session",
+        "prior session",
+        "previous session",
+        "stale session",
+        "outdated session",
+        "old checkpoint",
+        "old handoff",
+        "stale handoff",
+        "old current-state",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle))
 }
 
 fn query_allows_historical_context(query: &str) -> bool {
@@ -2233,6 +2298,9 @@ fn clio_conflict_group(item: &BrokerContextItem, source_path: Option<&str>) -> S
     }
     if clio_session_item_is_generated_helper(item) {
         return "generated_helper_session".to_string();
+    }
+    if clio_session_item_is_stale_for_current_query(item) {
+        return "session_lineage".to_string();
     }
     let source_truth_haystack = format!("{path}\n{text_haystack}");
     if source_truth_haystack.contains("source of truth")
@@ -5563,6 +5631,71 @@ mod tests {
             packet.conflicts[0].conflict_group.as_deref(),
             Some("session_lineage")
         );
+    }
+
+    #[test]
+    fn clio_context_packet_demotes_stale_session_evidence_for_current_state_queries() {
+        let old_session_hit = BrokerContextItem {
+            id: "session:old-current-state".to_string(),
+            kind: "session_search_hit".to_string(),
+            scope: "session".to_string(),
+            content_format: "markdown".to_string(),
+            title: Some("Prior session current-state handoff".to_string()),
+            summary: Some("Old session says CT1103 has not deployed the current broker.".to_string()),
+            content: Some(
+                "Previous session summary: old session state says the active broker deploy is pending."
+                    .to_string(),
+            ),
+            tags: Vec::new(),
+            source: Some("session://old-current-state/message/12".to_string()),
+            score: Some(0.88),
+            origin: BrokerContextOrigin {
+                tool: Some("session_search".to_string()),
+                uri: Some("session://old-current-state/message/12".to_string()),
+                path: Some(
+                    "/Users/rob/Vault/System/Clio/Session-Summaries/2026-05-24-old.md"
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+            relevance: Some(BrokerContextRelevance {
+                query: Some("What is the current Clio broker deployment state?".to_string()),
+                retrieval_mode: Some("session_search".to_string()),
+                rank: Some(1),
+                ..Default::default()
+            }),
+            fragments: Vec::new(),
+            metadata: json!({"source": "session_summary", "result_kind": "message"}),
+        };
+
+        let packet = clio_context_packet_from_items(&[old_session_hit.clone()]);
+
+        assert!(
+            packet.session_evidence.is_empty(),
+            "stale prior-session state should not be normal session evidence for current-state prompts"
+        );
+        assert_eq!(packet.conflicts.len(), 1);
+        assert_eq!(packet.conflicts[0].item.id, old_session_hit.id);
+        assert_eq!(
+            packet.conflicts[0].authority_class.as_deref(),
+            Some("stale_session_evidence")
+        );
+        assert_eq!(
+            packet.conflicts[0].conflict_group.as_deref(),
+            Some("session_lineage")
+        );
+
+        let mut history_query = old_session_hit;
+        history_query.relevance = Some(BrokerContextRelevance {
+            query: Some("What did the previous session say about the broker?".to_string()),
+            retrieval_mode: Some("session_search".to_string()),
+            rank: Some(1),
+            ..Default::default()
+        });
+        let packet = clio_context_packet_from_items(&[history_query]);
+
+        assert_eq!(packet.session_evidence.len(), 1);
+        assert!(packet.conflicts.is_empty());
     }
 
     #[test]
