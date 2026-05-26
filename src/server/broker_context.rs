@@ -37,6 +37,8 @@ const BROKER_SKILL_SUMMARY_LIMIT: usize = 8;
 const BROKER_LINEAGE_CONTEXT_LIMIT: usize = 3;
 const BROKER_LINEAGE_TAG: &str = "broker-lineage";
 const BROKER_CHECKPOINT_TAG: &str = "broker-checkpoint";
+const CLIO_PACKET_ITEM_CONTENT_MAX_CHARS: usize = 1_600;
+const CLIO_PACKET_TRUNCATION_MARKER: &str = "[truncated for packet; source span preserved]";
 #[cfg(feature = "duckdb-storage")]
 const BROKER_DUCKDB_PATH_ENV: &str = "JCODE_BROKER_DUCKDB_PATH";
 #[cfg(feature = "duckdb-storage")]
@@ -1452,9 +1454,10 @@ fn clio_context_packet_item(item: &BrokerContextItem) -> ClioContextPacketItem {
     } else {
         None
     };
+    let item = clio_packet_budgeted_item(item);
 
     ClioContextPacketItem {
-        item: item.clone(),
+        item,
         slot: Some(slot),
         source_uri,
         source_path,
@@ -1464,6 +1467,50 @@ fn clio_context_packet_item(item: &BrokerContextItem) -> ClioContextPacketItem {
         workflow_status,
         why_included: Some(why_included),
         conflict_group,
+    }
+}
+
+fn clio_packet_budgeted_item(item: &BrokerContextItem) -> BrokerContextItem {
+    let mut item = item.clone();
+    if let Some(content) = item.content.as_mut() {
+        if let Some(clipped) =
+            clio_packet_truncate_text(content, CLIO_PACKET_ITEM_CONTENT_MAX_CHARS)
+        {
+            *content = clipped;
+            clio_packet_mark_truncated(&mut item.metadata, "packet_content_truncated");
+        }
+    }
+    let mut truncated_fragment = false;
+    for fragment in &mut item.fragments {
+        if let Some(clipped) =
+            clio_packet_truncate_text(&fragment.content, CLIO_PACKET_ITEM_CONTENT_MAX_CHARS)
+        {
+            fragment.content = clipped;
+            truncated_fragment = true;
+        }
+    }
+    if truncated_fragment {
+        clio_packet_mark_truncated(&mut item.metadata, "packet_fragment_content_truncated");
+    }
+    item
+}
+
+fn clio_packet_truncate_text(text: &str, max_chars: usize) -> Option<String> {
+    if text.chars().count() <= max_chars {
+        return None;
+    }
+    let marker_chars = CLIO_PACKET_TRUNCATION_MARKER.chars().count() + 2;
+    let keep_chars = max_chars.saturating_sub(marker_chars);
+    let kept = text.chars().take(keep_chars).collect::<String>();
+    Some(format!("{kept}\n\n{CLIO_PACKET_TRUNCATION_MARKER}"))
+}
+
+fn clio_packet_mark_truncated(metadata: &mut serde_json::Value, key: &str) {
+    if !metadata.is_object() {
+        *metadata = json!({});
+    }
+    if let Some(map) = metadata.as_object_mut() {
+        map.insert(key.to_string(), json!(true));
     }
 }
 
@@ -4388,6 +4435,82 @@ mod tests {
             Some("current_project_authority")
         );
         assert!(packet.conflicts.is_empty());
+    }
+
+    #[test]
+    fn clio_context_packet_caps_authority_content_without_losing_source_span() {
+        let long_authority_content =
+            "Current authority detail with exact source provenance. ".repeat(160);
+        let authority_item = BrokerContextItem {
+            id: "vault_chunk:large-authority".to_string(),
+            kind: "vault_chunk".to_string(),
+            scope: "vault".to_string(),
+            content_format: "markdown".to_string(),
+            title: Some("jcode Super-Session Context Broker Plan".to_string()),
+            summary: Some("Current canonical plan controls active implementation.".to_string()),
+            content: Some(long_authority_content.clone()),
+            tags: Vec::new(),
+            source: Some("vault://Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md#current".to_string()),
+            score: Some(0.99),
+            origin: BrokerContextOrigin {
+                tool: Some("duckdb_broker_store".to_string()),
+                uri: Some("vault://Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md#current".to_string()),
+                path: Some("Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md".to_string()),
+                ..Default::default()
+            },
+            relevance: Some(BrokerContextRelevance {
+                query: Some("current Clio context broker plan".to_string()),
+                retrieval_mode: Some("duckdb_broker_store".to_string()),
+                rank: Some(1),
+                ..Default::default()
+            }),
+            fragments: vec![BrokerContextFragment {
+                relation: "source_span".to_string(),
+                content: long_authority_content,
+                content_format: "markdown".to_string(),
+                role: None,
+                message_index: None,
+                message_id: None,
+                timestamp: None,
+            }],
+            metadata: json!({"start_line": 100, "end_line": 180}),
+        };
+
+        let packet = clio_context_packet_from_items(&[authority_item]);
+
+        assert_eq!(packet.authority.len(), 1);
+        let item = &packet.authority[0];
+        assert_eq!(
+            item.source_path.as_deref(),
+            Some(
+                "Projects/Hermes-Honcho-LangGraph-Second-Brain/Hermes-Plan/jcode-Nervous-System-Broker-Parity-Plan.md"
+            )
+        );
+        assert_eq!(item.line_start, Some(100));
+        assert_eq!(item.line_end, Some(180));
+        assert!(
+            item.item
+                .content
+                .as_deref()
+                .is_some_and(|content| content.chars().count() <= 2_200
+                    && content.contains("truncated for packet")),
+            "packet authority content should be clipped while preserving source span: {:?}",
+            item.item.content
+        );
+        assert!(
+            item.item
+                .fragments
+                .first()
+                .is_some_and(|fragment| fragment.content.chars().count() <= 2_200
+                    && fragment.content.contains("truncated for packet")),
+            "packet authority fragment content should be clipped: {:?}",
+            item.item.fragments
+        );
+        assert_eq!(item.item.metadata["packet_content_truncated"], true);
+        assert_eq!(
+            item.item.metadata["packet_fragment_content_truncated"],
+            true
+        );
     }
 
     #[cfg(feature = "duckdb-storage")]
