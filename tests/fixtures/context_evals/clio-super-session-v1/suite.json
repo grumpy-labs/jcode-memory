@@ -575,6 +575,43 @@
       ]
     },
     {
+      "name": "lineage_segment_record",
+      "group": "lineage",
+      "description": "Logical super-session segments should be represented as explicit durable records distinct from checkpoint summaries.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "lineage": [
+          {
+            "id": "segment:codex-surface-segment",
+            "kind": "lineage_segment",
+            "scope": "logical_super_session",
+            "title": "Lineage segment record",
+            "summary": "Segment codex_surface_segment attached to the Clio super-session.",
+            "content": "Lineage segment record\nLogical super-session: clio-super-session\nSession segment: codex_surface_segment\nSurface: codex\nBranch reason: surface_switch\nParent segment: previous_surface_segment\nLatest checkpoint kind: handoff\nLatest checkpoint memory: mem_checkpoint_123",
+            "metadata": {
+              "logical_super_session_id": "clio-super-session",
+              "session_segment_id": "codex_surface_segment",
+              "parent_segment_id": "previous_surface_segment",
+              "surface": "codex",
+              "branch_reason": "surface_switch",
+              "latest_checkpoint_kind": "handoff",
+              "latest_checkpoint_id": "mem_checkpoint_123"
+            }
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_field_contains", "slot": "lineage", "field": "kind", "contains": "lineage_segment"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.logical_super_session_id", "contains": "clio-super-session"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.session_segment_id", "contains": "codex_surface_segment"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.parent_segment_id", "contains": "previous_surface_segment"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.surface", "contains": "codex"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.branch_reason", "contains": "surface_switch"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.latest_checkpoint_kind", "contains": "handoff"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.latest_checkpoint_id", "contains": "mem_checkpoint_123"}
+      ]
+    },
+    {
       "name": "checkpoint_answers_what_changed",
       "group": "lineage",
       "description": "Checkpoint context should answer what changed with exact paths and commands.",

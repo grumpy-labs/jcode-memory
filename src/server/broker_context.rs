@@ -37,6 +37,7 @@ const BROKER_SKILL_SUMMARY_LIMIT: usize = 8;
 const BROKER_LINEAGE_CONTEXT_LIMIT: usize = 2;
 const BROKER_LINEAGE_TAG: &str = "broker-lineage";
 const BROKER_CHECKPOINT_TAG: &str = "broker-checkpoint";
+const BROKER_LINEAGE_SEGMENT_TAG: &str = "broker-lineage-segment";
 const CLIO_PACKET_ITEM_CONTENT_MAX_CHARS: usize = 1_600;
 const CLIO_PACKET_TRUNCATION_MARKER: &str = "[truncated for packet; source span preserved]";
 #[cfg(feature = "duckdb-storage")]
@@ -56,6 +57,11 @@ trait TranscriptMemoryExtractor {
 struct LineageSegmentTiming {
     started_at: String,
     ended_at: String,
+}
+
+#[derive(Default)]
+struct LineageCheckpointStorageIds {
+    checkpoint_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -544,7 +550,7 @@ where
             "hermes-transcript".to_string(),
         ],
     )?;
-    let lineage_checkpoint_id = store_lineage_checkpoint_memory(
+    let lineage_storage = store_lineage_checkpoint_memory(
         manager,
         &session_id,
         source,
@@ -564,11 +570,11 @@ where
         extractor,
     )
     .await?;
-    if let Some(lineage_checkpoint_id) = lineage_checkpoint_id.as_deref() {
+    if let Some(lineage_checkpoint_id) = lineage_storage.checkpoint_id.as_deref() {
         link_derived_memories(manager, lineage_checkpoint_id, &derived_memory_ids)?;
     }
     let mut memory_ids = vec![provenance_id.clone()];
-    if let Some(lineage_checkpoint_id) = lineage_checkpoint_id {
+    if let Some(lineage_checkpoint_id) = lineage_storage.checkpoint_id {
         memory_ids.push(lineage_checkpoint_id);
     }
     memory_ids.extend(derived_memory_ids.iter().cloned());
@@ -725,9 +731,9 @@ fn store_lineage_checkpoint_memory(
     transcript: &str,
     runtime_summary: Option<&str>,
     provenance_id: &str,
-) -> Result<Option<String>> {
+) -> Result<LineageCheckpointStorageIds> {
     let Some(checkpoint_kind) = checkpoint_kind_from_source(source) else {
-        return Ok(None);
+        return Ok(LineageCheckpointStorageIds::default());
     };
 
     let working_dir = lineage_context.working_dir;
@@ -829,8 +835,106 @@ fn store_lineage_checkpoint_memory(
         .with_tags(tags)
         .with_trust(TrustLevel::Medium);
     let checkpoint_id = manager.remember_project(entry)?;
+    let segment_record_id = store_lineage_segment_record_memory(
+        manager,
+        source,
+        &logical_super_session_id,
+        session_segment_id,
+        surface.as_str(),
+        branch_reason.as_str(),
+        active_project_path.as_deref(),
+        active_plan_path.as_deref(),
+        parent_segment_id,
+        segment_timing,
+        checkpoint_kind,
+        summary_source,
+        &checkpoint_id,
+    )?;
     link_derived_memories(manager, provenance_id, std::slice::from_ref(&checkpoint_id))?;
-    Ok(Some(checkpoint_id))
+    link_related_memories(manager, &segment_record_id, &checkpoint_id, 1.0)?;
+    Ok(LineageCheckpointStorageIds {
+        checkpoint_id: Some(checkpoint_id),
+    })
+}
+
+fn store_lineage_segment_record_memory(
+    manager: &MemoryManager,
+    source: &str,
+    logical_super_session_id: &str,
+    session_segment_id: &str,
+    surface: &str,
+    branch_reason: &str,
+    active_project_path: Option<&str>,
+    active_plan_path: Option<&str>,
+    parent_segment_id: Option<&str>,
+    segment_timing: Option<&LineageSegmentTiming>,
+    checkpoint_kind: &str,
+    summary_source: &str,
+    checkpoint_id: &str,
+) -> Result<String> {
+    let mut content = format!(
+        "Lineage segment record\n\
+         Logical super-session: {logical_super_session_id}\n\
+         Session segment: {session_segment_id}\n\
+         Surface: {surface}\n\
+         Branch reason: {branch_reason}\n"
+    );
+    if let Some(parent_segment_id) = parent_segment_id {
+        content.push_str(&format!("Parent segment: {parent_segment_id}\n"));
+    }
+    if let Some(timing) = segment_timing {
+        content.push_str(&format!("Started at: {}\n", timing.started_at));
+        content.push_str(&format!("Ended at: {}\n", timing.ended_at));
+    }
+    if let Some(path) = active_project_path {
+        content.push_str(&format!("Active project path: {path}\n"));
+    }
+    if let Some(path) = active_plan_path {
+        content.push_str(&format!("Active plan path: {path}\n"));
+    }
+    content.push_str(&format!(
+        "Source: {source}\n\
+         Latest checkpoint kind: {checkpoint_kind}\n\
+         Latest checkpoint summary source: {summary_source}\n\
+         Latest checkpoint memory: {checkpoint_id}"
+    ));
+
+    let mut tags = vec![
+        BROKER_LINEAGE_SEGMENT_TAG.to_string(),
+        format!("logical-super-session:{logical_super_session_id}"),
+        format!("session-segment:{session_segment_id}"),
+        format!("surface:{surface}"),
+        format!("branch-reason:{branch_reason}"),
+        format!("latest-checkpoint-kind:{checkpoint_kind}"),
+        format!("latest-checkpoint:{checkpoint_id}"),
+        format!("summary-source:{summary_source}"),
+    ];
+    if let Some(path) = active_project_path {
+        tags.push(format!("active-project-path:{path}"));
+    }
+    if let Some(path) = active_plan_path {
+        tags.push(format!("active-plan-path:{path}"));
+    }
+    if let Some(parent_segment_id) = parent_segment_id {
+        tags.push(format!("parent-segment:{parent_segment_id}"));
+    }
+    if let Some(timing) = segment_timing {
+        tags.push(format!("started-at:{}", timing.started_at));
+        tags.push(format!("ended-at:{}", timing.ended_at));
+    }
+    tags.sort();
+    tags.dedup();
+
+    let entry = MemoryEntry::new(
+        MemoryCategory::Custom("lineage_segment".to_string()),
+        content,
+    )
+    .with_source(format!(
+        "broker-lineage-segment:{source}:{session_segment_id}"
+    ))
+    .with_tags(tags)
+    .with_trust(TrustLevel::Medium);
+    manager.remember_project(entry)
 }
 
 fn checkpoint_kind_from_source(source: &str) -> Option<&'static str> {
@@ -1193,7 +1297,12 @@ async fn extract_derived_memories(
         .list_all()
         .unwrap_or_default()
         .into_iter()
-        .filter(|entry| entry.active && !is_provenance_memory(entry) && !is_lineage_memory(entry))
+        .filter(|entry| {
+            entry.active
+                && !is_provenance_memory(entry)
+                && !is_lineage_memory(entry)
+                && !is_lineage_segment_memory(entry)
+        })
         .map(|entry| entry.content)
         .collect();
 
@@ -1308,6 +1417,22 @@ fn link_derived_memories(
     if changed {
         manager.save_project_graph(&graph)?;
     }
+    Ok(())
+}
+
+fn link_related_memories(
+    manager: &MemoryManager,
+    from_id: &str,
+    to_id: &str,
+    weight: f32,
+) -> Result<()> {
+    let mut graph = manager.load_project_graph()?;
+    if !(graph.memories.contains_key(from_id) && graph.memories.contains_key(to_id)) {
+        return Ok(());
+    }
+    graph.add_edge(from_id, to_id, EdgeKind::RelatesTo { weight });
+    graph.add_edge(to_id, from_id, EdgeKind::RelatesTo { weight });
+    manager.save_project_graph(&graph)?;
     Ok(())
 }
 
@@ -1836,6 +1961,14 @@ fn is_lineage_memory(entry: &MemoryEntry) -> bool {
         || matches!(&entry.category, MemoryCategory::Custom(category) if category == "checkpoint")
 }
 
+fn is_lineage_segment_memory(entry: &MemoryEntry) -> bool {
+    entry
+        .tags
+        .iter()
+        .any(|tag| tag == BROKER_LINEAGE_SEGMENT_TAG)
+        || matches!(&entry.category, MemoryCategory::Custom(category) if category == "lineage_segment")
+}
+
 fn tag_value(tags: &[String], prefix: &str) -> Option<String> {
     tags.iter()
         .find_map(|tag| tag.strip_prefix(prefix).map(str::to_string))
@@ -2094,7 +2227,10 @@ fn clio_authority_class(item: &BrokerContextItem, source_path: Option<&str>) -> 
     if kind == "side_panel" {
         return "artifact_ref".to_string();
     }
-    if matches!(kind, "checkpoint" | "lineage" | "compression_checkpoint") {
+    if matches!(
+        kind,
+        "checkpoint" | "lineage" | "compression_checkpoint" | "lineage_segment"
+    ) {
         return "lineage_checkpoint".to_string();
     }
 
@@ -2143,7 +2279,9 @@ fn clio_packet_slot(item: &BrokerContextItem, authority_class: &str) -> String {
         "side_panel" => "artifact_refs".to_string(),
         "skill" => "skill_hints".to_string(),
         "tool" => "tool_hints".to_string(),
-        "checkpoint" | "lineage" | "compression_checkpoint" => "lineage".to_string(),
+        "checkpoint" | "lineage" | "compression_checkpoint" | "lineage_segment" => {
+            "lineage".to_string()
+        }
         "conflict" => "conflicts".to_string(),
         _ if matches!(
             authority_class,
@@ -3715,8 +3853,14 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
         .as_ref()
         .and_then(|relevance| relevance.score);
     let is_lineage_checkpoint = memory.tags.iter().any(|tag| tag == BROKER_LINEAGE_TAG);
+    let is_lineage_segment = memory
+        .tags
+        .iter()
+        .any(|tag| tag == BROKER_LINEAGE_SEGMENT_TAG);
     let kind = if is_lineage_checkpoint {
         "compression_checkpoint"
+    } else if is_lineage_segment {
+        "lineage_segment"
     } else {
         "memory"
     };
@@ -3731,7 +3875,7 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
     {
         metadata["retrieval_mode"] = json!(mode);
     }
-    if is_lineage_checkpoint {
+    if is_lineage_checkpoint || is_lineage_segment {
         if let Some(map) = metadata.as_object_mut() {
             map.remove("category");
             map.remove("scope");
@@ -3748,6 +3892,12 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
         metadata["surface"] = json!(tag_value(&memory.tags, "surface:").unwrap_or_default());
         metadata["branch_reason"] =
             json!(tag_value(&memory.tags, "branch-reason:").unwrap_or_default());
+        if let Some(checkpoint_kind) = tag_value(&memory.tags, "latest-checkpoint-kind:") {
+            metadata["latest_checkpoint_kind"] = json!(checkpoint_kind);
+        }
+        if let Some(checkpoint_id) = tag_value(&memory.tags, "latest-checkpoint:") {
+            metadata["latest_checkpoint_id"] = json!(checkpoint_id);
+        }
         if let Some(path) = tag_value(&memory.tags, "active-project-path:") {
             metadata["active_project_path"] = json!(path);
         }
@@ -3764,8 +3914,8 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
             metadata["ended_at"] = json!(timestamp);
         }
     }
-    let packet_tags = memory_packet_tags(&memory.tags, is_lineage_checkpoint);
-    let packet_content = if is_lineage_checkpoint {
+    let packet_tags = memory_packet_tags(&memory.tags, is_lineage_checkpoint || is_lineage_segment);
+    let packet_content = if is_lineage_checkpoint || is_lineage_segment {
         compact_lineage_checkpoint_packet_content(&memory.content)
     } else {
         memory.content.clone()
@@ -4713,6 +4863,123 @@ mod tests {
                 .contains("current plan files override checkpoint content")),
             "lineage packet should make current-plan precedence explicit, got {:?}",
             packet.lineage
+        );
+    }
+
+    #[tokio::test]
+    async fn transcript_sync_stores_explicit_lineage_segment_record() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let project_dir = _env.path().join("Hermes-Honcho-LangGraph-Second-Brain");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let manager = MemoryManager::new().with_project_dir(&project_dir);
+        let extractor = FakeTranscriptExtractor::new(Vec::new());
+        let segment_timing = LineageSegmentTiming {
+            started_at: "2026-05-26T13:00:00Z".to_string(),
+            ended_at: "2026-05-26T13:07:00Z".to_string(),
+        };
+
+        let event = broker_transcript_sync_event_for_manager_with_gate(
+            199,
+            "session_segment_record".to_string(),
+            &manager,
+            "User: continue Clio segment record work.\nAssistant: Next action is durable segment records.",
+            "hermes:handoff",
+            TranscriptLineageContext {
+                working_dir: Some(project_dir.to_string_lossy().as_ref()),
+                surface_session_id: Some("codex_surface_segment"),
+                parent_segment_id: Some("previous_surface_segment"),
+                surface: Some("codex"),
+                branch_reason: Some("surface_switch"),
+                segment_timing: Some(&segment_timing),
+            },
+            Some("Runtime summary: segment record proof should preserve parentage."),
+            false,
+            &extractor,
+        )
+        .await
+        .expect("sync transcript");
+
+        let ServerEvent::BrokerTranscriptSynced { memory_ids, .. } = event else {
+            panic!("expected broker transcript synced event");
+        };
+        let checkpoint_id = memory_ids
+            .iter()
+            .find(|memory_id| {
+                manager
+                    .load_project_graph()
+                    .expect("load graph")
+                    .get_memory(memory_id)
+                    .is_some_and(|memory| {
+                        matches!(
+                            &memory.category,
+                            MemoryCategory::Custom(category) if category == "checkpoint"
+                        )
+                    })
+            })
+            .expect("checkpoint id")
+            .clone();
+
+        let graph = manager.load_project_graph().expect("load graph");
+        let segment = graph
+            .active_memories()
+            .find(|memory| {
+                matches!(
+                    &memory.category,
+                    MemoryCategory::Custom(category) if category == "lineage_segment"
+                )
+            })
+            .expect("lineage segment record");
+
+        assert!(
+            segment
+                .tags
+                .iter()
+                .any(|tag| tag == "broker-lineage-segment")
+        );
+        assert!(
+            segment
+                .tags
+                .iter()
+                .any(|tag| tag == "logical-super-session:clio-super-session")
+        );
+        assert!(
+            segment
+                .tags
+                .iter()
+                .any(|tag| tag == "session-segment:codex_surface_segment")
+        );
+        assert!(
+            segment
+                .tags
+                .iter()
+                .any(|tag| tag == "parent-segment:previous_surface_segment")
+        );
+        assert!(segment.tags.iter().any(|tag| tag == "surface:codex"));
+        assert!(
+            segment
+                .tags
+                .iter()
+                .any(|tag| tag == "branch-reason:surface_switch")
+        );
+        assert!(
+            segment.content.contains("Latest checkpoint kind: handoff"),
+            "segment record should name the latest checkpoint kind, got {}",
+            segment.content
+        );
+        assert!(
+            segment.content.contains("Latest checkpoint memory:"),
+            "segment record should link to the latest checkpoint memory, got {}",
+            segment.content
+        );
+
+        let edges = graph.edges.get(&segment.id).expect("segment edges");
+        assert!(
+            edges.iter().any(|edge| {
+                edge.target == checkpoint_id
+                    && matches!(edge.kind, EdgeKind::RelatesTo { weight } if weight == 1.0)
+            }),
+            "segment record should link to checkpoint {checkpoint_id}, got {edges:?}"
         );
     }
 

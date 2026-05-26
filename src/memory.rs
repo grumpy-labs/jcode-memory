@@ -500,7 +500,10 @@ impl MemoryManager {
         !matches!(
             &entry.category,
             MemoryCategory::Custom(category)
-                if category == "goal" || category == "provenance" || category == "checkpoint"
+                if category == "goal"
+                    || category == "provenance"
+                    || category == "checkpoint"
+                    || category == "lineage_segment"
         )
     }
 
