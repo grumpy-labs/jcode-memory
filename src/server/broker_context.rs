@@ -647,29 +647,46 @@ fn store_lineage_checkpoint_memory(
     let title = checkpoint_title(checkpoint_kind);
     let surface = checkpoint_surface_from_source(source);
     let branch_reason = checkpoint_branch_reason(checkpoint_kind);
+    let active_project_path = active_project_path_for_working_dir(working_dir);
+    let active_plan_path = active_plan_path_for_working_dir(working_dir);
     let summary = compact_transcript_checkpoint(transcript);
-    let content = format!(
+    let mut content = format!(
         "{title}\n\
          Logical super-session: {logical_super_session_id}\n\
          Session segment: {session_id}\n\
          Surface: {surface}\n\
-         Branch reason: {branch_reason}\n\
-         Source: {source}\n\
+         Branch reason: {branch_reason}\n"
+    );
+    if let Some(path) = active_project_path.as_deref() {
+        content.push_str(&format!("Active project path: {path}\n"));
+    }
+    if let Some(path) = active_plan_path.as_deref() {
+        content.push_str(&format!("Active plan path: {path}\n"));
+    }
+    content.push_str(&format!(
+        "Source: {source}\n\
          Provenance memory: {provenance_id}\n\n\
          Checkpoint summary:\n{summary}"
-    );
+    ));
+    let mut tags = vec![
+        BROKER_LINEAGE_TAG.to_string(),
+        BROKER_CHECKPOINT_TAG.to_string(),
+        format!("checkpoint-kind:{checkpoint_kind}"),
+        format!("surface:{surface}"),
+        format!("branch-reason:{branch_reason}"),
+        format!("logical-super-session:{logical_super_session_id}"),
+        format!("session-segment:{session_id}"),
+        format!("derived-from:{provenance_id}"),
+    ];
+    if let Some(path) = active_project_path.as_deref() {
+        tags.push(format!("active-project-path:{path}"));
+    }
+    if let Some(path) = active_plan_path.as_deref() {
+        tags.push(format!("active-plan-path:{path}"));
+    }
     let entry = MemoryEntry::new(MemoryCategory::Custom("checkpoint".to_string()), content)
         .with_source(format!("broker-lineage:{source}:{session_id}"))
-        .with_tags(vec![
-            BROKER_LINEAGE_TAG.to_string(),
-            BROKER_CHECKPOINT_TAG.to_string(),
-            format!("checkpoint-kind:{checkpoint_kind}"),
-            format!("surface:{surface}"),
-            format!("branch-reason:{branch_reason}"),
-            format!("logical-super-session:{logical_super_session_id}"),
-            format!("session-segment:{session_id}"),
-            format!("derived-from:{provenance_id}"),
-        ])
+        .with_tags(tags)
         .with_trust(TrustLevel::Medium);
     let checkpoint_id = manager.remember_project(entry)?;
     link_derived_memories(manager, provenance_id, std::slice::from_ref(&checkpoint_id))?;
@@ -726,6 +743,28 @@ fn logical_super_session_id(working_dir: Option<&str>, session_id: &str) -> Stri
     use std::hash::{Hash, Hasher};
     seed.hash(&mut hasher);
     format!("jcode-super-session-{:016x}", hasher.finish())
+}
+
+fn active_project_path_for_working_dir(working_dir: Option<&str>) -> Option<String> {
+    working_dir
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+        .map(str::to_string)
+}
+
+fn active_plan_path_for_working_dir(working_dir: Option<&str>) -> Option<String> {
+    let project_path = active_project_path_for_working_dir(working_dir)?;
+    if !project_path.contains("Hermes-Honcho-LangGraph-Second-Brain") {
+        return None;
+    }
+
+    Some(
+        Path::new(&project_path)
+            .join("Hermes-Plan")
+            .join("jcode-Nervous-System-Broker-Parity-Plan.md")
+            .to_string_lossy()
+            .to_string(),
+    )
 }
 
 fn compact_transcript_checkpoint(transcript: &str) -> String {
@@ -3123,6 +3162,12 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
         metadata["surface"] = json!(tag_value(&memory.tags, "surface:").unwrap_or_default());
         metadata["branch_reason"] =
             json!(tag_value(&memory.tags, "branch-reason:").unwrap_or_default());
+        if let Some(path) = tag_value(&memory.tags, "active-project-path:") {
+            metadata["active_project_path"] = json!(path);
+        }
+        if let Some(path) = tag_value(&memory.tags, "active-plan-path:") {
+            metadata["active_plan_path"] = json!(path);
+        }
     }
     BrokerContextItem {
         id: memory.id.clone(),
@@ -3793,6 +3838,12 @@ mod tests {
             .map(|result| memory_broker_item(result, Some(project_dir.to_string_lossy().as_ref())))
             .collect();
         let packet = clio_context_packet_from_items(&items);
+        let expected_project_path = project_dir.to_string_lossy().to_string();
+        let expected_plan_path = project_dir
+            .join("Hermes-Plan")
+            .join("jcode-Nervous-System-Broker-Parity-Plan.md")
+            .to_string_lossy()
+            .to_string();
 
         assert!(
             packet.lineage.iter().any(|item| {
@@ -3827,8 +3878,20 @@ mod tests {
                         .get("branch_reason")
                         .and_then(|value| value.as_str())
                         == Some("compression")
+                    && item
+                        .item
+                        .metadata
+                        .get("active_project_path")
+                        .and_then(|value| value.as_str())
+                        == Some(expected_project_path.as_str())
+                    && item
+                        .item
+                        .metadata
+                        .get("active_plan_path")
+                        .and_then(|value| value.as_str())
+                        == Some(expected_plan_path.as_str())
             }),
-            "lineage packet should contain compact checkpoint item with surface/branch metadata, got {:?}",
+            "lineage packet should contain compact checkpoint item with surface/branch/project metadata, got {:?}",
             packet.lineage
         );
         assert!(
