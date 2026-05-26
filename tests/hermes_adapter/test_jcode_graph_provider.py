@@ -232,6 +232,9 @@ class BrokerSocketClientTests(unittest.TestCase):
                 session_id="hermes_session",
                 transcript="user: remember transcript extraction",
                 source="hermes:session_end",
+                surface_session_id="hermes_surface_session",
+                parent_segment_id="hermes_parent_session",
+                surface="hermes",
             )
             client.close()
 
@@ -241,6 +244,13 @@ class BrokerSocketClientTests(unittest.TestCase):
         ]
         self.assertEqual(len(transcript_requests), 1)
         self.assertEqual(transcript_requests[0]["session_id"], "hermes_session")
+        self.assertEqual(
+            transcript_requests[0]["surface_session_id"], "hermes_surface_session"
+        )
+        self.assertEqual(
+            transcript_requests[0]["parent_segment_id"], "hermes_parent_session"
+        )
+        self.assertEqual(transcript_requests[0]["surface"], "hermes")
         self.assertEqual(
             transcript_requests[0]["transcript"],
             "user: remember transcript extraction",
@@ -726,6 +736,22 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
                     "why_included": "surface currentness conflict",
                 }
             ],
+            "lineage": [
+                {
+                    "id": "checkpoint_1",
+                    "kind": "compression_checkpoint",
+                    "scope": "project",
+                    "title": "Hermes compression checkpoint",
+                    "summary": "Next action: continue parent lineage work.",
+                    "slot": "lineage",
+                    "why_included": "lineage; current plan files override checkpoint content",
+                    "metadata": {
+                        "surface": "hermes",
+                        "session_segment_id": "hermes_session_b",
+                        "parent_segment_id": "hermes_session_a",
+                    },
+                }
+            ],
             "skill_hints": [
                 {
                     "id": "skill_context",
@@ -772,9 +798,13 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         self.assertIn("### Active Task", text)
         self.assertIn("### Authority", text)
         self.assertIn("### Conflicts", text)
+        self.assertIn("### Lineage", text)
         self.assertIn("### Skill Hints", text)
         self.assertLess(text.index("### Active Task"), text.index("### Authority"))
         self.assertLess(text.index("### Authority"), text.index("### Conflicts"))
+        self.assertIn("surface=hermes", text)
+        self.assertIn("segment=hermes_session_b", text)
+        self.assertIn("parent=hermes_session_a", text)
         self.assertIn("authority=current_project_authority", text)
         self.assertIn("why=current canonical plan beats historical fork", text)
         self.assertIn(
@@ -785,7 +815,7 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         self.assertIn("lines=1660-1712", text)
         self.assertEqual(text.count("lines=1660-1712"), 1)
         self.assertNotIn("Fallback Memory", text)
-        self.assertEqual(diagnostics["last_prefetch_item_count"], 4)
+        self.assertEqual(diagnostics["last_prefetch_item_count"], 5)
 
     def test_provider_ignores_unknown_context_packet_version(self) -> None:
         packet = {
@@ -1007,6 +1037,35 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
             transcript_requests[0]["transcript"],
         )
         self.assertEqual(transcript_requests[0]["source"], "hermes:pre_compress")
+        self.assertEqual(transcript_requests[0]["surface_session_id"], "hermes_session")
+        self.assertEqual(transcript_requests[0]["surface"], "hermes")
+        self.assertNotIn("parent_segment_id", transcript_requests[0])
+
+    def test_provider_session_switch_sends_parent_lineage_on_transcript_sync(self) -> None:
+        with FakeBrokerServer() as server:
+            provider = JcodeGraphMemoryProvider(
+                {
+                    "socket_path": server.socket_path,
+                    "working_dir": "/tmp/project",
+                }
+            )
+            provider.initialize("hermes_session_a")
+            provider.on_session_switch(
+                "hermes_session_b",
+                parent_session_id="hermes_session_a",
+                reason="resume",
+            )
+            provider.on_pre_compress([{"role": "user", "content": "Resumed work."}])
+            provider.shutdown()
+
+        transcript_requests = [
+            request for request in server.requests if request["type"] == "broker_transcript_sync"
+        ]
+        self.assertEqual(len(transcript_requests), 1)
+        self.assertEqual(transcript_requests[0]["session_id"], "hermes_session_b")
+        self.assertEqual(transcript_requests[0]["surface_session_id"], "hermes_session_b")
+        self.assertEqual(transcript_requests[0]["parent_segment_id"], "hermes_session_a")
+        self.assertEqual(transcript_requests[0]["surface"], "hermes")
 
     def test_provider_session_end_syncs_transcript(self) -> None:
         with FakeBrokerServer() as server:

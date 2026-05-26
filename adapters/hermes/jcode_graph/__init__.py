@@ -291,18 +291,26 @@ class BrokerSocketClient:
         session_id: str,
         transcript: str,
         source: str = "hermes:session_end",
+        surface_session_id: str = "",
+        parent_segment_id: str = "",
+        surface: str = "",
     ) -> Dict[str, Any]:
         with self._lock:
             self.connect()
-            request_id = self._send(
-                {
-                    "type": "broker_transcript_sync",
-                    "id": self._next_request_id(),
-                    "session_id": self._broker_session_id or session_id or None,
-                    "transcript": transcript,
-                    "source": source,
-                }
-            )
+            request = {
+                "type": "broker_transcript_sync",
+                "id": self._next_request_id(),
+                "session_id": self._broker_session_id or session_id or None,
+                "transcript": transcript,
+                "source": source,
+            }
+            if surface_session_id:
+                request["surface_session_id"] = surface_session_id
+            if parent_segment_id:
+                request["parent_segment_id"] = parent_segment_id
+            if surface:
+                request["surface"] = surface
+            request_id = self._send(request)
             return self._read_response(request_id, "broker_transcript_synced")
 
     def _subscribe(self) -> None:
@@ -360,6 +368,8 @@ class JcodeGraphMemoryProvider(MemoryProvider):
         self._config = config or _load_plugin_config()
         self._client: Optional[BrokerSocketClient] = None
         self._session_id = ""
+        self._parent_session_id = ""
+        self._surface = str(self._config.get("surface") or "hermes").strip() or "hermes"
         self._working_dir = self._config.get("working_dir") or os.getcwd()
         self._context_limit = int(self._config.get("context_limit", DEFAULT_CONTEXT_LIMIT))
         self._max_chars = int(self._config.get("max_chars", DEFAULT_MAX_CHARS))
@@ -521,6 +531,26 @@ class JcodeGraphMemoryProvider(MemoryProvider):
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         self._sync_transcript(messages, source="hermes:session_end")
+
+    def on_session_switch(
+        self,
+        new_session_id: str,
+        *,
+        parent_session_id: str = "",
+        reset: bool = False,
+        reason: str = "",
+    ) -> None:
+        del reason
+        next_session_id = str(new_session_id or "").strip()
+        if not next_session_id:
+            return None
+        parent = str(parent_session_id or "").strip()
+        if parent:
+            self._parent_session_id = parent
+        elif reset:
+            self._parent_session_id = ""
+        self._ensure_session(next_session_id)
+        return None
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [JCODE_BROKER_CONTEXT_SCHEMA]
@@ -776,6 +806,9 @@ class JcodeGraphMemoryProvider(MemoryProvider):
                 session_id=sync_session_id,
                 transcript=transcript,
                 source=source,
+                surface_session_id=self._session_id,
+                parent_segment_id=self._parent_session_id,
+                surface=self._surface,
             )
             self._diagnostics["transcript_sync_count"] += 1
             self._diagnostics["last_transcript_chars"] = len(transcript)
@@ -1078,6 +1111,15 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             details.append(f"status={item['workflow_status']}")
         if item.get("slot"):
             details.append(f"slot={item['slot']}")
+        if isinstance(metadata, dict) and (
+            item.get("slot") == "lineage" or kind == "compression_checkpoint"
+        ):
+            if metadata.get("surface"):
+                details.append(f"surface={metadata['surface']}")
+            if metadata.get("session_segment_id"):
+                details.append(f"segment={metadata['session_segment_id']}")
+            if metadata.get("parent_segment_id"):
+                details.append(f"parent={metadata['parent_segment_id']}")
         if origin.get("session_id"):
             details.append(f"session={origin['session_id']}")
         if origin.get("source") and origin.get("source") != source:

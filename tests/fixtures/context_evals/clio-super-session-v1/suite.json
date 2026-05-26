@@ -423,13 +423,13 @@
             "scope": "logical_super_session",
             "title": "Resume lineage",
             "summary": "Search logical lineage before broad historical session search.",
-            "metadata": {"logical_super_session_id": "clio-super-session", "resume_of": "019e5a7c-19fc-7cf3-a50b-5530c64b0697"}
+            "metadata": {"logical_super_session_id": "clio-super-session", "parent_segment_id": "019e5a7c-19fc-7cf3-a50b-5530c64b0697"}
           }
         ]
       },
       "assertions": [
         {"type": "slot_field_contains", "slot": "active_task", "field": "metadata.logical_super_session_id", "contains": "clio-super-session"},
-        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.resume_of", "contains": "019e5a7c"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.parent_segment_id", "contains": "019e5a7c"},
         {"type": "slot_field_contains", "slot": "lineage", "field": "summary", "contains": "Search logical lineage"}
       ]
     },

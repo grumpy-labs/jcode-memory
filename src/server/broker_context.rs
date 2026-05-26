@@ -58,6 +58,15 @@ struct LineageSegmentTiming {
     ended_at: String,
 }
 
+#[derive(Clone, Copy, Default)]
+struct TranscriptLineageContext<'a> {
+    working_dir: Option<&'a str>,
+    surface_session_id: Option<&'a str>,
+    parent_segment_id: Option<&'a str>,
+    surface: Option<&'a str>,
+    segment_timing: Option<&'a LineageSegmentTiming>,
+}
+
 impl LineageSegmentTiming {
     fn from_session(session: &crate::session::Session) -> Self {
         Self {
@@ -124,6 +133,9 @@ pub(super) async fn handle_broker_transcript_sync(
     requested_session_id: Option<String>,
     transcript: String,
     source: Option<String>,
+    surface_session_id: Option<String>,
+    parent_segment_id: Option<String>,
+    surface: Option<String>,
     fallback_session_id: Option<&str>,
     sessions: &SessionAgents,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
@@ -133,6 +145,9 @@ pub(super) async fn handle_broker_transcript_sync(
         requested_session_id,
         &transcript,
         source.as_deref(),
+        surface_session_id.as_deref(),
+        parent_segment_id.as_deref(),
+        surface.as_deref(),
         fallback_session_id,
         sessions,
     )
@@ -392,6 +407,9 @@ async fn broker_transcript_sync_event(
     requested_session_id: Option<String>,
     transcript: &str,
     source: Option<&str>,
+    surface_session_id: Option<&str>,
+    requested_parent_segment_id: Option<&str>,
+    surface: Option<&str>,
     fallback_session_id: Option<&str>,
     sessions: &SessionAgents,
 ) -> Result<ServerEvent> {
@@ -411,11 +429,12 @@ async fn broker_transcript_sync_event(
             .with_context(|| format!("session not found: {session_id}"))?
     };
 
-    let (working_dir, segment_timing) = {
+    let (working_dir, snapshot_parent_segment_id, segment_timing) = {
         let agent_guard = agent.lock().await;
         let session = agent_guard.session_snapshot();
         (
             agent_guard.working_dir().map(str::to_string),
+            session.parent_id.clone(),
             Some(LineageSegmentTiming::from_session(&session)),
         )
     };
@@ -423,14 +442,32 @@ async fn broker_transcript_sync_event(
     let manager = manager_for_working_dir(working_dir.as_deref());
     let source = normalized_source(source, "hermes:transcript");
     let extractor = SidecarTranscriptMemoryExtractor;
+    let surface_session_id = surface_session_id
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty());
+    let surface = surface.map(str::trim).filter(|surface| !surface.is_empty());
+    let requested_parent_segment_id = requested_parent_segment_id
+        .map(str::trim)
+        .filter(|parent| !parent.is_empty());
+    let snapshot_parent_segment_id = snapshot_parent_segment_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|parent| !parent.is_empty());
+    let parent_segment_id = requested_parent_segment_id.or(snapshot_parent_segment_id);
+    let lineage_context = TranscriptLineageContext {
+        working_dir: working_dir.as_deref(),
+        surface_session_id,
+        parent_segment_id,
+        surface,
+        segment_timing: segment_timing.as_ref(),
+    };
     broker_transcript_sync_event_for_manager_with_gate(
         id,
         session_id,
         &manager,
         transcript,
         source,
-        working_dir.as_deref(),
-        segment_timing.as_ref(),
+        lineage_context,
         crate::memory::memory_sidecar_enabled(),
         &extractor,
     )
@@ -450,7 +487,14 @@ where
     E: TranscriptMemoryExtractor + ?Sized,
 {
     broker_transcript_sync_event_for_manager_with_gate(
-        id, session_id, manager, transcript, source, None, None, true, extractor,
+        id,
+        session_id,
+        manager,
+        transcript,
+        source,
+        TranscriptLineageContext::default(),
+        true,
+        extractor,
     )
     .await
 }
@@ -461,8 +505,7 @@ async fn broker_transcript_sync_event_for_manager_with_gate<E>(
     manager: &MemoryManager,
     transcript: &str,
     source: &str,
-    working_dir: Option<&str>,
-    segment_timing: Option<&LineageSegmentTiming>,
+    lineage_context: TranscriptLineageContext<'_>,
     extraction_enabled: bool,
     extractor: &E,
 ) -> Result<ServerEvent>
@@ -491,8 +534,7 @@ where
         manager,
         &session_id,
         source,
-        working_dir,
-        segment_timing,
+        lineage_context,
         transcript,
         &provenance_id,
     )?;
@@ -661,8 +703,7 @@ fn store_lineage_checkpoint_memory(
     manager: &MemoryManager,
     session_id: &str,
     source: &str,
-    working_dir: Option<&str>,
-    segment_timing: Option<&LineageSegmentTiming>,
+    lineage_context: TranscriptLineageContext<'_>,
     transcript: &str,
     provenance_id: &str,
 ) -> Result<Option<String>> {
@@ -670,9 +711,25 @@ fn store_lineage_checkpoint_memory(
         return Ok(None);
     };
 
-    let logical_super_session_id = logical_super_session_id(working_dir, session_id);
+    let working_dir = lineage_context.working_dir;
+    let session_segment_id = lineage_context
+        .surface_session_id
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or(session_id);
+    let surface = lineage_context
+        .surface
+        .map(str::trim)
+        .filter(|surface| !surface.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| checkpoint_surface_from_source(source));
+    let parent_segment_id = lineage_context
+        .parent_segment_id
+        .map(str::trim)
+        .filter(|parent| !parent.is_empty());
+    let segment_timing = lineage_context.segment_timing;
+    let logical_super_session_id = logical_super_session_id(working_dir, session_segment_id);
     let title = checkpoint_title(checkpoint_kind);
-    let surface = checkpoint_surface_from_source(source);
     let branch_reason = checkpoint_branch_reason(checkpoint_kind);
     let active_project_path = active_project_path_for_working_dir(working_dir);
     let active_plan_path = active_plan_path_for_working_dir(working_dir);
@@ -680,7 +737,7 @@ fn store_lineage_checkpoint_memory(
     let mut content = format!(
         "{title}\n\
          Logical super-session: {logical_super_session_id}\n\
-         Session segment: {session_id}\n\
+         Session segment: {session_segment_id}\n\
          Surface: {surface}\n\
          Branch reason: {branch_reason}\n"
     );
@@ -689,6 +746,9 @@ fn store_lineage_checkpoint_memory(
     }
     if let Some(path) = active_plan_path.as_deref() {
         content.push_str(&format!("Active plan path: {path}\n"));
+    }
+    if let Some(parent_segment_id) = parent_segment_id {
+        content.push_str(&format!("Parent segment: {parent_segment_id}\n"));
     }
     if let Some(timing) = segment_timing {
         content.push_str(&format!("Started at: {}\n", timing.started_at));
@@ -706,7 +766,7 @@ fn store_lineage_checkpoint_memory(
         format!("surface:{surface}"),
         format!("branch-reason:{branch_reason}"),
         format!("logical-super-session:{logical_super_session_id}"),
-        format!("session-segment:{session_id}"),
+        format!("session-segment:{session_segment_id}"),
         format!("derived-from:{provenance_id}"),
     ];
     if let Some(path) = active_project_path.as_deref() {
@@ -715,12 +775,15 @@ fn store_lineage_checkpoint_memory(
     if let Some(path) = active_plan_path.as_deref() {
         tags.push(format!("active-plan-path:{path}"));
     }
+    if let Some(parent_segment_id) = parent_segment_id {
+        tags.push(format!("parent-segment:{parent_segment_id}"));
+    }
     if let Some(timing) = segment_timing {
         tags.push(format!("started-at:{}", timing.started_at));
         tags.push(format!("ended-at:{}", timing.ended_at));
     }
     let entry = MemoryEntry::new(MemoryCategory::Custom("checkpoint".to_string()), content)
-        .with_source(format!("broker-lineage:{source}:{session_id}"))
+        .with_source(format!("broker-lineage:{source}:{session_segment_id}"))
         .with_tags(tags)
         .with_trust(TrustLevel::Medium);
     let checkpoint_id = manager.remember_project(entry)?;
@@ -3200,6 +3263,9 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
         if let Some(path) = tag_value(&memory.tags, "active-plan-path:") {
             metadata["active_plan_path"] = json!(path);
         }
+        if let Some(parent_segment_id) = tag_value(&memory.tags, "parent-segment:") {
+            metadata["parent_segment_id"] = json!(parent_segment_id);
+        }
         if let Some(timestamp) = tag_value(&memory.tags, "started-at:") {
             metadata["started_at"] = json!(timestamp);
         }
@@ -3245,6 +3311,7 @@ fn memory_packet_tags(tags: &[String], is_lineage_checkpoint: bool) -> Vec<Strin
         .filter(|tag| {
             !tag.starts_with("active-project-path:")
                 && !tag.starts_with("active-plan-path:")
+                && !tag.starts_with("parent-segment:")
                 && !tag.starts_with("started-at:")
                 && !tag.starts_with("ended-at:")
         })
@@ -3258,6 +3325,7 @@ fn compact_lineage_checkpoint_packet_content(content: &str) -> String {
         .filter(|line| {
             !line.starts_with("Active project path:")
                 && !line.starts_with("Active plan path:")
+                && !line.starts_with("Parent segment:")
                 && !line.starts_with("Started at:")
                 && !line.starts_with("Ended at:")
         })
@@ -3880,6 +3948,8 @@ mod tests {
             started_at: "2026-05-26T12:00:00Z".to_string(),
             ended_at: "2026-05-26T12:05:00Z".to_string(),
         };
+        let parent_segment_id = "session_parent";
+        let surface_session_id = "hermes_surface_session";
 
         let event = broker_transcript_sync_event_for_manager_with_gate(
             99,
@@ -3887,8 +3957,13 @@ mod tests {
             &manager,
             "User: We deployed 7036e23.\nAssistant: Next action is lineage checkpoints.",
             "hermes:pre_compress",
-            Some(project_dir.to_string_lossy().as_ref()),
-            Some(&segment_timing),
+            TranscriptLineageContext {
+                working_dir: Some(project_dir.to_string_lossy().as_ref()),
+                surface_session_id: Some(surface_session_id),
+                parent_segment_id: Some(parent_segment_id),
+                surface: Some("hermes"),
+                segment_timing: Some(&segment_timing),
+            },
             false,
             &extractor,
         )
@@ -3943,7 +4018,13 @@ mod tests {
                         .metadata
                         .get("session_segment_id")
                         .and_then(|value| value.as_str())
-                        == Some("session_lineage")
+                        == Some(surface_session_id)
+                    && item
+                        .item
+                        .metadata
+                        .get("parent_segment_id")
+                        .and_then(|value| value.as_str())
+                        == Some(parent_segment_id)
                     && item
                         .item
                         .metadata
@@ -3995,6 +4076,7 @@ mod tests {
                     && !tag.starts_with("active-plan-path:")
                     && !tag.starts_with("started-at:")
                     && !tag.starts_with("ended-at:")
+                    && !tag.starts_with("parent-segment:")
             }),
             "bulky lineage metadata should stay out of packet tags, got {:?}",
             lineage_item.item.tags
@@ -4005,6 +4087,10 @@ mod tests {
                 && !content.contains("Active plan path:")
                 && !content.contains("Started at:")
                 && !content.contains("Ended at:"),
+            "bulky lineage metadata should stay in metadata, not packet content: {content}"
+        );
+        assert!(
+            !content.contains("Parent segment:"),
             "bulky lineage metadata should stay in metadata, not packet content: {content}"
         );
         assert!(
@@ -4033,8 +4119,10 @@ mod tests {
             &manager,
             "Decision: hidden sync gate passed.\nNext action: run non-Vault restraint probe.",
             "hermes:pre_compress",
-            Some(project_dir.to_string_lossy().as_ref()),
-            None,
+            TranscriptLineageContext {
+                working_dir: Some(project_dir.to_string_lossy().as_ref()),
+                ..Default::default()
+            },
             false,
             &extractor,
         )
@@ -4048,8 +4136,10 @@ mod tests {
                 &manager,
                 &format!("user: smoke marker {index}\nassistant: acknowledged"),
                 "hermes:session_end",
-                Some(project_dir.to_string_lossy().as_ref()),
-                None,
+                TranscriptLineageContext {
+                    working_dir: Some(project_dir.to_string_lossy().as_ref()),
+                    ..Default::default()
+                },
                 false,
                 &extractor,
             )
@@ -4098,8 +4188,10 @@ mod tests {
             &manager,
             "User: Active Clio lineage.\nAssistant: Next action is active checkpoint work.",
             "hermes:pre_compress",
-            Some(project_dir.to_string_lossy().as_ref()),
-            None,
+            TranscriptLineageContext {
+                working_dir: Some(project_dir.to_string_lossy().as_ref()),
+                ..Default::default()
+            },
             false,
             &extractor,
         )

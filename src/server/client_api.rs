@@ -298,6 +298,9 @@ impl Client {
             session_id,
             transcript,
             source,
+            surface_session_id: None,
+            parent_segment_id: None,
+            surface: None,
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;

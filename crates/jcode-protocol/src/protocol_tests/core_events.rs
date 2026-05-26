@@ -147,6 +147,9 @@ fn test_broker_transcript_sync_roundtrip_has_extraction_status() -> Result<()> {
         session_id: Some("ses_broker_123".to_string()),
         transcript: "user: remember that the broker extracts durable facts".to_string(),
         source: Some("hermes:pre_compress".to_string()),
+        surface_session_id: Some("hermes_surface_456".to_string()),
+        parent_segment_id: Some("hermes_parent_123".to_string()),
+        surface: Some("hermes".to_string()),
     };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"broker_transcript_sync\""));
@@ -155,6 +158,9 @@ fn test_broker_transcript_sync_roundtrip_has_extraction_status() -> Result<()> {
         session_id,
         transcript,
         source,
+        surface_session_id,
+        parent_segment_id,
+        surface,
         ..
     } = decoded
     else {
@@ -163,6 +169,9 @@ fn test_broker_transcript_sync_roundtrip_has_extraction_status() -> Result<()> {
     assert_eq!(session_id.as_deref(), Some("ses_broker_123"));
     assert!(transcript.contains("durable facts"));
     assert_eq!(source.as_deref(), Some("hermes:pre_compress"));
+    assert_eq!(surface_session_id.as_deref(), Some("hermes_surface_456"));
+    assert_eq!(parent_segment_id.as_deref(), Some("hermes_parent_123"));
+    assert_eq!(surface.as_deref(), Some("hermes"));
 
     let event = ServerEvent::BrokerTranscriptSynced {
         id: 15,
