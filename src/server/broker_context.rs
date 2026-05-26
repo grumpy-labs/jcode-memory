@@ -1480,17 +1480,9 @@ fn clio_packet_budgeted_item(item: &BrokerContextItem) -> BrokerContextItem {
             clio_packet_mark_truncated(&mut item.metadata, "packet_content_truncated");
         }
     }
-    let mut truncated_fragment = false;
-    for fragment in &mut item.fragments {
-        if let Some(clipped) =
-            clio_packet_truncate_text(&fragment.content, CLIO_PACKET_ITEM_CONTENT_MAX_CHARS)
-        {
-            fragment.content = clipped;
-            truncated_fragment = true;
-        }
-    }
-    if truncated_fragment {
-        clio_packet_mark_truncated(&mut item.metadata, "packet_fragment_content_truncated");
+    if !item.fragments.is_empty() {
+        item.fragments.clear();
+        clio_packet_mark_truncated(&mut item.metadata, "packet_fragments_omitted");
     }
     item
 }
@@ -4498,19 +4490,12 @@ mod tests {
             item.item.content
         );
         assert!(
-            item.item
-                .fragments
-                .first()
-                .is_some_and(|fragment| fragment.content.chars().count() <= 2_200
-                    && fragment.content.contains("truncated for packet")),
-            "packet authority fragment content should be clipped: {:?}",
+            item.item.fragments.is_empty(),
+            "packet authority should omit duplicate fragments and rely on top-level span fields: {:?}",
             item.item.fragments
         );
         assert_eq!(item.item.metadata["packet_content_truncated"], true);
-        assert_eq!(
-            item.item.metadata["packet_fragment_content_truncated"],
-            true
-        );
+        assert_eq!(item.item.metadata["packet_fragments_omitted"], true);
     }
 
     #[cfg(feature = "duckdb-storage")]
