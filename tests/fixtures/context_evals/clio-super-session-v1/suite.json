@@ -575,6 +575,66 @@
       ]
     },
     {
+      "name": "checkpoint_answers_what_changed",
+      "group": "lineage",
+      "description": "Checkpoint context should answer what changed with exact paths and commands.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "lineage": [
+          {
+            "id": "lineage:what-changed",
+            "kind": "compression_checkpoint",
+            "scope": "logical_super_session",
+            "title": "Hermes checkpoint: what changed",
+            "summary": "Checkpoint answers what changed for the Clio broker slice.",
+            "content": "Structured session-end handoff:\nCurrent state:\n- red test written, implementation pending\nDecisions:\n- keep checkpoint structure source-backed\nFiles:\n- /Users/rob/Code/grumpy-labs/jcode-memory/src/server/broker_context.rs\nCommands and verification:\n- cargo test -q --features duckdb-storage-bundled broker_context",
+            "metadata": {
+              "logical_super_session_id": "clio-super-session",
+              "checkpoint_kind": "session_end",
+              "branch_reason": "handoff"
+            }
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Current state:"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "red test written, implementation pending"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "/Users/rob/Code/grumpy-labs/jcode-memory/src/server/broker_context.rs"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "cargo test -q --features duckdb-storage-bundled broker_context"}
+      ]
+    },
+    {
+      "name": "checkpoint_answers_what_should_happen_next",
+      "group": "lineage",
+      "description": "Checkpoint context should answer what should happen next with remaining work and next action.",
+      "packet": {
+        "version": "clio_context_packet_v1",
+        "lineage": [
+          {
+            "id": "lineage:what-next",
+            "kind": "compression_checkpoint",
+            "scope": "logical_super_session",
+            "title": "Hermes checkpoint: next action",
+            "summary": "Checkpoint answers what should happen next for the Clio broker slice.",
+            "content": "Structured session-end handoff:\nRemaining work:\n- deploy to CT1103\nNext action:\n- run fixture/live/installed gates\nSource refs:\n- Provenance memory: mem_next_action",
+            "metadata": {
+              "logical_super_session_id": "clio-super-session",
+              "checkpoint_kind": "session_end",
+              "branch_reason": "handoff"
+            }
+          }
+        ]
+      },
+      "assertions": [
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Remaining work:"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "deploy to CT1103"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Next action:"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "run fixture/live/installed gates"},
+        {"type": "slot_field_equals", "slot": "lineage", "field": "metadata.checkpoint_kind", "equals": "session_end"},
+        {"type": "slot_field_equals", "slot": "lineage", "field": "metadata.branch_reason", "equals": "handoff"}
+      ]
+    },
+    {
       "name": "provider_gate",
       "group": "provider_gate",
       "description": "The incumbent provider must satisfy authority, conflict, provenance, routing, budget, and lineage gates.",
@@ -863,6 +923,46 @@
       ]
     },
     {
+      "name": "installed_provider_ambiguous_vault_question",
+      "group": "authority_conflict",
+      "source": "installed_provider",
+      "description": "Installed Hermes provider should use broker context for ambiguous Vault/current-state questions while labeling uncertainty.",
+      "query": "What does my Vault say about the context provider?",
+      "tool_query": "context provider",
+      "limit": 8,
+      "max_duration_ms": 10000,
+      "session_id": "clio_installed_provider_ambiguous_vault_eval",
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "assertions": [
+        {"type": "json_field_equals", "field": "prefetch_has_context", "equals": true},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "For broad or ambiguous Vault/current-state questions"},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "jcode"},
+        {"type": "json_field_equals", "field": "default_prefetch_has_raw_provenance", "equals": false},
+        {"type": "json_field_equals", "field": "tool_event_type", "equals": "broker_context"}
+      ]
+    },
+    {
+      "name": "installed_provider_legacy_provider_restraint",
+      "group": "authority_conflict",
+      "source": "installed_provider",
+      "description": "Installed Hermes provider should not load stale Honcho/OpenClaw provider context for a current-provider question unless explicitly asked.",
+      "query": "Which provider is currently the active Clio memory/context path?",
+      "tool_query": "current Clio active memory context provider jcode_graph DuckDB",
+      "limit": 8,
+      "max_duration_ms": 10000,
+      "session_id": "clio_installed_provider_legacy_provider_restraint_eval",
+      "working_dir": "/Users/rob/Vault/Projects/Hermes-Honcho-LangGraph-Second-Brain",
+      "assertions": [
+        {"type": "json_field_equals", "field": "prefetch_has_context", "equals": true},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "jcode_graph"},
+        {"type": "json_field_forbids_contains", "field": "prefetch", "contains": "OpenClaw-Stack/Honcho-Provider-Plan.md"},
+        {"type": "json_field_forbids_contains", "field": "prefetch", "contains": "Honcho provider is the main context path"},
+        {"type": "json_field_forbids_contains", "field": "tool_items", "contains": "OpenClaw-Stack/Honcho-Provider-Plan.md"},
+        {"type": "json_field_equals", "field": "default_prefetch_has_raw_provenance", "equals": false},
+        {"type": "json_field_equals", "field": "tool_event_type", "equals": "broker_context"}
+      ]
+    },
+    {
       "name": "installed_provider_hidden_sync_nonblocking",
       "group": "provider_gate",
       "source": "installed_provider",
@@ -903,6 +1003,9 @@
         {"type": "json_field_contains", "field": "prefetch", "contains": "Active task:"},
         {"type": "json_field_contains", "field": "prefetch", "contains": "amber-cascade-20260526"},
         {"type": "json_field_contains", "field": "prefetch", "contains": "Commands and verification:"},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "cargo test -q context_eval"},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "Next action:"},
+        {"type": "json_field_contains", "field": "prefetch", "contains": "run gates"},
         {"type": "json_field_contains", "field": "tool_items", "contains": "session_end"},
         {"type": "json_field_contains", "field": "tool_items", "contains": "handoff"},
         {"type": "json_field_min", "field": "diagnostics.transcript_sync_count", "min": 2},

@@ -137,6 +137,10 @@ enum ContextAssertion {
         field: String,
         contains: String,
     },
+    JsonFieldForbidsContains {
+        field: String,
+        contains: String,
+    },
     JsonFieldMin {
         field: String,
         min: f64,
@@ -929,6 +933,16 @@ fn evaluate_assertion(
                 ))
             }
         }
+        ContextAssertion::JsonFieldForbidsContains { field, contains } => {
+            let text = output_json_field_text(output, field)?;
+            if text.contains(contains) {
+                Err(format!(
+                    "json field {field:?} text unexpectedly contains {contains:?}"
+                ))
+            } else {
+                Ok(())
+            }
+        }
         ContextAssertion::JsonFieldMin { field, min } => {
             let value = output_json_field_value(output, field)?;
             let number = value
@@ -1380,6 +1394,26 @@ mod tests {
                 }
             )
             .is_ok()
+        );
+        assert!(
+            evaluate_assertion(
+                &output,
+                &ContextAssertion::JsonFieldForbidsContains {
+                    field: "tool_items".to_string(),
+                    contains: "OpenClaw-Stack/Honcho-Provider-Plan.md".to_string(),
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            evaluate_assertion(
+                &output,
+                &ContextAssertion::JsonFieldForbidsContains {
+                    field: "tool_items".to_string(),
+                    contains: "Ghostty Terminal".to_string(),
+                }
+            )
+            .is_err()
         );
         assert!(
             evaluate_assertion(

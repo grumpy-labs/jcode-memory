@@ -804,7 +804,7 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
                     "socket_path": server.socket_path,
                     "working_dir": "/tmp/project",
                     "context_limit": 8,
-                    "max_chars": 1200,
+                    "max_chars": 1500,
                     "item_max_chars": 160,
                 }
             )
@@ -816,6 +816,10 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
         self.assertIn("## Clio Context Packet v1", text)
         self.assertIn(
             "Current user request and latest correction override stored broker context",
+            text,
+        )
+        self.assertIn(
+            "For broad or ambiguous Vault/current-state questions",
             text,
         )
         self.assertIn("### Active Task", text)

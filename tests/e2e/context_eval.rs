@@ -26,7 +26,7 @@ async fn broker_eval_context_runs_locked_clio_super_session_suite() -> Result<()
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(report["suite"], "clio-super-session-v1");
     assert_eq!(report["passed"], true);
-    assert_eq!(report["probe_count"], 18);
+    assert_eq!(report["probe_count"], 20);
     assert_eq!(report["failed_count"], 0);
     assert_eq!(
         report["group_results"]["authority_conflict"]["passed"],
