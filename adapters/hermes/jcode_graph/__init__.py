@@ -1047,11 +1047,12 @@ class JcodeGraphMemoryProvider(MemoryProvider):
             )
         ):
             details.append(f"ref={item_source}")
+        has_top_level_span = item.get("line_start") is not None or item.get("line_end") is not None
         if item.get("line_start") is not None and item.get("line_end") is not None:
             details.append(f"lines={item['line_start']}-{item['line_end']}")
         elif item.get("line_start") is not None:
             details.append(f"line={item['line_start']}")
-        if isinstance(metadata, dict):
+        if isinstance(metadata, dict) and not has_top_level_span:
             if metadata.get("line") is not None:
                 details.append(f"line={metadata['line']}")
             elif metadata.get("start_line") is not None and metadata.get("end_line") is not None:

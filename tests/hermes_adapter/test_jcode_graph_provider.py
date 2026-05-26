@@ -711,6 +711,7 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
                     "slot": "authority",
                     "authority_class": "current_project_authority",
                     "why_included": "current canonical plan beats historical fork",
+                    "metadata": {"start_line": 1660, "end_line": 1712},
                 }
             ],
             "conflicts": [
@@ -778,6 +779,7 @@ class JcodeGraphMemoryProviderTests(unittest.TestCase):
             text,
         )
         self.assertIn("lines=1660-1712", text)
+        self.assertEqual(text.count("lines=1660-1712"), 1)
         self.assertNotIn("Fallback Memory", text)
         self.assertEqual(diagnostics["last_prefetch_item_count"], 4)
 
