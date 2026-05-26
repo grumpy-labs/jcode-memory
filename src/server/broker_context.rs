@@ -52,6 +52,25 @@ trait TranscriptMemoryExtractor {
     ) -> TranscriptExtractionFuture<'a>;
 }
 
+#[derive(Debug, Clone)]
+struct LineageSegmentTiming {
+    started_at: String,
+    ended_at: String,
+}
+
+impl LineageSegmentTiming {
+    fn from_session(session: &crate::session::Session) -> Self {
+        Self {
+            started_at: session
+                .created_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            ended_at: session
+                .updated_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }
+    }
+}
+
 struct SidecarTranscriptMemoryExtractor;
 
 impl TranscriptMemoryExtractor for SidecarTranscriptMemoryExtractor {
@@ -392,9 +411,13 @@ async fn broker_transcript_sync_event(
             .with_context(|| format!("session not found: {session_id}"))?
     };
 
-    let working_dir = {
+    let (working_dir, segment_timing) = {
         let agent_guard = agent.lock().await;
-        agent_guard.working_dir().map(str::to_string)
+        let session = agent_guard.session_snapshot();
+        (
+            agent_guard.working_dir().map(str::to_string),
+            Some(LineageSegmentTiming::from_session(&session)),
+        )
     };
 
     let manager = manager_for_working_dir(working_dir.as_deref());
@@ -407,6 +430,7 @@ async fn broker_transcript_sync_event(
         transcript,
         source,
         working_dir.as_deref(),
+        segment_timing.as_ref(),
         crate::memory::memory_sidecar_enabled(),
         &extractor,
     )
@@ -426,7 +450,7 @@ where
     E: TranscriptMemoryExtractor + ?Sized,
 {
     broker_transcript_sync_event_for_manager_with_gate(
-        id, session_id, manager, transcript, source, None, true, extractor,
+        id, session_id, manager, transcript, source, None, None, true, extractor,
     )
     .await
 }
@@ -438,6 +462,7 @@ async fn broker_transcript_sync_event_for_manager_with_gate<E>(
     transcript: &str,
     source: &str,
     working_dir: Option<&str>,
+    segment_timing: Option<&LineageSegmentTiming>,
     extraction_enabled: bool,
     extractor: &E,
 ) -> Result<ServerEvent>
@@ -467,6 +492,7 @@ where
         &session_id,
         source,
         working_dir,
+        segment_timing,
         transcript,
         &provenance_id,
     )?;
@@ -636,6 +662,7 @@ fn store_lineage_checkpoint_memory(
     session_id: &str,
     source: &str,
     working_dir: Option<&str>,
+    segment_timing: Option<&LineageSegmentTiming>,
     transcript: &str,
     provenance_id: &str,
 ) -> Result<Option<String>> {
@@ -663,6 +690,10 @@ fn store_lineage_checkpoint_memory(
     if let Some(path) = active_plan_path.as_deref() {
         content.push_str(&format!("Active plan path: {path}\n"));
     }
+    if let Some(timing) = segment_timing {
+        content.push_str(&format!("Started at: {}\n", timing.started_at));
+        content.push_str(&format!("Ended at: {}\n", timing.ended_at));
+    }
     content.push_str(&format!(
         "Source: {source}\n\
          Provenance memory: {provenance_id}\n\n\
@@ -683,6 +714,10 @@ fn store_lineage_checkpoint_memory(
     }
     if let Some(path) = active_plan_path.as_deref() {
         tags.push(format!("active-plan-path:{path}"));
+    }
+    if let Some(timing) = segment_timing {
+        tags.push(format!("started-at:{}", timing.started_at));
+        tags.push(format!("ended-at:{}", timing.ended_at));
     }
     let entry = MemoryEntry::new(MemoryCategory::Custom("checkpoint".to_string()), content)
         .with_source(format!("broker-lineage:{source}:{session_id}"))
@@ -3168,6 +3203,12 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
         if let Some(path) = tag_value(&memory.tags, "active-plan-path:") {
             metadata["active_plan_path"] = json!(path);
         }
+        if let Some(timestamp) = tag_value(&memory.tags, "started-at:") {
+            metadata["started_at"] = json!(timestamp);
+        }
+        if let Some(timestamp) = tag_value(&memory.tags, "ended-at:") {
+            metadata["ended_at"] = json!(timestamp);
+        }
     }
     BrokerContextItem {
         id: memory.id.clone(),
@@ -3803,6 +3844,10 @@ mod tests {
         std::fs::create_dir_all(&project_dir).expect("create project dir");
         let manager = MemoryManager::new().with_project_dir(&project_dir);
         let extractor = FakeTranscriptExtractor::new(Vec::new());
+        let segment_timing = LineageSegmentTiming {
+            started_at: "2026-05-26T12:00:00Z".to_string(),
+            ended_at: "2026-05-26T12:05:00Z".to_string(),
+        };
 
         let event = broker_transcript_sync_event_for_manager_with_gate(
             99,
@@ -3811,6 +3856,7 @@ mod tests {
             "User: We deployed 7036e23.\nAssistant: Next action is lineage checkpoints.",
             "hermes:pre_compress",
             Some(project_dir.to_string_lossy().as_ref()),
+            Some(&segment_timing),
             false,
             &extractor,
         )
@@ -3890,8 +3936,20 @@ mod tests {
                         .get("active_plan_path")
                         .and_then(|value| value.as_str())
                         == Some(expected_plan_path.as_str())
+                    && item
+                        .item
+                        .metadata
+                        .get("started_at")
+                        .and_then(|value| value.as_str())
+                        == Some("2026-05-26T12:00:00Z")
+                    && item
+                        .item
+                        .metadata
+                        .get("ended_at")
+                        .and_then(|value| value.as_str())
+                        == Some("2026-05-26T12:05:00Z")
             }),
-            "lineage packet should contain compact checkpoint item with surface/branch/project metadata, got {:?}",
+            "lineage packet should contain compact checkpoint item with surface/branch/project/timing metadata, got {:?}",
             packet.lineage
         );
         assert!(
@@ -3921,6 +3979,7 @@ mod tests {
             "Decision: hidden sync gate passed.\nNext action: run non-Vault restraint probe.",
             "hermes:pre_compress",
             Some(project_dir.to_string_lossy().as_ref()),
+            None,
             false,
             &extractor,
         )
@@ -3935,6 +3994,7 @@ mod tests {
                 &format!("user: smoke marker {index}\nassistant: acknowledged"),
                 "hermes:session_end",
                 Some(project_dir.to_string_lossy().as_ref()),
+                None,
                 false,
                 &extractor,
             )
@@ -3984,6 +4044,7 @@ mod tests {
             "User: Active Clio lineage.\nAssistant: Next action is active checkpoint work.",
             "hermes:pre_compress",
             Some(project_dir.to_string_lossy().as_ref()),
+            None,
             false,
             &extractor,
         )
