@@ -1710,6 +1710,21 @@ fn clio_conflict_group(item: &BrokerContextItem, source_path: Option<&str>) -> S
         text_haystack.push('\n');
         text_haystack.push_str(&value.to_ascii_lowercase());
     }
+    let source_truth_haystack = format!("{path}\n{text_haystack}");
+    if source_truth_haystack.contains("source of truth")
+        || source_truth_haystack.contains("vm 1111")
+        || source_truth_haystack.contains("vm1111")
+        || source_truth_haystack.contains("ct 1103")
+        || source_truth_haystack.contains("ct1103")
+        || source_truth_haystack.contains("mac vault")
+        || source_truth_haystack.contains("/users/rob/vault")
+        || source_truth_haystack.contains("/srv/obsidian/vault")
+        || source_truth_haystack.contains("/srv/hermes-jcode/vault")
+        || source_truth_haystack.contains("vault snapshot")
+        || source_truth_haystack.contains("copied snapshot")
+    {
+        return "source_of_truth".to_string();
+    }
     if text_haystack.contains("provider")
         || text_haystack.contains("honcho")
         || text_haystack.contains("surrealdb")
@@ -4285,6 +4300,53 @@ mod tests {
         assert_eq!(
             packet.conflicts[0].workflow_status.as_deref(),
             Some("historical")
+        );
+    }
+
+    #[test]
+    fn clio_context_packet_classifies_vault_snapshot_disagreement_as_source_of_truth() {
+        let stale_snapshot_note = BrokerContextItem {
+            id: "vault_chunk:stale-vault-snapshot".to_string(),
+            kind: "vault_chunk".to_string(),
+            scope: "vault".to_string(),
+            content_format: "markdown".to_string(),
+            title: Some("Mac and VM Vault snapshot disagreement".to_string()),
+            summary: Some("Mac Vault copy disagrees with VM 1111 canonical Vault.".to_string()),
+            content: Some(
+                "The copied CT 1103 broker snapshot disagrees with /srv/obsidian/Vault."
+                    .to_string(),
+            ),
+            tags: Vec::new(),
+            source: Some(
+                "vault://Archive/Vault-Snapshots/Mac-VM-CT-Vault-Conflict.md#snapshot".to_string(),
+            ),
+            score: Some(0.88),
+            origin: BrokerContextOrigin {
+                tool: Some("duckdb_broker_store".to_string()),
+                uri: Some(
+                    "vault://Archive/Vault-Snapshots/Mac-VM-CT-Vault-Conflict.md#snapshot"
+                        .to_string(),
+                ),
+                path: Some("Archive/Vault-Snapshots/Mac-VM-CT-Vault-Conflict.md".to_string()),
+                ..Default::default()
+            },
+            relevance: Some(BrokerContextRelevance {
+                query: Some("current Vault source of truth".to_string()),
+                retrieval_mode: Some("duckdb_broker_store".to_string()),
+                rank: Some(1),
+                ..Default::default()
+            }),
+            fragments: Vec::new(),
+            metadata: json!({"start_line": 3, "end_line": 12}),
+        };
+
+        let packet = clio_context_packet_from_items(&[stale_snapshot_note.clone()]);
+
+        assert_eq!(packet.conflicts.len(), 1);
+        assert_eq!(packet.conflicts[0].item.id, stale_snapshot_note.id);
+        assert_eq!(
+            packet.conflicts[0].conflict_group.as_deref(),
+            Some("source_of_truth")
         );
     }
 
