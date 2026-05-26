@@ -486,6 +486,7 @@
         {"type": "slot_non_empty", "slot": "lineage"},
         {"type": "slot_field_contains", "slot": "lineage", "field": "kind", "contains": "compression_checkpoint"},
         {"type": "slot_field_contains", "slot": "lineage", "field": "metadata.logical_super_session_id", "contains": "clio-super-session"},
+        {"type": "slot_field_contains", "slot": "lineage", "field": "why_included", "contains": "current plan files override checkpoint content"},
         {"type": "slot_field_contains", "slot": "lineage", "field": "content", "contains": "Next action"}
       ]
     },
