@@ -34,6 +34,9 @@ type TranscriptExtractionFuture<'a> =
 const BROKER_SEMANTIC_THRESHOLD: f32 = crate::memory::EMBEDDING_SIMILARITY_THRESHOLD;
 const BROKER_SEARCH_HIT_LIMIT: usize = 3;
 const BROKER_SKILL_SUMMARY_LIMIT: usize = 8;
+const BROKER_LINEAGE_CONTEXT_LIMIT: usize = 3;
+const BROKER_LINEAGE_TAG: &str = "broker-lineage";
+const BROKER_CHECKPOINT_TAG: &str = "broker-checkpoint";
 #[cfg(feature = "duckdb-storage")]
 const BROKER_DUCKDB_PATH_ENV: &str = "JCODE_BROKER_DUCKDB_PATH";
 #[cfg(feature = "duckdb-storage")]
@@ -397,6 +400,7 @@ async fn broker_transcript_sync_event(
         &manager,
         transcript,
         source,
+        working_dir.as_deref(),
         crate::memory::memory_sidecar_enabled(),
         &extractor,
     )
@@ -416,7 +420,7 @@ where
     E: TranscriptMemoryExtractor + ?Sized,
 {
     broker_transcript_sync_event_for_manager_with_gate(
-        id, session_id, manager, transcript, source, true, extractor,
+        id, session_id, manager, transcript, source, None, true, extractor,
     )
     .await
 }
@@ -427,6 +431,7 @@ async fn broker_transcript_sync_event_for_manager_with_gate<E>(
     manager: &MemoryManager,
     transcript: &str,
     source: &str,
+    working_dir: Option<&str>,
     extraction_enabled: bool,
     extractor: &E,
 ) -> Result<ServerEvent>
@@ -451,6 +456,14 @@ where
             "hermes-transcript".to_string(),
         ],
     )?;
+    let lineage_checkpoint_id = store_lineage_checkpoint_memory(
+        manager,
+        &session_id,
+        source,
+        working_dir,
+        transcript,
+        &provenance_id,
+    )?;
 
     let (derived_memory_ids, extraction_status) = extract_derived_memories(
         manager,
@@ -463,6 +476,9 @@ where
     )
     .await?;
     let mut memory_ids = vec![provenance_id.clone()];
+    if let Some(lineage_checkpoint_id) = lineage_checkpoint_id {
+        memory_ids.push(lineage_checkpoint_id);
+    }
     memory_ids.extend(derived_memory_ids.iter().cloned());
 
     Ok(ServerEvent::BrokerTranscriptSynced {
@@ -609,6 +625,126 @@ fn store_provenance_memory(
     manager.remember_project(entry)
 }
 
+fn store_lineage_checkpoint_memory(
+    manager: &MemoryManager,
+    session_id: &str,
+    source: &str,
+    working_dir: Option<&str>,
+    transcript: &str,
+    provenance_id: &str,
+) -> Result<Option<String>> {
+    let Some(checkpoint_kind) = checkpoint_kind_from_source(source) else {
+        return Ok(None);
+    };
+
+    let logical_super_session_id = logical_super_session_id(working_dir, session_id);
+    let title = checkpoint_title(checkpoint_kind);
+    let summary = compact_transcript_checkpoint(transcript);
+    let content = format!(
+        "{title}\n\
+         Logical super-session: {logical_super_session_id}\n\
+         Session segment: {session_id}\n\
+         Source: {source}\n\
+         Provenance memory: {provenance_id}\n\n\
+         Checkpoint summary:\n{summary}"
+    );
+    let entry = MemoryEntry::new(MemoryCategory::Custom("checkpoint".to_string()), content)
+        .with_source(format!("broker-lineage:{source}:{session_id}"))
+        .with_tags(vec![
+            BROKER_LINEAGE_TAG.to_string(),
+            BROKER_CHECKPOINT_TAG.to_string(),
+            format!("checkpoint-kind:{checkpoint_kind}"),
+            format!("logical-super-session:{logical_super_session_id}"),
+            format!("session-segment:{session_id}"),
+            format!("derived-from:{provenance_id}"),
+        ])
+        .with_trust(TrustLevel::Medium);
+    let checkpoint_id = manager.remember_project(entry)?;
+    link_derived_memories(manager, provenance_id, std::slice::from_ref(&checkpoint_id))?;
+    Ok(Some(checkpoint_id))
+}
+
+fn checkpoint_kind_from_source(source: &str) -> Option<&'static str> {
+    match source {
+        "hermes:pre_compress" => Some("compression"),
+        "hermes:session_end" => Some("session_end"),
+        _ => None,
+    }
+}
+
+fn checkpoint_title(checkpoint_kind: &str) -> &'static str {
+    match checkpoint_kind {
+        "compression" => "Hermes compression checkpoint",
+        "session_end" => "Hermes session-end checkpoint",
+        _ => "Hermes checkpoint",
+    }
+}
+
+fn logical_super_session_id(working_dir: Option<&str>, session_id: &str) -> String {
+    if working_dir
+        .map(|dir| dir.contains("Hermes-Honcho-LangGraph-Second-Brain"))
+        .unwrap_or(false)
+    {
+        return "clio-super-session".to_string();
+    }
+
+    let seed = working_dir
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+        .unwrap_or(session_id);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::{Hash, Hasher};
+    seed.hash(&mut hasher);
+    format!("jcode-super-session-{:016x}", hasher.finish())
+}
+
+fn compact_transcript_checkpoint(transcript: &str) -> String {
+    let mut lines: Vec<String> = transcript
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| checkpoint_line_has_artifact_signal(line))
+        .map(|line| line.chars().take(220).collect::<String>())
+        .collect();
+    if lines.is_empty() {
+        return "No artifact-trail lines detected; full transcript remains hidden behind provenance memory.".to_string();
+    }
+    if lines.len() > 8 {
+        lines = lines.split_off(lines.len() - 8);
+    }
+    let joined = lines.join("\n");
+    if joined.chars().count() <= 1_200 {
+        joined
+    } else {
+        joined.chars().take(1_200).collect()
+    }
+}
+
+fn checkpoint_line_has_artifact_signal(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("next action")
+        || lower.contains("decision")
+        || lower.contains("decided")
+        || lower.contains("failure")
+        || lower.contains("failed")
+        || lower.contains("error")
+        || lower.contains("blocked")
+        || lower.contains("commit")
+        || lower.contains("deployed")
+        || lower.contains("modified")
+        || lower.contains("created")
+        || lower.contains("updated")
+        || lower.contains("verified")
+        || lower.contains("passed")
+        || lower.contains("risk")
+        || line.contains("scripts/")
+        || line.contains("Cargo.toml")
+        || line.contains(".md")
+        || line.contains(".rs")
+        || line.contains(".py")
+        || line.trim_start().starts_with('$')
+}
+
 async fn extract_derived_memories(
     manager: &MemoryManager,
     transcript: &str,
@@ -629,7 +765,7 @@ async fn extract_derived_memories(
         .list_all()
         .unwrap_or_default()
         .into_iter()
-        .filter(|entry| entry.active && !is_provenance_memory(entry))
+        .filter(|entry| entry.active && !is_provenance_memory(entry) && !is_lineage_memory(entry))
         .map(|entry| entry.content)
         .collect();
 
@@ -850,6 +986,14 @@ fn collect_broker_memory_results_impl(
     let mut memories = Vec::new();
 
     if working_dir.is_some() {
+        append_recent_lineage_results(
+            &manager,
+            MemoryScope::Project,
+            "project",
+            limit,
+            &mut seen,
+            &mut memories,
+        )?;
         append_scoped_memory_results(
             &manager,
             MemoryScope::Project,
@@ -863,6 +1007,14 @@ fn collect_broker_memory_results_impl(
         )?;
     }
 
+    append_recent_lineage_results(
+        &manager,
+        MemoryScope::Global,
+        "global",
+        limit,
+        &mut seen,
+        &mut memories,
+    )?;
     append_scoped_memory_results(
         &manager,
         MemoryScope::Global,
@@ -877,6 +1029,49 @@ fn collect_broker_memory_results_impl(
 
     memories.truncate(limit);
     Ok(memories)
+}
+
+fn append_recent_lineage_results(
+    manager: &MemoryManager,
+    scope: MemoryScope,
+    scope_label: &str,
+    limit: usize,
+    seen: &mut HashSet<String>,
+    memories: &mut Vec<BrokerMemoryResult>,
+) -> Result<()> {
+    if memories.len() >= limit {
+        return Ok(());
+    }
+
+    let mut entries: Vec<MemoryEntry> = manager
+        .list_all_scoped(scope)?
+        .into_iter()
+        .filter(|entry| entry.active && !is_provenance_memory(entry) && is_lineage_memory(entry))
+        .collect();
+    sort_entries_by_updated_at(&mut entries);
+
+    for entry in entries.into_iter().take(BROKER_LINEAGE_CONTEXT_LIMIT) {
+        if memories.len() >= limit {
+            break;
+        }
+        if !seen.insert(entry.id.clone()) {
+            continue;
+        }
+        let rank = memories.len() + 1;
+        memories.push(BrokerMemoryResult {
+            memory: memory_context_item(entry, scope_label),
+            relevance: Some(BrokerContextRelevance {
+                query: None,
+                retrieval_mode: Some("lineage_checkpoint".to_string()),
+                score: None,
+                rank: Some(rank),
+                matched_terms: vec!["lineage".to_string(), "checkpoint".to_string()],
+                exact_match: Some(false),
+            }),
+        });
+    }
+
+    Ok(())
 }
 
 fn append_scoped_memory_results(
@@ -1072,6 +1267,16 @@ fn sort_entries_by_updated_at(entries: &mut [MemoryEntry]) {
 fn is_provenance_memory(entry: &MemoryEntry) -> bool {
     entry.tags.iter().any(|tag| tag == "broker-provenance")
         || matches!(&entry.category, MemoryCategory::Custom(category) if category == "provenance")
+}
+
+fn is_lineage_memory(entry: &MemoryEntry) -> bool {
+    entry.tags.iter().any(|tag| tag == BROKER_LINEAGE_TAG)
+        || matches!(&entry.category, MemoryCategory::Custom(category) if category == "checkpoint")
+}
+
+fn tag_value(tags: &[String], prefix: &str) -> Option<String> {
+    tags.iter()
+        .find_map(|tag| tag.strip_prefix(prefix).map(str::to_string))
 }
 
 fn memory_context_item(entry: MemoryEntry, scope: &str) -> BrokerMemoryContextItem {
@@ -2435,6 +2640,12 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
         .relevance
         .as_ref()
         .and_then(|relevance| relevance.score);
+    let is_lineage_checkpoint = memory.tags.iter().any(|tag| tag == BROKER_LINEAGE_TAG);
+    let kind = if is_lineage_checkpoint {
+        "compression_checkpoint"
+    } else {
+        "memory"
+    };
     let mut metadata = json!({
         "category": memory.category,
         "scope": memory.scope,
@@ -2446,9 +2657,17 @@ fn memory_broker_item(result: &BrokerMemoryResult, working_dir: Option<&str>) ->
     {
         metadata["retrieval_mode"] = json!(mode);
     }
+    if is_lineage_checkpoint {
+        metadata["logical_super_session_id"] =
+            json!(tag_value(&memory.tags, "logical-super-session:").unwrap_or_default());
+        metadata["session_segment_id"] =
+            json!(tag_value(&memory.tags, "session-segment:").unwrap_or_default());
+        metadata["checkpoint_kind"] =
+            json!(tag_value(&memory.tags, "checkpoint-kind:").unwrap_or_default());
+    }
     BrokerContextItem {
         id: memory.id.clone(),
-        kind: "memory".to_string(),
+        kind: kind.to_string(),
         scope: memory.scope.clone(),
         content_format: "plain_text".to_string(),
         title: Some(memory.category.clone()),
@@ -3040,7 +3259,9 @@ mod tests {
         assert_eq!(extraction_status, BrokerMemoryExtractionStatus::Extracted);
         assert_eq!(provenance_memory_ids.len(), 1);
         assert_eq!(derived_memory_ids.len(), 1);
-        assert_eq!(memory_ids.len(), 2);
+        assert_eq!(memory_ids.len(), 3);
+        assert!(memory_ids.contains(&provenance_memory_ids[0]));
+        assert!(memory_ids.contains(&derived_memory_ids[0]));
         assert_eq!(extractor.seen_existing(), Vec::<String>::new());
 
         let context = collect_broker_memories(
@@ -3063,6 +3284,73 @@ mod tests {
                 .iter()
                 .all(|memory| memory.id != provenance_memory_ids[0]),
             "provenance memory should stay hidden by default, got {context:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn transcript_sync_stores_lineage_checkpoint_for_packet_lineage() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = TestHome::new();
+        let project_dir = _env.path().join("Hermes-Honcho-LangGraph-Second-Brain");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let manager = MemoryManager::new().with_project_dir(&project_dir);
+        let extractor = FakeTranscriptExtractor::new(Vec::new());
+
+        let event = broker_transcript_sync_event_for_manager_with_gate(
+            99,
+            "session_lineage".to_string(),
+            &manager,
+            "User: We deployed 7036e23.\nAssistant: Next action is lineage checkpoints.",
+            "hermes:pre_compress",
+            Some(project_dir.to_string_lossy().as_ref()),
+            false,
+            &extractor,
+        )
+        .await
+        .expect("sync transcript");
+
+        let ServerEvent::BrokerTranscriptSynced { memory_ids, .. } = event else {
+            panic!("expected broker transcript synced event");
+        };
+        assert_eq!(memory_ids.len(), 2);
+
+        let memory_results = collect_broker_memory_results(
+            Some(project_dir.to_string_lossy().as_ref()),
+            Some("lineage checkpoint 7036e23 next action"),
+            8,
+            false,
+        )
+        .expect("collect broker memory results");
+        let items: Vec<BrokerContextItem> = memory_results
+            .iter()
+            .map(|result| memory_broker_item(result, Some(project_dir.to_string_lossy().as_ref())))
+            .collect();
+        let packet = clio_context_packet_from_items(&items);
+
+        assert!(
+            packet.lineage.iter().any(|item| {
+                item.item.kind == "compression_checkpoint"
+                    && item
+                        .item
+                        .summary
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("Hermes compression checkpoint")
+                    && item
+                        .item
+                        .metadata
+                        .get("logical_super_session_id")
+                        .and_then(|value| value.as_str())
+                        == Some("clio-super-session")
+                    && item
+                        .item
+                        .metadata
+                        .get("session_segment_id")
+                        .and_then(|value| value.as_str())
+                        == Some("session_lineage")
+            }),
+            "lineage packet should contain compact checkpoint item, got {:?}",
+            packet.lineage
         );
     }
 
