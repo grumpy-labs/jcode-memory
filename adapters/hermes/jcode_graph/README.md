@@ -5,6 +5,11 @@ Hermes owns the provider lifecycle, prompt injection, and compression hooks;
 jcode owns memory ingestion, derived extraction, typed context assembly,
 retrieval metadata, and provenance.
 
+For Rob's Clio deployment, `jcode_graph` is only the Hermes provider edge. The
+durable context service is the jcode broker API backed by DuckDB on CT `1103`.
+The current gate/adoption/rollback posture is documented in
+`docs/CLIO_CONTEXT_PROVIDER_GATES.md`.
+
 Install target for local testing:
 
 ```bash
@@ -45,6 +50,8 @@ Useful config keys:
 - `turn_buffer_limit`: recent completed turns retained as fallback when Hermes does not pass messages to `on_session_end`.
 - `turn_buffer_max_chars`: per-user/per-assistant field budget for the fallback turn buffer.
 - `tool_inventory_limit`: maximum broker tool names shown in the compact tool inventory section.
+- `packet_slot_item_limit`: maximum Clio Context Packet v1 items rendered per slot.
+- `packet_slot_max_chars`: maximum rendered characters per packet slot.
 
 Current capabilities:
 
@@ -57,15 +64,18 @@ Current capabilities:
 - Syncs compression/session-end transcripts via `broker_transcript_sync`.
 - Reports lightweight diagnostics through `provider.diagnostics()` for smoke checks.
 
-Normal prefetch is formatted in this order:
+Normal Clio Context Packet v1 prefetch is formatted in this order:
 
-1. Memories
-2. Goals and Todos
-3. Evidence (`session_search_hit` and `conversation_search_hit`)
-4. Skill Candidates
-5. Artifacts
-6. Broker Tools
-7. Other Context
+1. Active Task
+2. Authority
+3. Conflicts
+4. Lineage
+5. Vault Evidence
+6. Durable Memory
+7. Session Evidence
+8. Artifact Refs
+9. Skill Hints
+10. Tool Hints
 
 Smoke test after installing into a test Hermes profile:
 
@@ -113,5 +123,7 @@ JCODE_BROKER_SOCKET="$HOME/.jcode-memory/runtime/jcode-broker.sock" \
 
 Not implemented yet:
 
-- Graph database persistence.
-- Promotion/consolidation policies for search hits.
+- Automatic alternative-provider promotion. Provider replacement requires the
+  locked gate/bake-off policy in `docs/CLIO_CONTEXT_PROVIDER_GATES.md`.
+- Automatic CT `1103`/CT `1150` Git pull deployment. Live rollout remains the
+  dry-run-first manual lane in `docs/JCODE_MEMORY_DEPLOYMENT.md`.
