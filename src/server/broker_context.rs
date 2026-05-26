@@ -3313,6 +3313,10 @@ mod tests {
             panic!("expected broker transcript synced event");
         };
         assert_eq!(memory_ids.len(), 2);
+        assert_ne!(
+            memory_ids[0], memory_ids[1],
+            "checkpoint must be a distinct memory, not a dedup reinforcement of provenance"
+        );
 
         let memory_results = collect_broker_memory_results(
             Some(project_dir.to_string_lossy().as_ref()),

@@ -925,6 +925,10 @@ async fn broker_transcript_sync_stores_provenance_and_skips_without_sidecar() ->
         assert_eq!(memory_ids.len(), 2);
         assert_eq!(provenance_memory_ids.len(), 1);
         assert!(memory_ids.contains(&provenance_memory_ids[0]));
+        assert_ne!(
+            memory_ids[0], memory_ids[1],
+            "checkpoint must not dedup into the hidden provenance memory"
+        );
         assert!(derived_memory_ids.is_empty());
         assert_eq!(
             extraction_status,

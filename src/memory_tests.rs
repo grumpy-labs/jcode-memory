@@ -483,6 +483,43 @@ fn goal_memory_upsert_skips_embedding_generation() {
 }
 
 #[test]
+fn operational_metadata_memories_skip_embedding_generation_even_when_enabled() {
+    let _guard = crate::storage::lock_test_env();
+    let old = std::env::var("JCODE_TEST_ALLOW_MEMORY_EMBEDDINGS").ok();
+    crate::env::set_var("JCODE_TEST_ALLOW_MEMORY_EMBEDDINGS", "1");
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let manager = MemoryManager::new().with_project_dir("/tmp/jcode-operational-memory-policy");
+
+        let fact = MemoryEntry::new(MemoryCategory::Fact, "normal durable facts can embed");
+        assert!(
+            manager.should_generate_embedding_for_entry(&fact),
+            "ordinary durable facts remain eligible for embeddings"
+        );
+
+        for category in ["goal", "provenance", "checkpoint"] {
+            let entry = MemoryEntry::new(
+                MemoryCategory::Custom(category.to_string()),
+                "operational metadata should stay out of semantic dedup",
+            );
+            assert!(
+                !manager.should_generate_embedding_for_entry(&entry),
+                "{category} memories should not be embedded or deduped"
+            );
+        }
+    }));
+
+    match old {
+        Some(value) => crate::env::set_var("JCODE_TEST_ALLOW_MEMORY_EMBEDDINGS", value),
+        None => crate::env::remove_var("JCODE_TEST_ALLOW_MEMORY_EMBEDDINGS"),
+    }
+
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
 fn scoped_retrieval_respects_project_vs_global() {
     with_temp_home(|_home| {
         let manager = MemoryManager::new().with_project_dir("/tmp/jcode-scope-test");

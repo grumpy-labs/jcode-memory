@@ -497,7 +497,11 @@ impl MemoryManager {
             return false;
         }
 
-        !matches!(&entry.category, MemoryCategory::Custom(category) if category == "goal")
+        !matches!(
+            &entry.category,
+            MemoryCategory::Custom(category)
+                if category == "goal" || category == "provenance" || category == "checkpoint"
+        )
     }
 
     fn find_duplicate_in_graph(
