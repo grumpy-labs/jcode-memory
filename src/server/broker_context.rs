@@ -1736,7 +1736,10 @@ fn clio_why_included(slot: &str, authority_class: &str, rank: Option<usize>) -> 
     let rank = rank.map(|rank| format!(" rank {rank}")).unwrap_or_default();
     match slot {
         "authority" => format!("current authority context; class={authority_class}{rank}"),
-        "conflicts" => format!("currentness/conflict note; class={authority_class}{rank}"),
+        "conflicts" => format!(
+            "currentness/conflict note; prefer current authority/current correction; \
+             mention uncertainty if this conflict affects the answer; class={authority_class}{rank}"
+        ),
         "active_task" => format!("active task state; class={authority_class}{rank}"),
         "lineage" => format!("super-session lineage evidence; class={authority_class}{rank}"),
         "durable_memory" => format!("durable memory evidence; class={authority_class}{rank}"),
@@ -4216,6 +4219,9 @@ mod tests {
             packet.conflicts[0].authority_class.as_deref(),
             Some("historical_context")
         );
+        let conflict_why = packet.conflicts[0].why_included.as_deref().unwrap_or("");
+        assert!(conflict_why.contains("prefer current authority"));
+        assert!(conflict_why.contains("mention uncertainty"));
         assert_eq!(packet.tool_hints.len(), 1);
         assert_eq!(
             packet.tool_hints[0].authority_class.as_deref(),

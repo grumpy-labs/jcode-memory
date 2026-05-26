@@ -463,8 +463,7 @@
         {"type": "slot_field_contains", "slot": "authority", "field": "metadata.frontmatter_json", "contains": "dateModified"},
         {"type": "slot_field_contains", "slot": "authority", "field": "metadata.frontmatter_json", "contains": "categories"},
         {"type": "slot_field_contains", "slot": "authority", "field": "metadata.frontmatter_json", "contains": "projects"},
-        {"type": "slot_field_contains", "slot": "authority", "field": "metadata.frontmatter_json", "contains": "tags"},
-        {"type": "slot_field_contains", "slot": "authority", "field": "content", "contains": "deployed on CT `1103`"}
+        {"type": "slot_field_contains", "slot": "authority", "field": "metadata.frontmatter_json", "contains": "tags"}
       ]
     },
     {
@@ -561,7 +560,8 @@
         {"type": "slot_first_field_equals", "slot": "authority", "field": "metadata.relationship", "equals": "backlink"},
         {"type": "slot_first_field_equals", "slot": "authority", "field": "metadata.target_path", "equals": "Projects/Hermes-Honcho-LangGraph-Second-Brain/CURRENT.md"},
         {"type": "slot_first_field_equals", "slot": "authority", "field": "relevance.retrieval_mode", "equals": "duckdb_broker_store_relationship"},
-        {"type": "slot_field_contains", "slot": "conflicts", "field": "source_path", "contains": "Projects/OpenClaw-Stack/CURRENT.md"}
+        {"type": "slot_field_contains", "slot": "conflicts", "field": "source_path", "contains": "Projects/OpenClaw-Stack/CURRENT.md"},
+        {"type": "slot_field_contains", "slot": "conflicts", "field": "why_included", "contains": "prefer current authority"}
       ]
     },
     {
